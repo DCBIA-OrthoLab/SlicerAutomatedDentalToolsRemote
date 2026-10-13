@@ -330,7 +330,7 @@ Précision importante : les pseudonymes HMAC sont vulnérables à une **attaque 
 
 ## 7. Contraintes techniques dans l'environnement Slicer
 
-Votre `claude.md` limite les dépendances client à `requests`, `slicer`, `qt`, `vtk`, `os`, `tempfile`. **Cette contrainte n'est pas tenable pour de la dé-identification** - il faut la desserrer de façon contrôlée.
+Le client limite ses dépendances à `requests`, `slicer`, `qt`, `vtk`, `os`, `tempfile`. **Cette contrainte n'est pas tenable pour de la dé-identification** : il faut la desserrer de façon contrôlée.
 
 ### 7.1 Ce dont vous disposez déjà
 
