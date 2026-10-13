@@ -30,16 +30,16 @@ Le gros du travail n'est pas cryptographique. Il est dans l'**inventaire exhaust
 
 ### 1.2 Le préalable réglementaire
 
-<cite index="14-1">UNC-Chapel Hill dispose d'un cadre spécifique de reclassification de la PHI en « Research Health Information » (RHI), via trois voies : une autorisation HIPAA approuvée par l'IRB, un waiver partiel, ou un waiver complet d'autorisation.</cite> <cite index="15-1">À UNC-Chapel Hill, l'Office of Human Research Ethics (OHRE) est l'instance désignée pour statuer sur les demandes de waiver ou d'altération de l'exigence d'autorisation.</cite>
+UNC-Chapel Hill dispose d'un cadre spécifique de reclassification de la PHI en « Research Health Information » (RHI), via trois voies : une autorisation HIPAA approuvée par l'IRB, un waiver partiel, ou un waiver complet d'autorisation. À UNC-Chapel Hill, l'Office of Human Research Ethics (OHRE) est l'instance désignée pour statuer sur les demandes de waiver ou d'altération de l'exigence d'autorisation.
 
 Concrètement, **avant le premier transfert** :
 
 - Protocole IRB approuvé par l'OHRE, couvrant explicitement le transfert vers un serveur de calcul distant
 - Autorisation HIPAA signée, ou waiver
-- <cite index="12-1">Formation CITI complétée, module « Research and HIPAA Privacy Protections » inclus - cette formation s'ajoute à la formation HIPAA de UNC Health Care et ne la remplace pas</cite>
+- Formation CITI complétée, module « Research and HIPAA Privacy Protections » inclus - cette formation s'ajoute à la formation HIPAA de UNC Health Care et ne la remplace pas
 - Validation de l'architecture par le UNC Information Security Office
 
-Point important : <cite index="11-1">selon les SOP de l'IRB de UNC-Chapel Hill, pour être considérées comme dé-identifiées, les 18 catégories d'identifiants HIPAA doivent être supprimées - y compris toutes les dates, comme les dates d'intervention, et toutes les images photographiques.</cite> C'est une lecture stricte, et elle a deux conséquences directes sur votre pipeline : **aucune date ne survit au Safe Harbor** (voir §3.6), et les **images faciales sont explicitement visées** (voir §3.7).
+Point important : selon les SOP de l'IRB de UNC-Chapel Hill, pour être considérées comme dé-identifiées, les 18 catégories d'identifiants HIPAA doivent être supprimées - y compris toutes les dates, comme les dates d'intervention, et toutes les images photographiques. C'est une lecture stricte, et elle a deux conséquences directes sur votre pipeline : **aucune date ne survit au Safe Harbor** (voir §3.6), et les **images faciales sont explicitement visées** (voir §3.7).
 
 ### 1.3 Choisir un régime - par outil, pas globalement
 
@@ -172,7 +172,7 @@ La clé HMAC est un secret détenu par UNC (voir §6). Générer des UIDs aléat
 
 ### 3.6 Le traitement des dates - le point le plus mal compris
 
-<cite index="11-1">La lecture de l'IRB de UNC est explicite : toutes les dates doivent être supprimées, y compris les dates d'intervention.</cite> Sous le régime A, il n'y a pas d'aménagement : `StudyDate`, `SeriesDate`, `AcquisitionDate`, `ContentDate`, `PatientBirthDate`, et leurs équivalents `*Time` disparaissent. Seule l'**année** peut survivre dans certaines lectures, et l'**âge** en années (agrégé à « 90+ » au-delà de 89 ans).
+La lecture de l'IRB de UNC est explicite : toutes les dates doivent être supprimées, y compris les dates d'intervention. Sous le régime A, il n'y a pas d'aménagement : `StudyDate`, `SeriesDate`, `AcquisitionDate`, `ContentDate`, `PatientBirthDate`, et leurs équivalents `*Time` disparaissent. Seule l'**année** peut survivre dans certaines lectures, et l'**âge** en années (agrégé à « 90+ » au-delà de 89 ans).
 
 **Le date shifting - décaler toutes les dates d'un patient d'un offset aléatoire fixe, ce qui préserve les intervalles - ne relève PAS du Safe Harbor.** C'est une technique excellente et largement utilisée, mais elle conserve de l'information temporelle et relève donc soit du Limited Data Set (régime B), soit d'une Expert Determination. Ne la présentez jamais comme du Safe Harbor à votre IRB : c'est une erreur fréquente et elle sera relevée.
 
@@ -185,7 +185,7 @@ Si votre outil a besoin d'intervalles temporels (suivi longitudinal, prédiction
 2. **Masquage de régions fixes** connues par constructeur/protocole - fiable si vos protocoles d'acquisition sont standardisés, ce qui est souvent le cas en recherche.
 3. **OCR** (`pytesseract`, `easyocr`) - dernier recours, coûteux, jamais fiable à 100 %. À ne jamais utiliser seul comme unique garantie.
 
-**Visage reconstructible.** C'est le point critique pour vous, puisque vous manipulez des volumes crâniens. Un CT ou une IRM de la tête permet la reconstruction d'une surface faciale identifiable par reconnaissance automatique. <cite index="11-1">L'IRB de UNC vise explicitement « toutes les images photographiques » dans son énumération des 18 identifiants.</cite>
+**Visage reconstructible.** C'est le point critique pour vous, puisque vous manipulez des volumes crâniens. Un CT ou une IRM de la tête permet la reconstruction d'une surface faciale identifiable par reconnaissance automatique. L'IRB de UNC vise explicitement « toutes les images photographiques » dans son énumération des 18 identifiants.
 
 | Technique | Ce qui est détruit | Coût | Compatible avec un outil orthognathique ? |
 |---|---|---|---|
@@ -320,7 +320,7 @@ Trois secrets vivent sur le poste client, avec des sensibilités différentes :
 | **Jeton / identifiants d'accès au serveur** | Authentification | Trousseau OS également ; idéalement remplacé par un flow OIDC où rien de durable n'est stocké hors refresh token |
 | **Table de correspondance** | Retrouver le patient à partir du pseudonyme | Ne vit **pas** dans le module Slicer. Système séparé, contrôlé par UNC, accès restreint - c'est le rôle typique d'un *honest broker* |
 
-<cite index="13-1">Le rôle d'honest broker consiste précisément à faire écran entre l'investigateur et les informations identifiantes des sujets, en générant ou recevant un jeu de données puis en le dépouillant de ses identifiants.</cite> Si UNC dispose d'un tel service, appuyez-vous dessus : la table de correspondance n'est alors ni votre problème ni votre responsabilité, ce qui est une excellente nouvelle.
+Le rôle d'honest broker consiste précisément à faire écran entre l'investigateur et les informations identifiantes des sujets, en générant ou recevant un jeu de données puis en le dépouillant de ses identifiants. Si UNC dispose d'un tel service, appuyez-vous dessus : la table de correspondance n'est alors ni votre problème ni votre responsabilité, ce qui est une excellente nouvelle.
 
 **Erreurs à ne pas commettre** : dériver la clé HMAC d'une constante du code (annule tout l'intérêt) ; utiliser la même clé pour tous les établissements (permet la corrélation croisée) ; stocker la clé à côté des données pseudonymisées.
 
