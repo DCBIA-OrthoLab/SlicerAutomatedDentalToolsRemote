@@ -1026,13 +1026,13 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
     def _applyServerSettings(self, url: str, token: str) -> None:
         """Make this deployment the one every other module talks to.
 
-        `verify_tls` is deliberately left as it was rather than forced to
-        False. It is irrelevant to an `http://localhost` URL, and turning it
-        off here would silently disable certificate checking for whatever
-        `https://` server the user points at next.
+        Certificate verification is not among the things saved here, and
+        cannot be: it is not a setting (see config.VERIFY_TLS). It is also
+        irrelevant to the `http://localhost` URL this writes most of the time,
+        since `requests` never consults it without TLS to verify.
         """
         client = get_client()
-        save_overrides(url, token, client.verify_tls, client.timeout)
+        save_overrides(url, token, client.timeout)
         client.configure(server_url=url, token=token)
         self._log(_("Saved {0} as the server used by every module.").format(url))
 

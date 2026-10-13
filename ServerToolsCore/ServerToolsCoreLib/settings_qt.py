@@ -27,19 +27,26 @@ def load_overrides() -> dict:
         overrides["server_url"] = str(settings.value(_KEY_SERVER_URL))
     if settings.contains(_KEY_API_TOKEN):
         overrides["token"] = str(settings.value(_KEY_API_TOKEN))
-    if settings.contains(_KEY_VERIFY_TLS):
-        overrides["verify_tls"] = bool(settings.value(_KEY_VERIFY_TLS, True))
+    # `verify_tls` is deliberately NOT read back. It was a saved setting until
+    # 2026-10-13, and a machine that had stored False would otherwise keep
+    # certificate verification off for ever -- the one setting a user must not
+    # be able to turn off on a client that sends medical images. `config.py`
+    # owns it now, and a stale key in the file decides nothing.
     if settings.contains(_KEY_TIMEOUT):
         overrides["timeout"] = int(settings.value(_KEY_TIMEOUT, 600))
     return overrides
 
 
-def save_overrides(server_url: str, token: str, verify_tls: bool, timeout: int) -> None:
+def save_overrides(server_url: str, token: str, timeout: int) -> None:
+    """Persist what a user may change. Certificate verification is not in that
+    set -- see config.VERIFY_TLS."""
     settings = qt.QSettings()
     settings.setValue(_KEY_SERVER_URL, server_url)
     settings.setValue(_KEY_API_TOKEN, token)
-    settings.setValue(_KEY_VERIFY_TLS, verify_tls)
     settings.setValue(_KEY_TIMEOUT, timeout)
+    # Drop the key this used to write, so a value an older client saved stops
+    # sitting in the file looking as though it still decided something.
+    settings.remove(_KEY_VERIFY_TLS)
     settings.sync()
 
 
