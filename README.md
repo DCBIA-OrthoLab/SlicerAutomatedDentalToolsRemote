@@ -218,20 +218,20 @@ Two modules carry no panel of their own and sit in the
 
 ### Legacy command-line modules
 
-These directories are the CLI modules of the former local extension. They are
-still built, so they appear under `Automated Dental Tools.Advanced`, but the
-panels above no longer drive them — the sequencing they existed for is the
-server's now. Three are still in use.
+These three directories are CLI modules of the former local extension that the
+panels above still drive. They are built, so they appear under
+`Automated Dental Tools.Advanced`.
 
-| Name | Description | Still used |
-|------|-------------|------------|
-| [Agent_CLI](Agent_CLI) | Routes a request in plain language to the right tool, extracts its parameters and builds the command to run. | yes, by `Agent` |
-| [CNE_CLI](CNE_CLI) | Runs the clinical-note summarization and builds the dashboard. | yes, by `CNE` |
-| [MRI2CBCT_CLI](MRI2CBCT_CLI) | Orientation, resampling, approximation, left/right and TMJ cropping, and registration steps of the MRI-to-CBCT chain. | yes, by `MRI2CBCT` |
-| [ALI_CBCT](ALI_CBCT) / [ALI_IOS](ALI_IOS) | Landmark identification on CBCT and on intraoral scans. | no — see `ALI` |
-| [ASO_CBCT](ASO_CBCT) / [ASO_IOS](ASO_IOS) | Standardized orientation of CBCT and of intraoral scans. | no — see `ASO` |
-| [AREG_CBCT](AREG_CBCT) / [AREG_IOS](AREG_IOS) / [AREG_IOSCBCT](AREG_IOSCBCT) | Registration of CBCT, of intraoral scans, and across the two. | no — see `AReg` |
-| [VFACE_CLI](VFACE_CLI) | Facial asymmetry classification from linear and angular measurements. | no — see `VFACE` |
+| Name | Description | Driven by |
+|------|-------------|-----------|
+| [Agent_CLI](Agent_CLI) | Routes a request in plain language to the right tool, extracts its parameters and builds the command to run. | `Agent` |
+| [CNE_CLI](CNE_CLI) | Runs the clinical-note summarization and builds the dashboard. | `CNE` |
+| [MRI2CBCT_CLI](MRI2CBCT_CLI) | Orientation, resampling, approximation, left/right and TMJ cropping, and registration steps of the MRI-to-CBCT chain. | `MRI2CBCT` |
+
+The CLI modules of the other tools — landmark identification, orientation,
+registration and the asymmetry classification — are gone: the sequencing they
+existed for is the server's now, and they had already been dropped from the
+build, so nothing shipped them and nothing imported them.
 
 ### Features shared by every server-backed panel
 

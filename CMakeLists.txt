@@ -47,12 +47,14 @@ add_subdirectory(SurgMovPred)
 add_subdirectory(Crown_Seg)
 add_subdirectory(VISU)
 add_subdirectory(ExampleTool)
-# The CLI modules of the former local extension are deliberately NOT built.
-# Nothing shipped here calls them: every remaining lookup of ALI_CBCT, ASO_*,
-# AREG_* and VFACE_CLI lives in AREG/AREG_Method/ and VFACE/VFACE_utils/, which
-# their own CMakeLists do not package either. The sequencing they existed for is
-# the server's now, so building them would only add dead modules to the user's
-# Slicer.
+# The CLI modules of the former local extension used to sit here, unbuilt. They
+# have been deleted: nothing shipped called them, nothing imported them, and an
+# unbuilt directory is weight in the clone rather than a module anyone could
+# reach. The sequencing they existed for is the server's now.
+#
+# The names survive as STRINGS -- the server's tools are called ALI_CBCT, ASO
+# and AREG_CBCT -- in AREG/AREG_Method/ and VFACE/VFACE_utils/, which is a tool
+# being named over the wire and not a directory being looked for.
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------
