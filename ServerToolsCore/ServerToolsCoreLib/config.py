@@ -7,7 +7,18 @@ production token — override these locally, or replace them at build time.
 
 SERVER_URL = "http://localhost:8000"
 API_TOKEN = "dev-token"
-VERIFY_TLS = False
+# Certificate verification is ON, and it is deliberately not a user setting.
+# This client sends medical images and an API key, and TLS without verification
+# protects neither: it encrypts the traffic to whoever answered, which on a
+# shared network is not necessarily the server. The standard deployment puts
+# `tailscale serve` in front of the server, which fetches and renews a
+# publicly-signed certificate, so True needs nothing configured here.
+#
+# Against a certificate no public authority signed, set this to the PATH of that
+# certificate: `requests` accepts a file here and verifies against it alone.
+# That is a source edit on purpose -- no panel offers it, and a value saved by
+# an older client is ignored (see settings_qt.load_overrides).
+VERIFY_TLS = True
 TIMEOUT = 600
 
 # How many connections a single file's transfer uses at once (see transfer.py).

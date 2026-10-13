@@ -65,9 +65,11 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         self.tokenEdit.setEchoMode(qt.QLineEdit.Password)
         formLayout.addRow(design.required_label(_("API key")), self.tokenEdit)
 
-        self.verifyTlsCheck = qt.QCheckBox()
-        self.verifyTlsCheck.setToolTip(_("Disable only for local development against a non-HTTPS server."))
-        formLayout.addRow(design.section_title(_("Verify TLS")), self.verifyTlsCheck)
+        # Shown rather than omitted, so nobody hunts for the check box that was
+        # here: certificate verification is not a setting any more. See
+        # config.VERIFY_TLS for why, and for the one case that needs a path.
+        formLayout.addRow(design.section_title(_("Verify TLS")),
+                          design.hint_label(_("Always on - this client sends medical images.")))
 
         self.timeoutSpin = qt.QSpinBox()
         self.timeoutSpin.setRange(1, 3600)
@@ -100,7 +102,6 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         one was applied at startup, otherwise config.py's defaults."""
         self.urlEdit.text = self.client.server_url
         self.tokenEdit.text = self.client.token
-        self.verifyTlsCheck.checked = self.client.verify_tls
         self.timeoutSpin.value = self.client.timeout
         self._refreshStatus()
 
@@ -111,12 +112,11 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
             return
 
         token = self.tokenEdit.text
-        verify_tls = self.verifyTlsCheck.checked
         timeout = self.timeoutSpin.value
 
-        save_overrides(server_url, token, verify_tls, timeout)
-        self.client.configure(server_url=server_url, token=token, verify_tls=verify_tls, timeout=timeout)
-        logger.info("Server settings saved: url=%s verify_tls=%s timeout=%s", server_url, verify_tls, timeout)
+        save_overrides(server_url, token, timeout)
+        self.client.configure(server_url=server_url, token=token, timeout=timeout)
+        logger.info("Server settings saved: url=%s timeout=%s", server_url, timeout)
         slicer.util.showStatusMessage(_("Server settings saved."), 3000)
         self._refreshStatus()
 
