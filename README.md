@@ -34,13 +34,16 @@ in [SECURITY.md](SECURITY.md) but is **not yet implemented**.
 
 Consequences you must accept before using this extension on patient data:
 
-- Out of the box the client points at `http://localhost:8000` with a development
+- Out of the box the client points at a loopback address with a development
   token, so nothing leaves the machine until you change it. Set the address in
   the **Server Tools Settings** module, and point it only at a server you or
-  your institution control.
+  your institution control. See
+  [Connecting this client to a server](#connecting-this-client-to-a-server).
 - TLS certificate verification is **off** by default (`VERIFY_TLS = False` in
-  `ServerToolsCore/ServerToolsCoreLib/config.py`). Turn it on before sending
-  anything over a network you do not control.
+  `ServerToolsCore/ServerToolsCoreLib/config.py`). Before sending anything over
+  a network you do not control, either put the server on a private encrypted
+  mesh or turn verification on — which takes more than a `True`, see
+  [Connecting this client to a server](#connecting-this-client-to-a-server).
 - De-identify your data **before** selecting it, or confine use to data that
   carries no protected health information.
 - Check that the arrangement between your institution and whoever operates the
@@ -49,6 +52,88 @@ Consequences you must accept before using this extension on patient data:
 `MRI2CBCT` is the one imaging module not yet ported to the server: it installs
 nnU-Net into Slicer's Python environment and downloads its model on first use.
 `CNE` likewise installs `llama-cpp-python` and downloads a language model.
+
+---
+
+## Connecting this client to a server
+
+Installing and sharing a server is the server repository's subject —
+[VISOR-serve's README](https://github.com/DCBIA-OrthoLab/VISOR-serve#connecting-a-workstation)
+covers joining a workstation to the tailnet, on Ubuntu, Windows and macOS. What
+follows is only what happens on this side of the wire.
+
+### The normal case: a server behind `tailscale serve`
+
+The standard deployment keeps the server on loopback in plain HTTP and puts
+`tailscale serve` in front of it as the TLS terminator, which fetches and
+renews its own certificate. So the address is `https://<name>.<tailnet>.ts.net`
+and that certificate is signed by a public authority. In **Server Tools
+Settings**, this means:
+
+- **URL** — the `https://` address printed at the end of the server install;
+- **Token** — the server's API token, never its admin token;
+- **Verify TLS** — **on**, and there is nothing else to configure. The authority
+  is already in the certificate bundle `requests` ships, so verification needs
+  no file and no environment variable.
+
+A device that has not joined the tailnet cannot reach the address at all, which
+is the access control; removing it from the Tailscale admin console is how
+access is withdrawn.
+
+> `VERIFY_TLS` still defaults to `False` in `config.py`, which predates that
+> deployment shape. Against a server fronted by `tailscale serve` there is no
+> reason to leave it off.
+
+### Where the address and the token live, and which one wins
+
+Two layers, and the second wins:
+
+| | |
+|---|---|
+| `ServerToolsCore/ServerToolsCoreLib/config.py` | the compiled-in defaults |
+| **Server Tools Settings** | what you saved in the panel, stored by Slicer per installation |
+
+`settings_qt.apply_saved_overrides` runs at Slicer startup and lays the saved
+values over the defaults, so **editing `config.py` changes nothing on a machine
+where that panel has ever been saved**. It is the first thing to check when an
+edit to `config.py` appears to be ignored. `settings_qt.clear_overrides()`
+removes the saved group and gives `config.py` the last word again.
+
+### Publishing a server from Slicer Cloud instead
+
+**Slicer Cloud** can start a server on this machine, and asks under *Network
+access* which address to publish it on. The choice decides who can reach it:
+
+| Choice | Who reaches it |
+|---|---|
+| This computer only | nobody else — the default, and it keeps the server off the network entirely |
+| an interface named `tailscale`, `wg`, `tun` or `zt`, shown as *private network, encrypted* | the machines in that mesh, over the mesh's own encryption |
+| an ordinary interface, shown as *local network* | anyone on that network |
+| Every network on this machine | anyone who can route to it |
+
+This path publishes the server's own **plain HTTP**, without the TLS terminator
+the installer sets up, so what protects the images and the API key is the
+network. On a private encrypted mesh that is enough and the panel says so; on an
+ordinary local network it is not, and the panel warns. `deploy.host_addresses`
+classifies the interfaces and skips Docker's own bridges — binding to one of
+those publishes the server to containers and to nothing else.
+
+Against an `http://` address the *Verify TLS* box is never consulted: there is
+no certificate in play.
+
+### A certificate no public authority signed
+
+If a deployment is fronted by something other than `tailscale serve` and its
+certificate is self-signed or institutional, `VERIFY_TLS` also accepts **a path
+to that `.crt`**, and then verifies against it alone. Two things to know before
+trying:
+
+- `requests` does not read the operating system's trust store. It reads the
+  bundle inside Slicer's own Python, so installing a certificate system-wide
+  never reaches this client, and neither does `REQUESTS_CA_BUNDLE` — Slicer's
+  launcher rebuilds its environment and that variable does not survive.
+- The panel's *Verify TLS* is a check box, so it cannot express a path, and
+  saving from the panel writes a boolean over a path set in `config.py`.
 
 ---
 
@@ -164,8 +249,9 @@ the output file names.
 * 3D Slicer, stable or nightly. See the
   [Slicer system requirements](https://slicer.readthedocs.io/en/latest/user_guide/getting_started.html#system-requirements).
 * **A reachable tool server.** Set its address in **Server Tools Settings**, or
-  deploy one with **Slicer Cloud**. Without it, every server-backed module is
-  inert.
+  deploy one with **Slicer Cloud** — see
+  [Connecting this client to a server](#connecting-this-client-to-a-server). Without
+  it, every server-backed module is inert.
 * No GPU, no conda environment and no model download are needed for the
   server-backed modules — that is the point of this client. The exceptions are
   `MRI2CBCT` and `CNE`, which install their own dependencies and download their
