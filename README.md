@@ -30,7 +30,7 @@ machine and send nothing.
 **There is no de-identification in the current client.** Files are streamed to
 the server as they are on disk, with their names, their DICOM headers and
 whatever identifiers they contain. The de-identification pipeline is specified
-in [SECURITY.md](SECURITY.md) but is **not yet implemented**.
+in [DEIDENTIFICATION_SPEC.md](DEIDENTIFICATION_SPEC.md) but is **not yet implemented**.
 
 Consequences you must accept before using this extension on patient data:
 
