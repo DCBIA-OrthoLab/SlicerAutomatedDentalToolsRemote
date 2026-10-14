@@ -112,7 +112,7 @@ class ClientTest(unittest.TestCase):
     def setUp(self):
         self.work = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
-        self.client = ToolServerClient("http://server", "token", detached_runs=True)
+        self.client = ToolServerClient("https://server", "token", detached_runs=True)
 
     def _fake_download(self, _session, _url, destination, *_a, **_kw):
         with open(destination, "wb") as handle:
@@ -143,7 +143,7 @@ class ClientTest(unittest.TestCase):
         # Fetched and released like any other reference: what happens next is
         # a person reading scans, which is not a wait to hold server-side
         # storage through.
-        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+        self.assertEqual(mock_delete.call_args.args[0], "https://server/results/res123")
 
     @mock.patch("requests.Session.post")
     @mock.patch("requests.Session.get")
@@ -220,7 +220,7 @@ class ClientTest(unittest.TestCase):
                                         output_dir=out)
 
         self.assertEqual(mock_post.call_args.args[0],
-                         "http://server/runs/run-1/resume")
+                         "https://server/runs/run-1/resume")
         sent = mock_post.call_args.kwargs["files"]
         self.assertEqual(list(sent), ["01_ALI_CBCT"])
         self.assertEqual(sent["01_ALI_CBCT"][0], "01_ALI_CBCT.zip")

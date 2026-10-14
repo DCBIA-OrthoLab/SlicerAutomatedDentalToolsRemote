@@ -82,9 +82,9 @@ class ToolServerClientTest(unittest.TestCase):
     # -- configure() (live settings panel updates) -----------------------
 
     def test_configure_updates_fields(self):
-        self.client.configure(server_url="http://other.org/", token="new-token", verify_tls=False, timeout=42)
+        self.client.configure(server_url="https://other.org/", token="new-token", verify_tls=False, timeout=42)
 
-        self.assertEqual(self.client.server_url, "http://other.org")
+        self.assertEqual(self.client.server_url, "https://other.org")
         self.assertEqual(self.client.token, "new-token")
         self.assertFalse(self.client.verify_tls)
         self.assertEqual(self.client.timeout, 42)
@@ -103,7 +103,7 @@ class ToolServerClientTest(unittest.TestCase):
         self.client.list_tools()
         self.assertEqual(mock_get.call_count, 1)
 
-        self.client.configure(server_url="http://other.org")
+        self.client.configure(server_url="https://other.org")
 
         mock_get.return_value = _response(json_data=[])
         self.client.list_tools()
@@ -1261,7 +1261,7 @@ class BulkTransferWiringTest(unittest.TestCase):
     }
 
     def setUp(self):
-        self.client = ToolServerClient("http://server", "tok", chunk_bytes=1024)
+        self.client = ToolServerClient("https://server", "tok", chunk_bytes=1024)
         self.work = tempfile.mkdtemp(prefix="wiring_test_")
         self.addCleanup(shutil.rmtree, self.work, True)
 
@@ -1362,10 +1362,10 @@ class BulkTransferWiringTest(unittest.TestCase):
 
         self.assertEqual(result.kind, "file")
         self.assertEqual(result.path, os.path.join(self.work, "big_tool_output.zip"))
-        self.assertEqual(ranged.call_args.args[1], "http://server/results/res123")
+        self.assertEqual(ranged.call_args.args[1], "https://server/results/res123")
         # Released once it is safely on disk, so TEMP_DIR does not hold every
         # result for the full server-side TTL.
-        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+        self.assertEqual(mock_delete.call_args.args[0], "https://server/results/res123")
 
     def _reference_response(self, filename="big_tool_output.zip", size=4096):
         return _response(
@@ -1397,7 +1397,7 @@ class BulkTransferWiringTest(unittest.TestCase):
                     "big_tool", files={"input": self._input(100)}, output_dir=self.work
                 )
 
-        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+        self.assertEqual(mock_delete.call_args.args[0], "https://server/results/res123")
 
     @mock.patch("requests.Session.delete")
     @mock.patch("requests.Session.post")
@@ -1417,7 +1417,7 @@ class BulkTransferWiringTest(unittest.TestCase):
                     "big_tool", files={"input": self._input(100)}, output_dir=self.work
                 )
 
-        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+        self.assertEqual(mock_delete.call_args.args[0], "https://server/results/res123")
 
     @mock.patch("requests.Session.delete")
     @mock.patch("requests.Session.post")
