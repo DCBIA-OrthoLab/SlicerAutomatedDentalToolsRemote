@@ -7,8 +7,10 @@ production token — override these locally, or replace them at build time.
 
 # A placeholder, on purpose: `.invalid` never resolves, so nothing is sent
 # anywhere until a real URL is set in Server Tools Settings (or by Slicer
-# Cloud). That URL is the `https://<name>.<tailnet>.ts.net` address
-# `tailscale serve` publishes with a publicly-signed certificate -- for a
+# Cloud). That URL is the server's public https:// address, whose certificate a
+# public authority signed: the `https://<name>.<tailnet>.ts.net` one
+# `tailscale serve` publishes, or a domain behind a reverse proxy, or served
+# directly, with a Let's Encrypt or institutional certificate. That holds for a
 # server on this very machine too, since the self-signed certificate the server
 # presents on its own port is not one this client accepts.
 #

@@ -446,26 +446,37 @@ class TestListTools(TempInstallDir):
 
 
 class TestClientUrl(unittest.TestCase):
-    """Which URL the client is handed: the tailnet one, or none at all."""
+    """Which URL the client is handed: the public one, or none at all."""
 
-    def test_the_tailnet_url_wins(self):
+    def test_the_public_url_is_handed_over(self):
+        # `up` reports it at the top level, `status` under `server`; a tailnet
+        # address and a reverse proxy's own domain are equally valid.
         self.assertEqual(deploy.client_url({"url": "https://localhost:8000",
-                                            "tailnet_url": "https://v.example.ts.net/"}),
+                                            "public_url": "https://v.example.ts.net/"}),
                          "https://v.example.ts.net")
         self.assertEqual(deploy.client_url({"server": {"url": "https://localhost:8000",
-                                                       "tailnet_url": "https://v.example.ts.net"}}),
-                         "https://v.example.ts.net")
+                                                       "public_url": "https://tools.example.org"}}),
+                         "https://tools.example.org")
+
+    def test_an_empty_public_url_means_none(self):
+        self.assertIsNone(deploy.client_url({"url": "https://localhost:8000", "public_url": ""}))
+        self.assertIsNone(deploy.client_url({"server": {"public_url": "", "url": "https://localhost:8000"}}))
+        self.assertIsNone(deploy.client_url({"tailnet_url": "https://v.example.ts.net"}))
 
     def test_the_local_listener_is_never_handed_over(self):
         for url in ("https://localhost:8000", "https://127.0.0.1:8000", "https://[::1]:8000",
                     "http://localhost:8000", "http://v.example.ts.net"):
             with self.subTest(url=url):
                 self.assertIsNone(deploy.client_url({"url": url}))
+                self.assertIsNone(deploy.client_url({"public_url": url}))
         self.assertIsNone(deploy.client_url({}))
         self.assertIsNone(deploy.client_url(None))
 
-    def test_a_public_https_url_is_accepted(self):
-        self.assertEqual(deploy.client_url({"url": "https://v.example.ts.net"}), "https://v.example.ts.net")
+    def test_the_message_names_every_way_to_get_a_public_address(self):
+        message = deploy.NO_PUBLIC_URL_MESSAGE
+        self.assertIn("setup-tailscale.sh", message)
+        self.assertIn("PUBLIC_URL", message)
+        self.assertIn("reverse proxy", message)
 
 
 class TestDockerInstall(TempInstallDir):

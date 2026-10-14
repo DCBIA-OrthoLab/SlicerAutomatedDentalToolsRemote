@@ -371,8 +371,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             "keeps it off the network entirely.\n\n"
             "This server speaks HTTPS with a self-signed certificate only this computer "
             "can verify, and this client never connects to a server it cannot verify. "
-            "To share it, publish it through a private encrypted network (Tailscale) "
-            "with a certificate the other machines can verify."
+            "To share it, give it a public address with a publicly-signed certificate: "
+            "`tailscale serve`, or a reverse proxy or the server itself with a Let's "
+            "Encrypt or institutional certificate."
         ))
         advancedForm.addRow(design.section_title(_("Network access")), self.bindCombo)
         self.bindCombo.currentIndexChanged.connect(self._onBindChanged)
@@ -634,8 +635,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 "The server will be reachable at {0} — from the machines on that private "
                 "network only.\n\n"
                 "Its certificate is self-signed for this computer only, so the other "
-                "machines need the network to provide a certificate they can verify "
-                "(`tailscale serve`). That is the safest way to share this server."
+                "machines need a publicly-signed certificate in front of it, e.g. "
+                "`tailscale serve`, or a reverse proxy with a Let's Encrypt certificate."
             ).format(address))
         else:
             shown = address or _("every address on this machine")
@@ -643,9 +644,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 "The server will be reachable at {0}.\n\n"
                 "Its certificate is self-signed for this computer only: another machine "
                 "cannot verify it, and this client refuses a server it cannot verify.\n\n"
-                "Prefer a private encrypted network (Tailscale) if one is listed, or put a "
-                "TLS terminator with a real certificate in front — see SECURITY.md in the "
-                "server repository."
+                "Give it a publicly-signed certificate first -- `tailscale serve`, or a "
+                "reverse proxy with a Let's Encrypt or institutional certificate (PUBLIC_URL) "
+                "— see SECURITY.md in the server repository."
             ).format(shown))
 
     def _onInstallDirChanged(self, _path=None) -> None:
@@ -810,10 +811,10 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 if url:
                     self._applyServerSettings(url, result["token"])
                 else:
-                    # No tailnet URL: nothing is saved rather than localhost,
+                    # No public address: nothing is saved rather than localhost,
                     # whose self-signed certificate the client refuses.
-                    self._log(_(deploy.TAILSCALE_REQUIRED_MESSAGE))
-                    slicer.util.warningDisplay(_(deploy.TAILSCALE_REQUIRED_MESSAGE))
+                    self._log(_(deploy.NO_PUBLIC_URL_MESSAGE))
+                    slicer.util.warningDisplay(_(deploy.NO_PUBLIC_URL_MESSAGE))
             if result.get("healthy"):
                 slicer.util.showStatusMessage(_("The tool server is running."), 5000)
             else:
@@ -1038,7 +1039,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         Certificate verification is not among the things saved here, and
         cannot be: it is always on, against the public authorities (tls.py).
-        `url` is the tailnet URL `tailscale serve` publishes (deploy.client_url);
+        `url` is the deployment's public https:// address (deploy.client_url);
         an http:// URL is refused rather than saved, loopback included.
         """
         try:

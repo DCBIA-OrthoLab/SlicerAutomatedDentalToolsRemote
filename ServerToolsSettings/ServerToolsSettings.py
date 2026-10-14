@@ -63,7 +63,8 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         rootLayout.addWidget(box)
 
         self.urlEdit = qt.QLineEdit()
-        self.urlEdit.setToolTip(_("https:// only: the address tailscale serve publishes, e.g. https://name.tailnet.ts.net"))
+        self.urlEdit.setToolTip(_("https:// only, with a publicly-signed certificate, e.g. "
+                                  "https://name.tailnet.ts.net or https://tools.example.org"))
         formLayout.addRow(design.required_label(_("Server URL")), self.urlEdit)
 
         self.tokenEdit = qt.QLineEdit()

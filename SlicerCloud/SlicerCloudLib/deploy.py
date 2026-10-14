@@ -40,14 +40,18 @@ DEFAULT_BRANCH = "main"
 # Where the container listens on this machine, for DISPLAY only. The client
 # never uses it: the certificate the server presents there is self-signed, and
 # the client accepts only a publicly-signed one (ServerToolsCoreLib/tls.py).
-# What the client is given is the tailnet URL -- see client_url().
+# What the client is given is the deployment's public URL -- see client_url().
 DEFAULT_SERVER_URL = "https://localhost:8000"
 
-TAILSCALE_REQUIRED_MESSAGE = (
-    "Tailscale is required. The extension only talks to the server through the "
-    "https://<name>.<tailnet>.ts.net address `tailscale serve` publishes, whose "
-    "certificate is publicly signed -- for a server on this computer too. "
-    "Run scripts/setup-tailscale.sh in the server's folder, then press Refresh."
+NO_PUBLIC_URL_MESSAGE = (
+    "This server has no public address yet. The extension only talks to a server "
+    "through an https:// address whose certificate a public authority signed -- "
+    "for a server on this computer too. Give it one, then press Refresh:\n\n"
+    "  - run scripts/setup-tailscale.sh in the server's folder (tailscale serve "
+    "publishes it as https://<name>.<tailnet>.ts.net), or\n"
+    "  - set PUBLIC_URL in the server's .env to its https:// address behind a "
+    "reverse proxy with a Let's Encrypt or institutional certificate, or served "
+    "directly with its own public certificate."
 )
 
 # Where a clone goes when the user has not said. The home directory, not
@@ -299,16 +303,17 @@ def probe_host() -> dict:
 def client_url(result):
     """The URL the CLIENT may use for this deployment, or None.
 
-    server_ctl.py reports the address `tailscale serve` publishes as
-    `tailnet_url` (top level, or under `server`). A plain `url` is accepted
-    only when it is https:// and not this machine's loopback, which is the
-    local self-signed listener the client refuses to verify. There is no
-    fallback to localhost: without Tailscale there is no URL to hand over.
+    server_ctl.py reports it as `public_url` (top level from `up`, under
+    `server` from `status`): PUBLIC_URL from the deployment's .env when set,
+    otherwise the address `tailscale serve` publishes, otherwise "". Either is
+    an https:// address with a publicly-signed certificate. `url` -- the local
+    listener and its self-signed certificate, which the client refuses -- is
+    never handed over, and neither is a loopback address. There is no fallback:
+    without a public address there is no URL to give the client.
     """
     result = result or {}
     server = result.get("server") or {}
-    for candidate in (result.get("tailnet_url"), server.get("tailnet_url"),
-                      result.get("url"), server.get("url")):
+    for candidate in (result.get("public_url"), server.get("public_url")):
         if not candidate:
             continue
         try:

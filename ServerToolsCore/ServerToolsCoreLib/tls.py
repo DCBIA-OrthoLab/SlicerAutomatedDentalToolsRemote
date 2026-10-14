@@ -17,9 +17,11 @@ setting, flag, environment variable or config value relaxes them:
    hostname check on. There is no custom CA, no pinning and never
    `verify=False`. The server is therefore reached through the name its
    publicly-signed certificate is issued for -- the
-   `https://<name>.<tailnet>.ts.net` address `tailscale serve` publishes --
-   including when it runs on this very machine: the self-signed certificate
-   the server presents on its own port is not one this client accepts.
+   `https://<name>.<tailnet>.ts.net` address `tailscale serve` publishes, or
+   its own domain behind a reverse proxy or served directly with a Let's
+   Encrypt or institutional certificate -- including when it runs on this
+   very machine: the self-signed certificate the server presents on its own
+   port is not one this client accepts.
 """
 
 import ipaddress

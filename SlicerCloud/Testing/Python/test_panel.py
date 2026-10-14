@@ -475,8 +475,8 @@ class TestChangingTheInstallFolder(PanelTestCase):
 class TestServerUrlIsHttpsOnly(PanelTestCase):
     """The URL an install hands back becomes every module's server, so the
     rules apply here too: never http://, loopback included, and only the
-    tailnet URL `tailscale serve` publishes -- never the local self-signed
-    listener, which the client refuses to verify."""
+    deployment's public URL -- never the local self-signed listener, which the
+    client refuses to verify."""
 
     def setUp(self):
         PanelTestCase.setUp(self)
@@ -505,18 +505,20 @@ class TestServerUrlIsHttpsOnly(PanelTestCase):
         self.assertEqual(len(DIALOGS["error"]), 2)
         self.assertIn("https://", DIALOGS["error"][0])
 
-    def test_the_tailnet_url_is_what_the_client_is_given(self):
+    def test_the_public_url_is_what_the_client_is_given(self):
         self._install_answering({"url": "https://localhost:8000", "token": "t", "healthy": True,
-                                 "tailnet_url": "https://visor.example.ts.net"})
+                                 "public_url": "https://visor.example.ts.net"})
         self.assertEqual(SlicerCloud.get_client().server_url, "https://visor.example.ts.net")
         self.assertEqual(_QSettings.store["ServerTools/ServerUrl"], "https://visor.example.ts.net")
 
-    def test_without_tailscale_nothing_is_saved_and_the_panel_says_so(self):
+    def test_without_a_public_url_nothing_is_saved_and_the_panel_says_so(self):
         before = SlicerCloud.get_client().server_url
-        self._install_answering({"url": "https://localhost:8000", "token": "t", "healthy": True})
+        self._install_answering({"url": "https://localhost:8000", "token": "t", "healthy": True,
+                                 "public_url": ""})
         self.assertEqual(SlicerCloud.get_client().server_url, before)
         self.assertNotIn("ServerTools/ServerUrl", _QSettings.store)
-        self.assertTrue(any("Tailscale is required" in text for text in DIALOGS["warning"]))
+        self.assertTrue(any("no public address yet" in text and "PUBLIC_URL" in text
+                            for text in DIALOGS["warning"]))
 
 
 class TestDockerMissing(PanelTestCase):
