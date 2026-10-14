@@ -13,7 +13,8 @@ add_test(
 
 # test_transfer.py drives the real chunked upload / ranged download against a
 # stdlib ThreadingHTTPServer on a loopback socket, wrapped in TLS since the
-# client speaks https:// only (tls_fixture.py), no mocks, because what that
+# client speaks https:// only (tls_fixture.py, a throwaway CA the test alone
+# trusts), no mocks, because what that
 # module does is concurrency and byte offsets. Same reasoning as above: requests
 # + stdlib only, so no Slicer interpreter is needed. It binds an ephemeral
 # 127.0.0.1 port and never reaches the network.
@@ -23,9 +24,10 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
-# test_tls.py: https:// only, and the loopback certificate pin, partly against a
-# real TLS server on 127.0.0.1 with a throwaway certificate (tls_fixture.py,
-# which shells out to `openssl`). Same reasoning: requests + stdlib only.
+# test_tls.py: https:// only and verify=True everywhere, partly against a real
+# TLS server on 127.0.0.1 whose certificate a throwaway CA issued (tls_fixture.py,
+# which shells out to `openssl`; only the test trusts that CA, through
+# REQUESTS_CA_BUNDLE). Same reasoning: requests + stdlib only.
 add_test(
   NAME ServerToolsCore_test_tls
   COMMAND ${Python3_EXECUTABLE} -m unittest test_tls

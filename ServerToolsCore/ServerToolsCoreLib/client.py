@@ -596,31 +596,6 @@ def _asks_to_stop(args: dict) -> bool:
     return bool(str(wanted or "").strip())
 
 
-class _PinningAdapter(requests.adapters.HTTPAdapter):
-    """Every request of the pooled session passes here, so this is the one
-    place where a loopback server's own certificate replaces `verify=True`
-    (see tls.py for why that is safe over loopback and nowhere else).
-
-    A verification failure against a REMEMBERED certificate is retried once
-    with a fresh read: the local server regenerates its certificate when it is
-    reinstalled, and a client that had pinned the old one would otherwise
-    refuse it until Slicer restarts. The handshake fails before a byte of the
-    body is sent, so resending the same request is safe.
-    """
-
-    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
-        pinned = tls.verify_for(request.url, verify)
-        try:
-            return super().send(request, stream=stream, timeout=timeout, verify=pinned,
-                                cert=cert, proxies=proxies)
-        except requests.exceptions.SSLError:
-            if pinned is verify or pinned is True:
-                raise
-        fresh = tls.verify_for(request.url, verify, refresh=True)
-        return super().send(request, stream=stream, timeout=timeout, verify=fresh,
-                            cert=cert, proxies=proxies)
-
-
 def _pooled_session() -> requests.Session:
     """One Session for every call this client makes, instead of a fresh
     connection per request.
@@ -633,7 +608,7 @@ def _pooled_session() -> requests.Session:
     (10 per host, blocking above that) would quietly serialise them.
     """
     session = requests.Session()
-    adapter = _PinningAdapter(
+    adapter = requests.adapters.HTTPAdapter(
         pool_connections=_CONNECTION_POOL_SIZE,
         pool_maxsize=_CONNECTION_POOL_SIZE,
         # Retries stay with the callers: transfer.py resends the one part that
@@ -643,6 +618,8 @@ def _pooled_session() -> requests.Session:
     )
     # Only https:// gets this adapter: every server URL went through
     # tls.require_https, so a plain-HTTP URL reaching the session is a bug.
+    # Every request passes verify=True: the public authorities of requests'
+    # own bundle, hostname included, with no knob anywhere (see tls.py).
     session.mount("https://", adapter)
     return session
 
@@ -687,12 +664,11 @@ def checked_server_url(server_url: str) -> str:
     Every path that accepts a server URL goes through here (the constructor,
     `configure()`, the saved settings, the settings panel), and the rule itself
     lives in tls.require_https: the server has no plain-HTTP listener at all,
-    so `http://` is never used, on loopback or anywhere else. A loopback
-    `http://` URL -- the default of older clients -- is upgraded to `https://`
-    on the same port, which is exactly what the local server serves there; any
-    other `http://` would put the scans, the DICOM headers and the API token
-    on the wire in the clear, and is refused. Verifying the certificate is
-    mandatory for the same reason (see config.VERIFY_TLS and tls.py).
+    and `http://` would put the scans, the DICOM headers and the API token on
+    the wire in the clear, so every `http://` URL is refused -- loopback
+    included, `http://localhost:8000` (the default of older clients) too.
+    Nothing is upgraded behind the user's back. The certificate is always
+    verified against the public authorities, for the same reason (tls.py).
 
     Raises tls.InsecureServerUrl, a ValueError, which the settings panel turns
     into a message.
@@ -705,7 +681,6 @@ class ToolServerClient:
         self,
         server_url,
         token,
-        verify_tls=True,
         timeout=600,
         parallelism=transfer.DEFAULT_PARALLELISM,
         chunk_bytes=transfer.DEFAULT_CHUNK_BYTES,
@@ -714,7 +689,6 @@ class ToolServerClient:
     ):
         self._server_url = checked_server_url(server_url)
         self._token = token
-        self._verify_tls = verify_tls
         self._timeout = timeout
         self._parallelism = parallelism
         self._chunk_bytes = chunk_bytes
@@ -743,28 +717,22 @@ class ToolServerClient:
         return self._token
 
     @property
-    def verify_tls(self) -> bool:
-        return self._verify_tls
-
-    @property
     def timeout(self) -> int:
         return self._timeout
 
-    def configure(self, server_url=None, token=None, verify_tls=None, timeout=None) -> None:
+    def configure(self, server_url=None, token=None, timeout=None) -> None:
         """Update connection settings on the already-constructed singleton in
         place, so every module sharing get_client() sees the change without a
         Slicer restart. Drops the cached /tools schema unconditionally - it
         may belong to a different server entirely once any of these change.
 
         A `server_url` that is not https:// raises tls.InsecureServerUrl
-        before anything is changed (a loopback http:// is upgraded instead).
+        before anything is changed, loopback included.
         """
         if server_url is not None:
             self._server_url = checked_server_url(server_url)
         if token is not None:
             self._token = token
-        if verify_tls is not None:
-            self._verify_tls = verify_tls
         if timeout is not None:
             self._timeout = timeout
         self._tools_cache = None
@@ -779,7 +747,7 @@ class ToolServerClient:
     def health(self) -> bool:
         try:
             response = self._session.get(
-                f"{self._server_url}/health", timeout=_HEALTH_CHECK_TIMEOUT, verify=self._verify_tls
+                f"{self._server_url}/health", timeout=_HEALTH_CHECK_TIMEOUT, verify=True
             )
             return bool(response.ok and response.json().get("status") == "ok")
         except (requests.RequestException, ValueError) as exc:
@@ -797,7 +765,7 @@ class ToolServerClient:
         try:
             response = self._session.get(
                 f"{self._server_url}/clients/me", headers={"Authorization": f"Bearer {self._token}"},
-                timeout=_HEALTH_CHECK_TIMEOUT, verify=self._verify_tls,
+                timeout=_HEALTH_CHECK_TIMEOUT, verify=True,
             )
             if not response.ok:
                 return None
@@ -855,7 +823,7 @@ class ToolServerClient:
                 f"{self._server_url}/tools/{tool_name}/data",
                 headers={"Authorization": f"Bearer {self._token}"},
                 timeout=_TOOLS_FETCH_TIMEOUT,
-                verify=self._verify_tls,
+                verify=True,
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not reach the tool server: {exc}") from exc
@@ -931,7 +899,7 @@ class ToolServerClient:
         # server answers in 0.17 s.
         probe_started = time.perf_counter()
         size = transfer.probe_ranged(
-            self._session, url, headers=headers, verify_tls=self._verify_tls
+            self._session, url, headers=headers
         )
         probe_took = time.perf_counter() - probe_started
         if size and size >= transfer.MIN_CHUNKED_BYTES:
@@ -943,7 +911,6 @@ class ToolServerClient:
                 destination,
                 size,
                 headers=headers,
-                verify_tls=self._verify_tls,
                 parallelism=streams,
                 chunk_bytes=self._chunk_bytes,
                 progress_cb=progress_cb,
@@ -981,7 +948,7 @@ class ToolServerClient:
                 headers=headers,
                 stream=True,
                 timeout=self._timeout,
-                verify=self._verify_tls,
+                verify=True,
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not reach the tool server: {exc}") from exc
@@ -1014,7 +981,7 @@ class ToolServerClient:
     def _fetch_tools(self) -> dict:
         try:
             response = self._session.get(
-                f"{self._server_url}/tools", timeout=_TOOLS_FETCH_TIMEOUT, verify=self._verify_tls
+                f"{self._server_url}/tools", timeout=_TOOLS_FETCH_TIMEOUT, verify=True
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not reach the tool server: {exc}") from exc
@@ -1190,7 +1157,7 @@ class ToolServerClient:
                         data=data,
                         files=files_payload or None,
                         timeout=self._timeout,
-                        verify=self._verify_tls,
+                        verify=True,
                         stream=True,
                     )
                 except requests.RequestException as exc:
@@ -1361,7 +1328,7 @@ class ToolServerClient:
                     # contract has no heartbeat, so silence is the normal state
                     # of a running inference.
                     timeout=(_TOOLS_FETCH_TIMEOUT, _RUN_EVENTS_READ_TIMEOUT),
-                    verify=self._verify_tls,
+                    verify=True,
                 )
             except requests.RequestException:
                 if stopped() or not within_startup_window():
@@ -1445,7 +1412,7 @@ class ToolServerClient:
         for attempt in range(2):
             try:
                 response = self._session.delete(
-                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=self._verify_tls
+                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=True
                 )
             except requests.RequestException as exc:
                 logger.debug("Could not cancel a run (attempt %d): %s", attempt, exc)
@@ -1524,7 +1491,7 @@ class ToolServerClient:
                     headers=headers,
                     files=payload or None,
                     timeout=self._timeout,
-                    verify=self._verify_tls,
+                    verify=True,
                     stream=True,
                 )
             except requests.RequestException as exc:
@@ -1600,7 +1567,6 @@ class ToolServerClient:
                     self._server_url,
                     {"Authorization": f"Bearer {self._token}"},
                     path,
-                    verify_tls=self._verify_tls,
                     parallelism=self._parallelism,
                     chunk_bytes=self._chunk_bytes,
                     compress=self._compress_uploads,
@@ -1713,7 +1679,6 @@ class ToolServerClient:
                 dest_path,
                 size,
                 headers=headers,
-                verify_tls=self._verify_tls,
                 parallelism=self._parallelism,
                 chunk_bytes=self._chunk_bytes,
                 progress_cb=progress_cb,
@@ -1749,7 +1714,7 @@ class ToolServerClient:
         for attempt in range(2):
             try:
                 response = self._session.delete(
-                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=self._verify_tls
+                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=True
                 )
                 if response.ok or response.status_code == 404:
                     return

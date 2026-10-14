@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from tls_fixture import serve_tls  # noqa: E402
+from tls_fixture import serve_tls, trust_test_ca  # noqa: E402
 from ServerToolsCoreLib import client as client_module
 from ServerToolsCoreLib.client import (ToolServerClient, is_log_event, new_run_id,
                                       normalise_run_event)
@@ -186,6 +186,7 @@ class _LiveServerTest(unittest.TestCase):
     def setUp(self):
         self.state = _State()
         handler = type("_BoundHandler", (_Handler,), {"state": self.state})
+        trust_test_ca(self)
         self.server = serve_tls(ThreadingHTTPServer(("127.0.0.1", 0), handler))
         # A watcher that has read its terminal event closes the socket without
         # draining it, which is correct and which the stdlib server reports as
@@ -197,7 +198,7 @@ class _LiveServerTest(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        url = f"https://127.0.0.1:{self.server.server_address[1]}"
+        url = f"https://localhost:{self.server.server_address[1]}"
         self.client = ToolServerClient(url, token="t", timeout=10)
 
     def _watch(self, run_id="run-id-0123456789abcdef", **kwargs):

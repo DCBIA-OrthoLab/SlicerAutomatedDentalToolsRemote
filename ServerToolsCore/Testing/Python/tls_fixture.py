@@ -1,61 +1,73 @@
-"""A throwaway self-signed certificate for the tests that run a real server.
+"""A throwaway certificate authority for the tests that run a real server.
 
-The client speaks HTTPS only, so a test server on 127.0.0.1 has to as well.
-The certificate has the shape the local deployment's has (EC P-256, CA:FALSE,
-SAN localhost / 127.0.0.1 / ::1), so the client verifies it through the same
-loopback pin it uses in production -- there is no test-only bypass.
+The client speaks HTTPS only and verifies every certificate against the public
+authorities, with no knob to change that. So a test server on 127.0.0.1 gets a
+certificate for `localhost` issued by a throwaway CA made here, and the TEST --
+never the production code -- points requests at that CA through the
+`REQUESTS_CA_BUNDLE` environment variable for its own duration. The client
+still passes `verify=True` and checks the hostname, exactly as in production.
 """
 
+import atexit
 import os
 import shutil
 import ssl
 import subprocess
 import tempfile
+from unittest import mock
 
 _DIRECTORY = None
 
 
-def certificate(directory=None):
-    """(cert_path, key_path) of a fresh self-signed loopback certificate.
-
-    Without `directory`, one certificate is made per process and reused.
-    """
-    global _DIRECTORY
-    if directory is None:
-        if _DIRECTORY is None:
-            _DIRECTORY = tempfile.mkdtemp(prefix="tls_fixture_")
-            import atexit
-            atexit.register(shutil.rmtree, _DIRECTORY, True)
-            _generate(_DIRECTORY)
-        directory = _DIRECTORY
-    else:
-        _generate(directory)
-    return os.path.join(directory, "cert.pem"), os.path.join(directory, "key.pem")
+def _openssl(*args):
+    subprocess.run(["openssl", *args], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _generate(directory):
-    subprocess.run(
-        [
-            "openssl", "req", "-x509", "-nodes", "-newkey", "ec",
-            "-pkeyopt", "ec_paramgen_curve:prime256v1",
-            "-keyout", os.path.join(directory, "key.pem"),
-            "-out", os.path.join(directory, "cert.pem"),
-            "-days", "2", "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1",
-            "-addext", "basicConstraints=critical,CA:FALSE",
-        ],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    path = lambda name: os.path.join(directory, name)  # noqa: E731
+    ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"]
+    _openssl("req", "-x509", *ec, "-keyout", path("ca.key"), "-out", path("ca.pem"),
+             "-days", "2", "-subj", "/CN=throwaway test CA",
+             "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+    _openssl("req", *ec, "-keyout", path("key.pem"), "-out", path("server.csr"),
+             "-subj", "/CN=localhost")
+    with open(path("ext.cnf"), "w") as handle:
+        handle.write("subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\n"
+                     "extendedKeyUsage=serverAuth\n")
+    _openssl("x509", "-req", "-in", path("server.csr"), "-CA", path("ca.pem"),
+             "-CAkey", path("ca.key"), "-CAcreateserial", "-out", path("cert.pem"),
+             "-days", "2", "-extfile", path("ext.cnf"))
 
 
-def serve_tls(server, directory=None):
-    """Wrap a socketserver's listening socket in TLS, in place.
+def _directory():
+    global _DIRECTORY
+    if _DIRECTORY is None:
+        _DIRECTORY = tempfile.mkdtemp(prefix="tls_fixture_")
+        atexit.register(shutil.rmtree, _DIRECTORY, True)
+        _generate(_DIRECTORY)
+    return _DIRECTORY
 
-    The handshake is deferred to the first read, which happens in the handler
-    thread, so one client failing it never blocks `serve_forever`.
+
+def ca_bundle():
+    return os.path.join(_directory(), "ca.pem")
+
+
+def serve_tls(server):
+    """Wrap a socketserver's listening socket in TLS, in place, with the
+    `localhost` certificate. The handshake is deferred to the first read, in
+    the handler thread, so one client failing it never blocks serve_forever.
     """
-    cert, key = certificate(directory)
+    directory = _directory()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(cert, key)
+    context.load_cert_chain(os.path.join(directory, "cert.pem"), os.path.join(directory, "key.pem"))
     server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
     return server
+
+
+def trust_test_ca(testcase):
+    """For this test only, make requests trust the throwaway CA."""
+    patcher = mock.patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": ca_bundle()})
+    patcher.start()
+    testcase.addCleanup(patcher.stop)

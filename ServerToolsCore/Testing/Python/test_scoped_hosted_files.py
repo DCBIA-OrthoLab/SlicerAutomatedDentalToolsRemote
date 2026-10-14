@@ -110,7 +110,6 @@ class ScopedDownloadTest(unittest.TestCase):
             client = client_module.ToolServerClient.__new__(client_module.ToolServerClient)
             client._server_url = "https://example.org"
             client._token = "t"
-            client._verify_tls = False
             client._session = object()
             try:
                 client.download_testfile("AREG", "IOSCBCT_TestFile", "/tmp/x", None, "IOSCBCT")

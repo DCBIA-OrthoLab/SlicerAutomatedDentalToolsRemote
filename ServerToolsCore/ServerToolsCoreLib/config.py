@@ -5,23 +5,18 @@ config over environment variables (see ARCHITECTURE.md). Do not commit a real
 production token — override these locally, or replace them at build time.
 """
 
-# https:// only -- see tls.py. The local deployment serves its own self-signed
-# certificate here, which the client verifies against the certificate read
-# over loopback; nothing in this file needs to change for it.
-SERVER_URL = "https://localhost:8000"
-API_TOKEN = "dev-token"
-# Certificate verification is ON, and it is deliberately not a user setting.
-# This client sends medical images and an API key, and TLS without verification
-# protects neither: it encrypts the traffic to whoever answered, which on a
-# shared network is not necessarily the server. The standard deployment puts
-# `tailscale serve` in front of the server, which fetches and renews a
-# publicly-signed certificate, so True needs nothing configured here.
+# A placeholder, on purpose: `.invalid` never resolves, so nothing is sent
+# anywhere until a real URL is set in Server Tools Settings (or by Slicer
+# Cloud). That URL is the `https://<name>.<tailnet>.ts.net` address
+# `tailscale serve` publishes with a publicly-signed certificate -- for a
+# server on this very machine too, since the self-signed certificate the server
+# presents on its own port is not one this client accepts.
 #
-# Against a certificate no public authority signed, set this to the PATH of that
-# certificate: `requests` accepts a file here and verifies against it alone.
-# That is a source edit on purpose -- no panel offers it, and a value saved by
-# an older client is ignored (see settings_qt.load_overrides).
-VERIFY_TLS = True
+# https:// only, and the certificate is always verified against the public
+# authorities, hostname included (see tls.py). Neither is a setting: there is
+# no VERIFY_TLS any more, no CA path, and no way to turn verification off.
+SERVER_URL = "https://set-your-server.invalid"
+API_TOKEN = "dev-token"
 TIMEOUT = 600
 
 # How many connections a single file's transfer uses at once (see transfer.py).

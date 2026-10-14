@@ -1,16 +1,13 @@
-"""HTTPS only, and the loopback certificate pin (tls.py).
+"""HTTPS only, verified against the public authorities, no knob (tls.py).
 
-The live tests run a real TLS server on 127.0.0.1 with a throwaway self-signed
-certificate, which is the shape of the local deployment: the client has to
-verify it through the pin, with no bypass anywhere.
+The live tests run a real TLS server on 127.0.0.1 whose `localhost`
+certificate comes from a throwaway CA. Only the TEST trusts that CA, through
+`REQUESTS_CA_BUNDLE`; the client itself passes verify=True as it always does.
 """
 
 import json
 import os
-import shutil
-import stat
 import sys
-import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,9 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import requests  # noqa: E402
 
-from tls_fixture import certificate, serve_tls  # noqa: E402
-from ServerToolsCoreLib import InsecureServerUrl, config, tls  # noqa: E402
-from ServerToolsCoreLib.client import ToolServerClient  # noqa: E402
+from tls_fixture import serve_tls, trust_test_ca  # noqa: E402
+from ServerToolsCoreLib import InsecureServerUrl, client as client_module, config, tls  # noqa: E402
+from ServerToolsCoreLib.client import ToolServerClient, checked_server_url  # noqa: E402
+
+_HTTP_URLS = (
+    "http://localhost:8000",
+    "http://127.0.0.1:8001",
+    "http://[::1]:8000",
+    "http://127.0.0.2:8000",
+    "http://dev.localhost",
+    "http://tools.example.org",
+    "http://10.0.0.5:8000",
+)
 
 
 class RequireHttpsTest(unittest.TestCase):
@@ -31,92 +38,57 @@ class RequireHttpsTest(unittest.TestCase):
         self.assertEqual(tls.require_https("https://tools.example.org/"), "https://tools.example.org")
         self.assertEqual(tls.require_https("HTTPS://tools.example.org:8443"), "https://tools.example.org:8443")
 
-    def test_a_remote_http_url_is_refused(self):
-        for url in ("http://tools.example.org", "http://10.0.0.5:8000", "http://localhost.example.org"):
+    def test_every_http_url_is_refused_loopback_included(self):
+        for url in _HTTP_URLS:
             with self.subTest(url=url), self.assertRaises(InsecureServerUrl) as caught:
                 tls.require_https(url)
             self.assertIn("must start with https://", str(caught.exception))
 
     def test_anything_that_is_not_a_url_is_refused(self):
-        for url in ("", "localhost:8000", "ftp://localhost", "https://", "tools.example.org"):
+        for url in ("", "localhost:8000", "ftp://localhost", "https://", "tools.example.org",
+                    "https://host:notaport"):
             with self.subTest(url=url), self.assertRaises(InsecureServerUrl):
                 tls.require_https(url)
 
-    def test_a_loopback_http_url_is_upgraded_on_the_same_port(self):
-        self.assertEqual(tls.require_https("http://localhost:8000"), "https://localhost:8000")
-        self.assertEqual(tls.require_https("http://127.0.0.1:8001/"), "https://127.0.0.1:8001")
-        self.assertEqual(tls.require_https("http://[::1]:8000"), "https://[::1]:8000")
-        self.assertEqual(tls.require_https("HTTP://LOCALHOST:8000"), "https://LOCALHOST:8000")
+    def test_checked_server_url_is_the_same_rule(self):
+        self.assertEqual(checked_server_url("https://name.tailnet.ts.net/"), "https://name.tailnet.ts.net")
+        for url in _HTTP_URLS:
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                checked_server_url(url)
 
-    def test_every_loopback_address_counts_and_the_predicate_is_shared(self):
-        from ServerToolsCoreLib import client
-        self.assertIs(client.is_loopback, tls.is_loopback)
-        self.assertEqual(tls.require_https("http://127.0.0.2:8000"), "https://127.0.0.2:8000")
-        self.assertEqual(tls.require_https("http://dev.localhost:8001"), "https://dev.localhost:8001")
-        self.assertEqual(client.checked_server_url("http://localhost:8000/"), "https://localhost:8000")
+    def test_one_loopback_predicate(self):
+        self.assertIs(client_module.is_loopback, tls.is_loopback)
+        for host in ("localhost", "127.0.0.1", "127.0.0.2", "::1", "[::1]", "dev.localhost"):
+            self.assertTrue(tls.is_loopback(host), host)
+        for host in ("", None, "localhost.example.org", "10.0.0.5", "name.tailnet.ts.net"):
+            self.assertFalse(tls.is_loopback(host), host)
 
-    def test_an_implicit_port_stays_the_port_it_was(self):
-        self.assertEqual(tls.require_https("http://localhost"), "https://localhost:80")
-
-    def test_the_default_is_https(self):
+    def test_the_default_is_https_and_a_placeholder(self):
         self.assertTrue(config.SERVER_URL.startswith("https://"))
+        self.assertTrue(config.SERVER_URL.endswith(".invalid"))
+
+    def test_there_is_no_verification_knob(self):
+        self.assertFalse(hasattr(config, "VERIFY_TLS"))
+        self.assertFalse(hasattr(ToolServerClient("https://a.example.org", "t"), "verify_tls"))
+        with self.assertRaises(TypeError):
+            ToolServerClient("https://a.example.org", "t", verify_tls="/etc/ssl/custom-ca.pem")
+        with self.assertRaises(TypeError):
+            ToolServerClient("https://a.example.org", "t").configure(verify_tls=False)
 
 
 class ClientRefusesHttpTest(unittest.TestCase):
-    def test_the_constructor_refuses_a_remote_http_url(self):
-        with self.assertRaises(InsecureServerUrl):
-            ToolServerClient("http://tools.example.org", "token")
-
-    def test_the_constructor_upgrades_localhost(self):
-        client = ToolServerClient("http://localhost:8000/", "token")
-        self.assertEqual(client.server_url, "https://localhost:8000")
+    def test_the_constructor_refuses_every_http_url(self):
+        for url in _HTTP_URLS:
+            with self.subTest(url=url), self.assertRaises(InsecureServerUrl):
+                ToolServerClient(url, "token")
 
     def test_configure_refuses_and_changes_nothing(self):
         client = ToolServerClient("https://tools.example.org", "token")
-        with self.assertRaises(InsecureServerUrl):
-            client.configure(server_url="http://other.example.org", token="other")
+        for url in ("http://localhost:8000", "http://other.example.org"):
+            with self.subTest(url=url), self.assertRaises(InsecureServerUrl):
+                client.configure(server_url=url, token="other")
         self.assertEqual(client.server_url, "https://tools.example.org")
         self.assertEqual(client.token, "token")
-
-    def test_configure_upgrades_a_saved_loopback_url(self):
-        client = ToolServerClient("https://tools.example.org", "token")
-        client.configure(server_url="http://127.0.0.1:8000")
-        self.assertEqual(client.server_url, "https://127.0.0.1:8000")
-
-
-class VerifyForTest(unittest.TestCase):
-    def test_a_loopback_host_is_verified_against_its_pinned_certificate(self):
-        for url in ("https://localhost:8000/health", "https://127.0.0.1:8000/x", "https://[::1]:8000/"):
-            with self.subTest(url=url), mock.patch.object(
-                tls, "pinned_certificate", return_value="/tmp/pin.pem"
-            ) as pin:
-                self.assertEqual(tls.verify_for(url, True), "/tmp/pin.pem")
-                self.assertEqual(pin.call_args.args[1], 8000)
-
-    def test_a_remote_host_is_never_pinned(self):
-        with mock.patch.object(tls, "pinned_certificate") as pin:
-            self.assertIs(tls.verify_for("https://tools.example.org/health", True), True)
-            self.assertEqual(tls.verify_for("https://tools.example.org/", "/ca.pem"), "/ca.pem")
-        pin.assert_not_called()
-
-    def test_a_maintainer_ca_path_is_kept_even_for_loopback(self):
-        with mock.patch.object(tls, "pinned_certificate") as pin:
-            self.assertEqual(tls.verify_for("https://localhost:8000/", "/ca.pem"), "/ca.pem")
-        pin.assert_not_called()
-
-    def test_verify_is_never_false(self):
-        with mock.patch.object(tls, "pinned_certificate", return_value=None):
-            for url in ("https://localhost:8000/", "https://tools.example.org/"):
-                with self.subTest(url=url):
-                    self.assertIs(tls.verify_for(url, False), True)
-
-    def test_pinning_a_remote_host_is_refused_outright(self):
-        with self.assertRaises(ValueError):
-            tls.pinned_certificate("tools.example.org", 443)
-
-    def test_an_unreachable_local_server_falls_back_to_the_default(self):
-        with mock.patch.object(tls, "_fetch_certificate", side_effect=OSError("refused")):
-            self.assertIs(tls.verify_for("https://127.0.0.1:1/", True), True)
 
 
 class _Health(BaseHTTPRequestHandler):
@@ -132,48 +104,32 @@ class _Health(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class LiveLoopbackTest(unittest.TestCase):
+class LiveServerTest(unittest.TestCase):
     def setUp(self):
         self.server = serve_tls(ThreadingHTTPServer(("127.0.0.1", 0), _Health))
+        # Refused handshakes are the point of some tests here; not noise.
+        self.server.handle_error = lambda *_args: None
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        self.port = self.server.server_address[1]
-        self.url = f"https://127.0.0.1:{self.port}"
+        self.url = f"https://localhost:{self.server.server_address[1]}"
 
-    def test_the_client_verifies_the_local_server_through_the_pin(self):
-        client = ToolServerClient(self.url, "token")
-        self.assertTrue(client.health())
+    def test_a_certificate_no_trusted_authority_signed_is_refused(self):
+        """Without the test's CA, the client refuses the server outright:
+        nothing in the production code trusts it."""
+        with mock.patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": ""}):
+            os.environ.pop("REQUESTS_CA_BUNDLE")
+            self.assertFalse(ToolServerClient(self.url, "token").health())
 
-    def test_a_localhost_url_verifies_by_name_too(self):
-        client = ToolServerClient(f"http://localhost:{self.port}", "token")
-        if not client.health():
-            self.skipTest("localhost does not resolve to 127.0.0.1 here")
+    def test_a_trusted_certificate_is_accepted_with_the_hostname_checked(self):
+        trust_test_ca(self)
+        self.assertTrue(ToolServerClient(self.url, "token").health())
+        # The certificate names `localhost`, not the address.
+        other = f"https://127.0.0.1:{self.server.server_address[1]}"
+        self.assertFalse(ToolServerClient(other, "token").health())
 
-    def test_without_the_pin_the_self_signed_certificate_is_refused(self):
-        with self.assertRaises(requests.exceptions.SSLError):
-            requests.get(f"{self.url}/health", timeout=5, verify=True)
-
-    def test_the_pin_file_is_private(self):
-        path = tls.pinned_certificate("127.0.0.1", self.port)
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-        with open(path) as handle:
-            self.assertIn("BEGIN CERTIFICATE", handle.read())
-
-    def test_a_regenerated_certificate_is_read_again_once(self):
-        """A pin taken from an earlier certificate fails verification; the
-        adapter re-reads the certificate and the request goes through."""
-        other = tempfile.mkdtemp(prefix="tls_other_")
-        self.addCleanup(shutil.rmtree, other, True)
-        stale_cert, _key = certificate(other)
-        with tls._lock:
-            tls._pins[("127.0.0.1", self.port)] = stale_cert
-
-        client = ToolServerClient(self.url, "token")
-        self.assertTrue(client.health())
-        self.assertNotEqual(tls._pins[("127.0.0.1", self.port)], stale_cert)
-
-    def test_verify_false_never_reaches_the_wire(self):
+    def test_every_request_passes_verify_true(self):
+        trust_test_ca(self)
         seen = []
         original = requests.adapters.HTTPAdapter.send
 
@@ -181,20 +137,20 @@ class LiveLoopbackTest(unittest.TestCase):
             seen.append(kwargs.get("verify"))
             return original(adapter, request, **kwargs)
 
-        client = ToolServerClient(self.url, "token", verify_tls=False)
-        with mock.patch.object(requests.adapters.HTTPAdapter, "send", spy):
-            self.assertTrue(client.health())
+        client = ToolServerClient(self.url, "token")
+        with mock.patch.object(requests.adapters.HTTPAdapter, "send", spy), \
+                mock.patch.object(requests.Session, "merge_environment_settings",
+                                  lambda self, url, proxies, stream, verify, cert: {
+                                      "proxies": {}, "stream": stream, "verify": verify, "cert": cert}):
+            client.health()
+            client.batch_policy()
         self.assertTrue(seen)
-        self.assertNotIn(False, seen)
-        self.assertTrue(all(isinstance(value, str) for value in seen))
-
-    def test_urllib_goes_through_the_same_pin(self):
-        with tls.urlopen(f"{self.url}/tools", timeout=5) as response:
-            self.assertEqual(json.loads(response.read()), {"status": "ok"})
+        self.assertTrue(all(value is True for value in seen), seen)
 
     def test_urllib_refuses_plain_http(self):
-        with self.assertRaises(InsecureServerUrl):
-            tls.urlopen("http://tools.example.org/tools", timeout=1)
+        for url in ("http://localhost:8000/tools", "http://tools.example.org/tools"):
+            with self.subTest(url=url), self.assertRaises(InsecureServerUrl):
+                tls.urlopen(url, timeout=1)
 
 
 if __name__ == "__main__":
