@@ -596,6 +596,45 @@ def _asks_to_stop(args: dict) -> bool:
     return bool(str(wanted or "").strip())
 
 
+class PlainHttpRefused(requests.exceptions.InvalidSchema):
+    """A request to an http:// URL reached the session: refused, never sent."""
+
+
+class RedirectRefused(requests.RequestException):
+    """The server answered with a redirect: refused, never followed."""
+
+
+class _RefusePlainHttp(requests.adapters.BaseAdapter):
+    """Mounted on http:// so nothing -- a caller's bug, or a redirect that
+    slipped past `_refuse_redirects` -- ever leaves this machine in clear."""
+
+    def send(self, request, **_kwargs):
+        raise PlainHttpRefused(tls.HTTPS_REQUIRED_MESSAGE, request=request)
+
+    def close(self):
+        pass
+
+
+def _refuse_redirects(response, *_args, **_kwargs):
+    """Response hook: any redirect is an error, whatever the method.
+
+    A redirect is how https:// becomes http:// without the URL ever passing
+    tls.require_https: a 307 to an http:// host would have the multipart body
+    -- scans and token -- resent in clear and its reply accepted. The server
+    never redirects, so there is nothing legitimate to follow. Raised here,
+    before requests resolves the redirect, and whether or not the call asked
+    for redirects to be followed: a 3xx counts as `ok` in requests and would
+    otherwise be parsed as an answer.
+    """
+    if response.is_redirect or 300 <= response.status_code < 400:
+        response.close()
+        raise RedirectRefused(
+            f"The server answered HTTP {response.status_code} with a redirect; "
+            "redirects are never followed.", response=response,
+        )
+    return response
+
+
 def _pooled_session() -> requests.Session:
     """One Session for every call this client makes, instead of a fresh
     connection per request.
@@ -621,6 +660,9 @@ def _pooled_session() -> requests.Session:
     # Every request passes verify=True: the public authorities of requests'
     # own bundle, hostname included, with no knob anywhere (see tls.py).
     session.mount("https://", adapter)
+    session.mount("http://", _RefusePlainHttp())
+    session.max_redirects = 0
+    session.hooks["response"].append(_refuse_redirects)
     return session
 
 

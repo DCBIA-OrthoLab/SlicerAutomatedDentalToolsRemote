@@ -537,7 +537,8 @@ def probe_ranged(session, url, headers=None):
     try:
         response = session.head(
             url, headers=dict(headers or {}), timeout=_PART_TIMEOUT,
-            verify=True, allow_redirects=True,
+            # Never followed: a redirect is how https:// becomes http://.
+            verify=True, allow_redirects=False,
         )
     except requests.RequestException as exc:
         logger.debug("range probe failed for %s: %s", url, exc)

@@ -92,16 +92,59 @@ class ClientRefusesHttpTest(unittest.TestCase):
 
 
 class _Health(BaseHTTPRequestHandler):
+    requests_seen = []
+
     def log_message(self, *args):
         pass
 
+    def _redirect(self):
+        type(self).requests_seen.append((self.command, self.path))
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        self.send_response(307)
+        self.send_header("Location", "http://localhost:9/health")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        self._redirect()
+
+    def do_HEAD(self):
+        self._redirect()
+
     def do_GET(self):
+        if self.path.startswith("/redirect"):
+            return self._redirect()
+        type(self).requests_seen.append((self.command, self.path))
         body = json.dumps({"status": "ok"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+class SessionRefusesPlainHttpTest(unittest.TestCase):
+    def test_an_http_url_never_leaves_the_session(self):
+        session = client_module._pooled_session()
+        with mock.patch("socket.create_connection") as connect:
+            for url in ("http://localhost:8000/health", "http://tools.example.org/run/x"):
+                with self.subTest(url=url), self.assertRaises(client_module.PlainHttpRefused):
+                    session.post(url, data=b"scan bytes")
+        connect.assert_not_called()
+        self.assertEqual(session.max_redirects, 0)
+
+    def test_urllib_refuses_every_redirect(self):
+        import urllib.error
+        import urllib.request
+        handler = tls._RefuseRedirects()
+        request = urllib.request.Request("https://tools.example.org/tools")
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(request, None, 307, "Temporary Redirect", {},
+                                     "http://tools.example.org/tools")
+        with self.assertRaises(urllib.error.URLError):
+            tls._opener(tls.ssl.create_default_context()).open("http://tools.example.org/", timeout=1)
 
 
 class LiveServerTest(unittest.TestCase):
@@ -146,6 +189,31 @@ class LiveServerTest(unittest.TestCase):
             client.batch_policy()
         self.assertTrue(seen)
         self.assertTrue(all(value is True for value in seen), seen)
+
+    def test_a_redirect_is_never_followed_whatever_the_method(self):
+        trust_test_ca(self)
+        _Health.requests_seen = []
+        session = client_module._pooled_session()
+        with self.assertRaises(client_module.RedirectRefused):
+            session.get(f"{self.url}/redirect", verify=True)
+        with self.assertRaises(client_module.RedirectRefused):
+            session.post(f"{self.url}/run/x", data=b"scan bytes", verify=True)
+        with self.assertRaises(client_module.RedirectRefused):
+            session.head(f"{self.url}/redirect", verify=True, allow_redirects=False)
+        # Each request reached the server once; nothing was resent anywhere.
+        self.assertEqual([command for command, _path in _Health.requests_seen],
+                         ["GET", "POST", "HEAD"])
+
+    def test_a_redirected_client_call_is_a_failure_not_an_answer(self):
+        trust_test_ca(self)
+        client = ToolServerClient(self.url, "token")
+        with mock.patch.object(client, "_server_url", f"{self.url}/redirect"):
+            self.assertFalse(client.health())
+
+    def test_the_range_probe_refuses_a_redirect(self):
+        trust_test_ca(self)
+        from ServerToolsCoreLib import transfer
+        self.assertIsNone(transfer.probe_ranged(client_module._pooled_session(), f"{self.url}/redirect"))
 
     def test_urllib_refuses_plain_http(self):
         for url in ("http://localhost:8000/tools", "http://tools.example.org/tools"):

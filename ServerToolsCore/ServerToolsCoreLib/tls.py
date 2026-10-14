@@ -26,6 +26,7 @@ setting, flag, environment variable or config value relaxes them:
 
 import ipaddress
 import ssl
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -79,8 +80,29 @@ def require_https(url: str) -> str:
     return "https" + text[len(parts.scheme):]
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Every redirect is an error. A redirect is how https:// becomes http://
+    without the new URL ever passing require_https."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirects are never followed", headers, fp
+        )
+
+
+class _RefusePlainHttp(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        raise urllib.error.URLError(HTTPS_REQUIRED_MESSAGE)
+
+
+def _opener(context: ssl.SSLContext):
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context), _RefuseRedirects(), _RefusePlainHttp()
+    )
+
+
 def urlopen(url: str, timeout: float):
-    """urllib.request.urlopen, https:// only, verified against the system's
-    public certificate authorities with the hostname check on."""
+    """urllib's urlopen, https:// only, never following a redirect, verified
+    against the public certificate authorities with the hostname check on."""
     url = require_https(url)
-    return urllib.request.urlopen(url, timeout=timeout, context=ssl.create_default_context())
+    return _opener(ssl.create_default_context()).open(url, timeout=timeout)

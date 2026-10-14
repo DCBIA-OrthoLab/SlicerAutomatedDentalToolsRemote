@@ -397,18 +397,18 @@ class TestListTools(TempInstallDir):
         self.assertTrue(deploy.DEFAULT_SERVER_URL.startswith("https://"))
 
     def test_a_remote_http_url_is_never_asked(self):
-        with mock.patch.object(deploy.tls.urllib.request, "urlopen") as urlopen:
+        with mock.patch.object(deploy.tls, "_opener") as urlopen:
             self.assertIsNone(self.deployment().list_tools("http://192.0.2.1:8000", timeout=1))
         urlopen.assert_not_called()
 
     def test_a_loopback_http_url_is_never_asked_either(self):
-        with mock.patch.object(deploy.tls.urllib.request, "urlopen") as urlopen:
+        with mock.patch.object(deploy.tls, "_opener") as urlopen:
             for url in ("http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"):
                 self.assertIsNone(self.deployment().list_tools(url, timeout=1))
         urlopen.assert_not_called()
 
     def test_no_url_is_unknown_rather_than_localhost(self):
-        with mock.patch.object(deploy.tls.urllib.request, "urlopen") as urlopen:
+        with mock.patch.object(deploy.tls, "_opener") as urlopen:
             self.assertIsNone(self.deployment().list_tools(None, timeout=1))
         urlopen.assert_not_called()
 
@@ -422,11 +422,15 @@ class TestListTools(TempInstallDir):
             def __exit__(self, *exc):
                 return False
 
-        def urlopen(url, timeout, context):
-            seen["url"], seen["context"] = url, context
-            return _Answer(b'[{"name": "AMASSS"}]')
+        class _Opener:
+            def __init__(self, context):
+                seen["context"] = context
 
-        with mock.patch.object(deploy.tls.urllib.request, "urlopen", urlopen):
+            def open(self, url, timeout):
+                seen["url"] = url
+                return _Answer(b'[{"name": "AMASSS"}]')
+
+        with mock.patch.object(deploy.tls, "_opener", _Opener):
             names = self.deployment().list_tools("https://visor.example.ts.net/")
         self.assertEqual(names, ["AMASSS"])
         self.assertEqual(seen["url"], "https://visor.example.ts.net/tools")
