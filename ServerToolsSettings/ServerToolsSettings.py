@@ -13,6 +13,7 @@ from ServerToolsCoreLib.settings_qt import (
     notify_uploads_are_not_deidentified,
     save_overrides,
 )
+from ServerToolsCoreLib.errors import plain_text
 from ServerToolsCoreLib.worker import BackgroundJob
 
 logger = logging.getLogger("ServerToolsCore.settings")
@@ -30,9 +31,11 @@ class ServerToolsSettings(ScriptedLoadableModule):
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = ["Automated Dental Tools team"]
         self.parent.helpText = _(
-            "Configure the remote tool server (URL, API key, TLS verification, timeout) used "
-            "by every Automated Dental Tools module built on ServerToolsCore. Changes apply "
-            "immediately and persist across Slicer restarts."
+            "Configure the remote tool server (URL, API key, timeout) used by every "
+            "Automated Dental Tools module built on ServerToolsCore. Changes apply "
+            "immediately and persist across Slicer restarts. The URL must be https://, "
+            "and its certificate is always verified against the public authorities: "
+            "that is not a setting."
         )
         self.parent.acknowledgementText = ""
 
@@ -63,7 +66,8 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         rootLayout.addWidget(box)
 
         self.urlEdit = qt.QLineEdit()
-        self.urlEdit.setToolTip(_("e.g. https://tools.example.org"))
+        self.urlEdit.setToolTip(_("https:// only, with a publicly-signed certificate, e.g. "
+                                  "https://name.tailnet.ts.net or https://tools.example.org"))
         formLayout.addRow(design.required_label(_("Server URL")), self.urlEdit)
 
         self.tokenEdit = qt.QLineEdit()
@@ -71,8 +75,8 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         formLayout.addRow(design.required_label(_("API key")), self.tokenEdit)
 
         # Shown rather than omitted, so nobody hunts for the check box that was
-        # here: certificate verification is not a setting any more. See
-        # config.VERIFY_TLS for why, and for the one case that needs a path.
+        # here: certificate verification is not a setting any more, and only a
+        # publicly-signed certificate is accepted. See ServerToolsCoreLib/tls.py.
         formLayout.addRow(design.section_title(_("Verify TLS")),
                           design.hint_label(_("Always on - this client sends medical images.")))
 
@@ -119,12 +123,14 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         # Checked before anything is written, so a refused URL never reaches
         # the settings file: saving first would leave a value on disk that
         # `load_overrides` drops again at the next start, with nothing on
-        # screen to say why the server reverted.
+        # screen to say why the server reverted. Every http:// is refused,
+        # loopback included.
         try:
             server_url = checked_server_url(server_url)
         except ValueError as exc:
-            slicer.util.errorDisplay(str(exc))
+            slicer.util.errorDisplay(plain_text(str(exc)))
             return
+        self.urlEdit.text = server_url
 
         token = self.tokenEdit.text
         timeout = self.timeoutSpin.value
@@ -144,7 +150,6 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         self.client.configure(
             server_url=config.SERVER_URL,
             token=config.API_TOKEN,
-            verify_tls=config.VERIFY_TLS,
             timeout=config.TIMEOUT,
         )
         self._loadFromClient()

@@ -18,6 +18,7 @@ import qt
 import slicer
 
 from . import config
+from .errors import ServerToolError
 
 logger = logging.getLogger("ServerToolsCore.slicer_io")
 
@@ -248,16 +249,57 @@ def unzip_folder(zip_path: str, dest_dir: str) -> list:
     The names matter, not just the directory. A result archive is unpacked into
     the folder the user picked, which is the same folder their earlier runs
     wrote to -- so "what did this run produce" cannot be answered by looking at
-    what is in there afterwards. It is answered here, by the archive itself.
+    what is in there afterwards. It is answered here, by the paths extraction
+    actually wrote -- never by the archive's raw names, which zipfile rewrites
+    (`../x`, `/abs`) and which would otherwise name files nothing produced.
+
+    The archive comes from a server, so it is untrusted, and the whole of it is
+    checked before anything is written: a member that is absolute, climbs out
+    with `..`, resolves outside `dest_dir` or is a symbolic link, or an archive
+    past config.UNZIP_MAX_MEMBERS / UNZIP_MAX_BYTES, refuses the archive.
     """
     os.makedirs(dest_dir, exist_ok=True)
+    root = os.path.realpath(dest_dir)
     with zipfile.ZipFile(zip_path, "r") as archive:
-        archive.extractall(dest_dir)
-        return [
-            os.path.join(dest_dir, member.filename)
-            for member in archive.infolist()
-            if not member.is_dir()
-        ]
+        members = archive.infolist()
+        _check_archive(members, root)
+        written = []
+        for member in members:
+            path = archive.extract(member, root)
+            if not member.is_dir():
+                written.append(os.path.realpath(path))
+        return written
+
+
+def _check_archive(members, root: str) -> None:
+    if len(members) > config.UNZIP_MAX_MEMBERS:
+        raise ServerToolError(
+            f"Refused an archive of {len(members)} entries: the limit is "
+            f"{config.UNZIP_MAX_MEMBERS}."
+        )
+    total = sum(member.file_size for member in members)
+    if total > config.UNZIP_MAX_BYTES:
+        raise ServerToolError(
+            f"Refused an archive that would expand to {total / 1024 ** 3:.1f} GB: "
+            f"the limit is {config.UNZIP_MAX_BYTES / 1024 ** 3:.0f} GB."
+        )
+    for member in members:
+        name = member.filename.replace("\\", "/")
+        parts = [part for part in name.split("/") if part]
+        unsafe = (
+            name.startswith("/")
+            or re.match(r"^[A-Za-z]:", name) is not None
+            or ".." in parts
+            or (member.external_attr >> 16) & 0o170000 == 0o120000   # a symlink
+        )
+        target = os.path.realpath(os.path.join(root, *parts)) if parts else root
+        if unsafe or os.path.commonpath([root, target]) != root:
+            # The name is not echoed: it came from the server and may carry
+            # anything, a patient's file name included.
+            raise ServerToolError(
+                "Refused an archive with an entry that would be written outside "
+                "the destination folder."
+            )
 
 
 # What a downloaded test file can be shown as, by extension. The point of

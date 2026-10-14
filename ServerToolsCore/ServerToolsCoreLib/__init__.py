@@ -1,6 +1,6 @@
 """Shared infrastructure for remote-server-backed Slicer tool modules.
 
-Deliberately minimal: this module imports only `client`/`errors`/`config`, none
+Deliberately minimal: this module imports only `client`/`errors`/`config`/`tls`, none
 of which touch `slicer` or `qt`. That keeps `import ServerToolsCoreLib` safe
 outside Slicer, which is what lets client.py be unit-tested in plain CI.
 
@@ -23,6 +23,7 @@ from .client import (
     testfile_entries,
 )
 from .errors import RunCancelled, ServerToolError
+from .tls import InsecureServerUrl
 
 _client = None
 
@@ -34,7 +35,6 @@ def get_client() -> ToolServerClient:
         _client = ToolServerClient(
             server_url=config.SERVER_URL,
             token=config.API_TOKEN,
-            verify_tls=config.VERIFY_TLS,
             timeout=config.TIMEOUT,
             parallelism=config.TRANSFER_PARALLELISM,
             chunk_bytes=config.TRANSFER_CHUNK_MB * 1024 * 1024,
@@ -51,6 +51,7 @@ __all__ = [
     "RunCheckpoint",
     "ServerToolError",
     "RunCancelled",
+    "InsecureServerUrl",
     "new_run_id",
     "is_file_type",
     "is_log_event",

@@ -3,6 +3,29 @@
 Imports neither `slicer` nor `qt` - see ARCHITECTURE.md dependency rule.
 """
 
+import html
+
+
+def plain_text(text) -> str:
+    """`text` as Qt will show it LITERALLY, in a message box or a tooltip.
+
+    Both render "rich text" whenever Qt guesses the string is HTML, and most of
+    what they show here came from the server -- an error's `detail`, a text
+    tool's answer, a run's terminal message, a schema's description. Shown as
+    HTML, that is markup a server controls in a dialog with clickable links:
+    a convincing "click here to re-authenticate". Escaped, it is just text.
+
+    A string with no `<` is returned unchanged: Qt never takes it for HTML, and
+    escaping it would print `&amp;` literally. Anything else is escaped and
+    wrapped in `<qt>`, which makes Qt render it as (inert) rich text, so the
+    entities read back as the characters they stand for; line breaks are kept.
+    """
+    text = "" if text is None else str(text)
+    if "<" not in text:
+        return text
+    escaped = html.escape(text).replace("\n", "<br>")
+    return f"<qt><p style='white-space: pre-wrap'>{escaped}</p></qt>"
+
 
 class ServerToolError(Exception):
     """A presentable failure while talking to the tool server."""

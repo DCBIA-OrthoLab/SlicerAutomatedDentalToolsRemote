@@ -28,7 +28,9 @@ from unittest import mock
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from tls_fixture import serve_tls, trust_test_ca  # noqa: E402
 from ServerToolsCoreLib.client import (
     ToolServerClient,
     new_run_id,
@@ -150,15 +152,16 @@ class _Live(unittest.TestCase):
     def setUp(self):
         self.state = _State()
         handler = type("_Bound", (_Handler,), {"state": self.state})
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        trust_test_ca(self)
+        self.server = serve_tls(ThreadingHTTPServer(("127.0.0.1", 0), handler))
         self.server.handle_error = lambda *_args: None
         threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.url = f"https://localhost:{self.server.server_address[1]}"
 
     def _client(self, detached=True):
-        return ToolServerClient(self.url, token="t", verify_tls=False,
+        return ToolServerClient(self.url, token="t", 
                                 timeout=10, detached_runs=detached)
 
 
@@ -313,6 +316,13 @@ class FailureTest(_Live):
         with self.assertRaises(ServerToolError) as caught:
             self._client().run(_TOOL, run_id=new_run_id())
         self.assertIn("Zz", str(caught.exception))
+
+    def test_a_failed_run_s_message_is_capped(self):
+        from ServerToolsCoreLib.client import _SERVER_MESSAGE_MAX_LEN
+        self.state.events = [_terminal(1, state="failed", message="x" * 10_000)]
+        with self.assertRaises(ServerToolError) as caught:
+            self._client().run(_TOOL, run_id=new_run_id())
+        self.assertLessEqual(len(str(caught.exception)), _SERVER_MESSAGE_MAX_LEN)
 
     def test_a_cancelled_run_is_not_a_failure(self):
         """One closes a panel quietly, the other opens an error dialog."""

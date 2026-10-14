@@ -287,6 +287,9 @@ class Qt:
     Key_Up = 0x01000013
     Key_Right = 0x01000014
     Key_Down = 0x01000015
+    PlainText = 0
+    RichText = 1
+    AutoText = 2
 
 
 class QFileDialog:
@@ -325,6 +328,10 @@ class QLabel(QObject):
     def __init__(self, text=""):
         QObject.__init__(self)
         self.text = text
+        self.textFormat = None
+
+    def setTextFormat(self, text_format):
+        self.textFormat = text_format
 
     def setText(self, text):
         self.text = text

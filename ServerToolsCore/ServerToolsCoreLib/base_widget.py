@@ -29,7 +29,7 @@ from slicer.util import VTKObservationMixin
 
 from . import (config, design, digest, formgen, is_file_type, is_log_event,
                new_run_id, slicer_io, testfile_entries)
-from .errors import RunCancelled, ServerToolError
+from .errors import RunCancelled, ServerToolError, plain_text
 from .worker import BackgroundJob
 
 logger = logging.getLogger("ServerToolsCore.base_widget")
@@ -1594,11 +1594,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
 
         if len(found) > self.MAX_RESULTS_TO_LOAD:
-            slicer.util.infoDisplay(
+            slicer.util.infoDisplay(plain_text(
                 _("{count} result files were produced - too many to load at once.\n"
                   "They are all saved in {path}.").format(
                       count=len(found), path=os.path.dirname(found[0][0]))
-            )
+            ))
             return
 
         failed = []
@@ -1610,9 +1610,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 failed.append("{}: {}".format(os.path.basename(path), exc))
         self._showLoadedResults(opened)
         if failed:
-            slicer.util.errorDisplay(
+            slicer.util.errorDisplay(plain_text(
                 _("Some results could not be loaded:\n{details}").format(
-                    details="\n".join(failed)))
+                    details="\n".join(failed))))
 
     def _showLoadedResults(self, opened: list) -> None:
         """Put what was just loaded in front of the user.
@@ -1817,7 +1817,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             args = self.collectArgs()
             batches = self._cohortBatches()
         except Exception as exc:
-            slicer.util.errorDisplay(str(exc))
+            slicer.util.errorDisplay(plain_text(str(exc)))
             return
 
         prepared = []
@@ -1840,7 +1840,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # error is the one outcome nobody can act on.
             for workspace, _files in prepared:
                 workspace.__exit__(None, None, None)
-            slicer.util.errorDisplay(str(exc))
+            slicer.util.errorDisplay(plain_text(str(exc)))
             return
 
         sizes = [len(batch[1]) for batch in batches] if batches[0] else []
@@ -1870,9 +1870,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 try:
                     os.makedirs(outputDir, exist_ok=True)
                 except OSError as exc:
-                    slicer.util.errorDisplay(
+                    slicer.util.errorDisplay(plain_text(
                         _("Could not create {path}: {error}").format(
-                            path=outputDir, error=exc))
+                            path=outputDir, error=exc)))
                     return
             self._runsStarted += 1
             self._runs.append(_Run(
@@ -2255,7 +2255,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if run is not None and run.cohort and not run.cohort.complete:
             slicer.util.showStatusMessage(message, 3000)
             return
-        slicer.util.infoDisplay(message)
+        slicer.util.infoDisplay(plain_text(message))
 
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""
@@ -2276,7 +2276,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.showStatusMessage(
                 _("Run {number} cancelled.").format(number=run.number), 3000)
             return
-        slicer.util.errorDisplay(str(exc))
+        slicer.util.errorDisplay(plain_text(str(exc)))
 
     # ------------------------------------------------------------------
     # Quality control: a run that stopped for somebody to look at it
@@ -3330,9 +3330,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         def on_error(exc):
             finish()
-            slicer.util.errorDisplay(
+            slicer.util.errorDisplay(plain_text(
                 _("Could not download the test file: {error}").format(error=exc)
-            )
+            ))
 
         self._downloadJob = BackgroundJob(
             task, on_success=on_success, on_error=on_error, on_progress=self._showPhase

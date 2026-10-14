@@ -3,7 +3,9 @@
 Same dependency rule as `client.py` (see ARCHITECTURE.md): **this module
 imports neither `slicer` nor `qt`**, so it runs — and is unit-tested — in plain
 CI with no Slicer interpreter. Everything it does is `subprocess` plus the
-standard library.
+standard library, and `ServerToolsCoreLib.tls` (standard library too) for the
+one request it makes, so the HTTPS-only rule and the loopback certificate pin
+are the client's own rather than a copy.
 
 It is deliberately thin. The real logic lives in the server repository's
 `scripts/server_ctl.py`, which this class clones and then calls: the panel and
@@ -26,14 +28,31 @@ import subprocess
 import sys
 import threading
 import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
+
+from ServerToolsCoreLib import tls
 
 # How much of a failed command's output travels with its error message.
 _ERROR_TAIL_LINES = 12
 
 DEFAULT_REPO_URL = "https://github.com/DCBIA-OrthoLab/VISOR-serve.git"
 DEFAULT_BRANCH = "main"
-DEFAULT_SERVER_URL = "http://localhost:8000"
+# Where the container listens on this machine, for DISPLAY only. The client
+# never uses it: the certificate the server presents there is self-signed, and
+# the client accepts only a publicly-signed one (ServerToolsCoreLib/tls.py).
+# What the client is given is the deployment's public URL -- see client_url().
+DEFAULT_SERVER_URL = "https://localhost:8000"
+
+NO_PUBLIC_URL_MESSAGE = (
+    "This server has no public address yet. The extension only talks to a server "
+    "through an https:// address whose certificate a public authority signed -- "
+    "for a server on this computer too. Give it one, then press Refresh:\n\n"
+    "  - run scripts/setup-tailscale.sh in the server's folder (tailscale serve "
+    "publishes it as https://<name>.<tailnet>.ts.net), or\n"
+    "  - set PUBLIC_URL in the server's .env to its https:// address behind a "
+    "reverse proxy with a Let's Encrypt or institutional certificate, or served "
+    "directly with its own public certificate."
+)
 
 # Where a clone goes when the user has not said. The home directory, not
 # anywhere under the Slicer install: this holds a git clone plus up to ~29 GB
@@ -138,7 +157,8 @@ def find_python() -> str:
 
 
 #: What `bind` means when nothing has been chosen. Loopback, because this
-#: deployment speaks plain HTTP and it carries medical images.
+#: deployment's certificate is self-signed and only this computer can verify
+#: it (by reading it over loopback), and it carries medical images.
 BIND_LOCALHOST = "127.0.0.1"
 #: The empty string is not "unset" here — it is how the compose file is told to
 #: publish on every interface, IPv4 and IPv6 both. See its own comment.
@@ -155,8 +175,9 @@ def host_addresses():
     A VPN address is singled out rather than lumped in with the rest because it
     is a genuinely different risk: publishing on a Tailscale/WireGuard address
     reaches only the machines in that private mesh, over an encrypted link,
-    while the same server on a LAN address is plain HTTP anyone on the wire can
-    read. The two must not look like the same choice in a list.
+    while the same server on a LAN address presents a self-signed certificate
+    that no other machine can verify. The two must not look like the same
+    choice in a list.
 
     Docker's own bridges are skipped: binding the server to `docker0` publishes
     it to containers and nothing else, which is never what anyone means.
@@ -277,6 +298,31 @@ def probe_host() -> dict:
             "gpu_access": "runtime" if runtime else ("cdi" if cdi else None),
         },
     }
+
+
+def client_url(result):
+    """The URL the CLIENT may use for this deployment, or None.
+
+    server_ctl.py reports it as `public_url` (top level from `up`, under
+    `server` from `status`): PUBLIC_URL from the deployment's .env when set,
+    otherwise the address `tailscale serve` publishes, otherwise "". Either is
+    an https:// address with a publicly-signed certificate. `url` -- the local
+    listener and its self-signed certificate, which the client refuses -- is
+    never handed over, and neither is a loopback address. There is no fallback:
+    without a public address there is no URL to give the client.
+    """
+    result = result or {}
+    server = result.get("server") or {}
+    for candidate in (result.get("public_url"), server.get("public_url")):
+        if not candidate:
+            continue
+        try:
+            url = tls.require_https(candidate)
+        except ValueError:
+            continue
+        if not tls.is_loopback(urlsplit(url).hostname):
+            return url
+    return None
 
 
 def tool_names(payload):
@@ -695,9 +741,13 @@ class LocalServerDeployment:
         `GET /tools` is the one unauthenticated endpoint besides `/health`, so
         this needs no token and stays inside the no-`requests` rule.
         """
-        url = (url or DEFAULT_SERVER_URL).rstrip("/")
+        if not url:
+            return None
         try:
-            with urllib.request.urlopen(f"{url}/tools", timeout=timeout) as response:
+            # https:// only and a publicly-signed certificate; anything else
+            # (an http:// URL, the local self-signed listener) reads "unknown".
+            url = tls.require_https(url)
+            with tls.urlopen(f"{url}/tools", timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError):
             return None

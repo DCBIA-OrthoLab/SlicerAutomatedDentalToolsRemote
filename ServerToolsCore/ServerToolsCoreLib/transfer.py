@@ -39,6 +39,7 @@ from typing import Callable, Optional
 
 import requests
 
+from . import tls
 from .errors import ServerToolError
 
 logger = logging.getLogger("ServerToolsCore.transfer")
@@ -191,7 +192,6 @@ def upload_file(
     server_url: str,
     headers: dict,
     path: str,
-    verify_tls: bool = True,
     parallelism: int = DEFAULT_PARALLELISM,
     chunk_bytes: int = DEFAULT_CHUNK_BYTES,
     compress: bool = True,
@@ -205,7 +205,7 @@ def upload_file(
     """
     size = os.path.getsize(path)
     name = os.path.basename(path)
-    opened = _open_session(session, server_url, headers, name, size, chunk_bytes, verify_tls)
+    opened = _open_session(session, server_url, headers, name, size, chunk_bytes)
     upload_id = opened["upload_id"]
     chunk_size = opened["chunk_size"]
     part_count = opened["part_count"]
@@ -219,7 +219,7 @@ def upload_file(
         for attempt in range(_MAX_ATTEMPTS):
             failures = _send_parts(
                 session, part_url, headers, path, pending, chunk_size, size,
-                gzip_parts, verify_tls, parallelism, meter,
+                gzip_parts, parallelism, meter,
             )
             if not failures:
                 break
@@ -233,28 +233,28 @@ def upload_file(
             # list we think failed: a part whose response was lost on the way
             # back did land, and re-sending it would be wasted bandwidth on a
             # link that just proved it has none to spare.
-            pending = _missing_parts(session, server_url, headers, upload_id, verify_tls, pending)
+            pending = _missing_parts(session, server_url, headers, upload_id, pending)
             if not pending:
                 break
         meter.finish()
     except Exception:
         # Never leave a half-filled session holding patient data on the server;
         # it has a reaper, but only as a safety net.
-        _discard(session, server_url, headers, upload_id, verify_tls)
+        _discard(session, server_url, headers, upload_id)
         raise
 
     logger.info("uploaded %s (%d byte(s)) as %d part(s)", name, size, part_count)
     return upload_id
 
 
-def _open_session(session, server_url, headers, name, size, chunk_bytes, verify_tls) -> dict:
+def _open_session(session, server_url, headers, name, size, chunk_bytes) -> dict:
     try:
         response = session.post(
             f"{server_url}/uploads",
             headers=headers,
             json={"filename": name, "size": size, "chunk_size": chunk_bytes},
             timeout=_PART_TIMEOUT,
-            verify=verify_tls,
+            verify=tls.ca_bundle(),
         )
     except requests.RequestException as exc:
         raise ServerToolError(f"Could not start the upload of '{name}': {exc}") from exc
@@ -281,7 +281,7 @@ def _open_session(session, server_url, headers, name, size, chunk_bytes, verify_
 
 def _send_parts(
     session, part_url, headers, path, indices, chunk_size, size,
-    gzip_parts, verify_tls, parallelism, meter,
+    gzip_parts, parallelism, meter,
 ):
     """Push `indices` concurrently; return the errors, one per part that failed.
 
@@ -317,7 +317,7 @@ def _send_parts(
             headers=part_headers,
             data=data,
             timeout=_PART_TIMEOUT,
-            verify=verify_tls,
+            verify=tls.ca_bundle(),
         )
         if not response.ok:
             raise ServerToolError(f"Part {index} refused: {_message(response)}")
@@ -337,13 +337,13 @@ def _send_parts(
     return failures
 
 
-def _missing_parts(session, server_url, headers, upload_id, verify_tls, fallback):
+def _missing_parts(session, server_url, headers, upload_id, fallback):
     try:
         response = session.get(
             f"{server_url}/uploads/{upload_id}",
             headers=headers,
             timeout=_PART_TIMEOUT,
-            verify=verify_tls,
+            verify=tls.ca_bundle(),
         )
         if response.ok:
             return response.json().get("missing_parts", fallback)
@@ -352,13 +352,13 @@ def _missing_parts(session, server_url, headers, upload_id, verify_tls, fallback
     return fallback
 
 
-def _discard(session, server_url, headers, upload_id, verify_tls) -> None:
+def _discard(session, server_url, headers, upload_id) -> None:
     try:
         session.delete(
             f"{server_url}/uploads/{upload_id}",
             headers=headers,
             timeout=_PART_TIMEOUT,
-            verify=verify_tls,
+            verify=tls.ca_bundle(),
         )
     except requests.RequestException as exc:
         logger.debug("could not discard upload %s: %s", upload_id, exc)
@@ -380,7 +380,6 @@ def download_ranged(
     destination: str,
     size: int,
     headers: Optional[dict] = None,
-    verify_tls: bool = True,
     parallelism: int = DEFAULT_PARALLELISM,
     chunk_bytes: int = DEFAULT_CHUNK_BYTES,
     progress_cb: Optional[Callable[[str], None]] = None,
@@ -436,7 +435,7 @@ def download_ranged(
                 try:
                     part_started = time.monotonic()
                     _fetch_span(
-                        session, url, headers, verify_tls, file_descriptor,
+                        session, url, headers, file_descriptor,
                         start, end, size, meter, whole_body,
                     )
                     with part_lock:
@@ -477,7 +476,7 @@ def download_ranged(
     return destination
 
 
-def _fetch_span(session, url, headers, verify_tls, file_descriptor, start, end, size, meter, whole_body):
+def _fetch_span(session, url, headers, file_descriptor, start, end, size, meter, whole_body):
     """One ranged GET, written straight to its offset in the destination.
 
     Verifies its own length before returning: `iter_content` ending early is
@@ -492,7 +491,7 @@ def _fetch_span(session, url, headers, verify_tls, file_descriptor, start, end, 
     request_headers["Accept-Encoding"] = "identity"
 
     with session.get(
-        url, headers=request_headers, stream=True, timeout=_PART_TIMEOUT, verify=verify_tls
+        url, headers=request_headers, stream=True, timeout=_PART_TIMEOUT, verify=tls.ca_bundle()
     ) as response:
         if not response.ok:
             raise ServerToolError(f"Range {start}-{end} refused: {_message(response)}")
@@ -530,7 +529,7 @@ def _pwrite_all(file_descriptor, data, offset) -> int:
     return written
 
 
-def probe_ranged(session, url, headers=None, verify_tls=True):
+def probe_ranged(session, url, headers=None):
     """Total size if `url` can be fetched in ranges, else None.
 
     A HEAD is one round trip against a transfer that is about to be many, and
@@ -539,7 +538,8 @@ def probe_ranged(session, url, headers=None, verify_tls=True):
     try:
         response = session.head(
             url, headers=dict(headers or {}), timeout=_PART_TIMEOUT,
-            verify=verify_tls, allow_redirects=True,
+            # Never followed: a redirect is how https:// becomes http://.
+            verify=tls.ca_bundle(), allow_redirects=False,
         )
     except requests.RequestException as exc:
         logger.debug("range probe failed for %s: %s", url, exc)

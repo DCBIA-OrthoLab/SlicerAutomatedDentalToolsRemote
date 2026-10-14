@@ -31,9 +31,10 @@ SlicerAutomatedDentalTools/
 │   ├── Testing/Python/qt_stubs.py          # the stand-ins test_formgen/test_joystick run against
 │   └── ServerToolsCoreLib/                 # the importable Python package
 │       ├── __init__.py                     # get_client() + ToolServerClient/ToolResult/ServerToolError
-│       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT, TRANSFER_* (compiled-in defaults)
+│       ├── config.py                       # SERVER_URL, API_TOKEN, TIMEOUT, TRANSFER_* (compiled-in defaults)
 │       ├── client.py                       # ToolServerClient — the only class that speaks HTTP
 │       ├── transfer.py                     # parallel chunked upload / ranged download of big files
+│       ├── tls.py                          # https:// only, publicly-signed certificates only
 │       ├── errors.py                       # ServerToolError + HTTP status → message mapping
 │       ├── digest.py                       # what a reviewer changed in a folder, by content not mtime
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
@@ -198,7 +199,7 @@ interpreter launch:
 
 ## `client.py`
 
-- `ToolServerClient(server_url, token, verify_tls=True, timeout=600)`.
+- `ToolServerClient(server_url, token, timeout=600)`. There is no `verify_tls`: every request passes `verify=tls.ca_bundle()`.
 - `health()` → bool, never raises (a failed health check just means "offline").
   Uses a short fixed timeout (`_HEALTH_CHECK_TIMEOUT = 10`s), not the tool
   timeout — it feeds the status banner on every `enter()` and must not be able
@@ -420,101 +421,56 @@ interpreter launch:
   500 is the one exception: a crash inside a tool is not a message meant for
   the user, and its detail may leak server-side internals, so it keeps a
   generic wording.
-- `configure(server_url=None, token=None, verify_tls=None, timeout=None)` /
-  read-only properties `server_url`/`token`/`verify_tls`/`timeout` — updates
+- `configure(server_url=None, token=None, timeout=None)` /
+  read-only properties `server_url`/`token`/`timeout` — updates
   the already-constructed singleton **in place** (only the fields passed) and
   unconditionally drops the cached `/tools` schema, since it may no longer
   belong to the newly-configured server. This is what lets
   `ServerToolsSettings` change the server URL/API key at runtime without a
-  Slicer restart — see the dedicated section below.
+  Slicer restart — see the dedicated section below. A `server_url` that is
+  not `https://` raises `tls.InsecureServerUrl` before anything changes.
 
-### A run that says what it is doing, and a run that can be stopped
+## `tls.py` — HTTPS only, publicly-signed certificates only
 
-`run()` takes three more optional arguments, and every one of them is optional
-on **both** sides of the wire. A run sent without an id is byte for byte the
-request this client always sent; a client using these endpoints against a
-server that has none of them gets a `404` and falls back to the elapsed-time
-tick it already shows. The extension ships on its own schedule, so that is a
-requirement rather than a nicety.
+The server has no plain-HTTP listener, and this client sends medical images
+and a bearer token. `client.checked_server_url` (which delegates to
+`tls.require_https`) refuses every server URL that is not `https://`,
+`http://localhost` included — in the constructor, in `configure()`, in the
+saved settings (`load_overrides` logs and drops it; the rest still applies),
+in the settings panel's Save and in SlicerCloud. Nothing is upgraded.
 
-- `new_run_id()` → `secrets.token_urlsafe(24)`, and the CLIENT mints it. A
-  server-assigned id could only travel in the response, and the response is the
-  last thing that happens — the whole point is to say something while the
-  request is still in flight. It is a **capability**: knowing it plus the
-  bearer token is what authorises reading a run's progress and cancelling it,
-  the same model the result ids already use, which is why it is a CSPRNG and
-  never a counter or anything derived from a patient.
-- `run(..., run_id=..., event_cb=..., cancel_event=...)`. The id travels as the
-  `X-Run-Id` header (an unknown header is ignored by an older server, which is
-  what makes it safe to send). `event_cb` receives the run's progress events,
-  and `cancel_event` is a `threading.Event` the caller sets to withdraw the
-  run.
-- `watch_run(run_id, on_event, stop_event=None)` → bool. Consumes
-  `GET /runs/{id}/events?logs=user` (Server-Sent Events), parses each `data:` frame into
-  the contract's event dict, and delivers them deduplicated and ordered on
-  `seq`. Returns whether anything was delivered — `False` is how a caller
-  learns it is talking to a server that predates all of this.
-- `cancel_run(run_id)` → bool. `DELETE /runs/{id}`, retried once, and it never
-  raises: by the time it is called the panel has already released the run, so
-  there is nothing a user could do with the news of a failure.
+Every request passes `verify=tls.ca_bundle()` -- certifi's bundle, named
+explicitly, because a bare `verify=True` lets `REQUESTS_CA_BUNDLE` or
+`CURL_CA_BUNDLE` swap the trusted authorities; urllib, in `deploy.py`, gets
+the same file as `cafile` -- hostname included. There is no `VERIFY_TLS`, no custom CA, no pinning and never
+`verify=False`. The server is therefore reached through a public address
+whose certificate a public authority signed -- the
+`https://<name>.<tailnet>.ts.net` one `tailscale serve` publishes, or its own
+domain behind a reverse proxy or served directly with a Let's Encrypt or
+institutional certificate -- for a local install too; `config.SERVER_URL` is a `.invalid` placeholder until then.
+`tls.is_loopback` is the client's one loopback predicate (`127.0.0.0/8`,
+`::1`, `localhost`, `*.localhost`); it decides only whether data leaves the
+machine, never how it travels.
 
-**The watcher is a SECOND connection, opened inside `run()` for the duration of
-the POST.** It has to be: the thread calling `run()` is blocked inside that POST
-for the whole inference, which is precisely the window there is nothing to say
-from. It is started immediately before the POST (the run exists server-side only
-once the request gets there) and stopped in a `finally` whatever the outcome —
-a watcher left retrying against a run that has already answered is a thread
-holding a connection open for nobody.
+No redirect is followed and nothing travels in clear: the pooled session
+mounts an adapter on `http://` that raises (`PlainHttpRefused`), has
+`max_redirects = 0`, and a response hook turns any 3xx into
+`RedirectRefused` before requests can act on it -- a 307 to an `http://` host
+would otherwise have a multipart body, scans and token, resent in clear.
+`tls.urlopen` builds its opener with a redirect handler that refuses and an
+`http://` handler that raises.
 
-Three properties of the loop are load-bearing, and each has a test:
+The live-server tests (`tls_fixture.py`) issue a `localhost` certificate from
+a throwaway CA and trust it in the TEST only, by patching `tls.ca_bundle`.
 
-- **A `404` is tolerated for a startup window** (15 s, or until the first event
-  arrives). The run is registered server-side when the POST lands, and on the
-  multipart path *parsing the form is receiving the upload* — so a watcher that
-  gave up on the first 404 would go quiet on exactly the long uploads this
-  feature exists for. Once any event has arrived the window is over: a 404 then
-  means the run was reaped, and it stops.
-- **It reconnects** when a stream ends without a terminal event — a dropped
-  connection, a proxy's idle timeout, a read timeout — which matters most on
-  the runs that last hours. The read timeout is deliberately long (30 s): the
-  contract has no heartbeat, so silence is the normal state of an inference.
-- **Which makes deduplication mandatory rather than decorative.** Every
-  connection replays the run from the beginning by design ("a watcher that
-  attaches late is never behind"), so `seq` is the only thing keeping a
-  reconnect from re-announcing an hour of progress.
-
-`normalise_run_event` is what a panel actually receives: an event either arrives
-with a usable `seq`, a `fraction` that is `None` or really within `0..1`, a
-non-negative `depth` and a message truncated to 200 characters, or it does not
-arrive at all. The server truncates the message too; trusting that alone would
-leave one forgetful server able to push a megabyte of text into a `QLabel`.
-The optional fields of a weighted chain are kept only when well formed:
-`own_fraction` (a number in `0..1`; `fraction` is already the whole run's
-position and stays what the bar draws), `tool` and `edge` on a nested call's
-markers, and `call`. A `tool` is held to `[A-Za-z0-9_-]{1,64}` here as it is on
-the server: a name is all the panel needs, and an identifier cannot carry a
-file name.
-
-**The tool's own log lines ride the same stream.** `watch_run` asks for
-`/runs/{id}/events?logs=user` on every connection; a server that predates log
-lines ignores the query and sends none, and one that has them sends none
-without it, so asking is always harmless. A line arrives as `"kind": "log"`
-and `normalise_run_event` gives it a shape of its own -- `seq`, `at`, `kind`,
-`level` (one of `debug`/`info`/`warning`/`error`, anything else read as
-`info`), `message` (200 characters), `depth` and an optional `source` held to
-the same identifier rule -- with **no** `state`, `phase` or `fraction`, so
-nothing downstream can read it as progress by accident. `is_log_event` is the
-test every consumer makes first. The two kinds share the run's `seq`, so the
-one dedupe covers both, and a log line never ends a watcher whatever state a
-server put on it -- only progress can be terminal, on the blocking path and on
-a detached run's `_await_terminal` alike.
-
-**`499` is a cancellation, not a failure.** `errors.RunCancelled` is a class of
-its own — that is the whole reason the contract borrowed a non-standard status
-code — because one outcome closes a panel quietly and the other opens an error
-dialog, and no client should have to parse a message to tell them apart. It
-subclasses `ServerToolError`, so a caller that has never heard of it behaves
-exactly as before.
+Server text is shown as text: `errors.plain_text` escapes anything Qt would
+take for HTML before a message box shows it (a failure's `detail`, capped at
+`_SERVER_MESSAGE_MAX_LEN`, a text tool's answer, a run's terminal message),
+the label factories in `design.py` are `PlainText`, and schema descriptions
+reach tooltips through the same helper. `slicer_io.unzip_folder` checks the
+whole archive first -- no entry outside the destination (absolute, `..`, a
+symlink, a symlinked folder), at most `config.UNZIP_MAX_MEMBERS` entries and
+`config.UNZIP_MAX_BYTES` -- and returns only the paths extraction wrote.
 
 ## `base_widget.py` — `ServerToolWidgetBase`
 
@@ -1648,14 +1604,15 @@ over before the first byte left.
 - Tuned via `config.py`: `TRANSFER_PARALLELISM` (4), `TRANSFER_CHUNK_MB` (8),
   `TRANSFER_COMPRESS` (True).
 
-`test_transfer.py` drives all of this against a real `ThreadingHTTPServer` that
+`test_transfer.py` drives all of this against a real `ThreadingHTTPServer`
+(wrapped in TLS with a throwaway CA the test alone trusts, `tls_fixture.py`) that
 can drop parts, corrupt them, cut ranges short and refuse ranges altogether -
 mocks prove nothing about concurrency or byte offsets.
 
 ## Runtime configuration: `ServerToolsSettings` + `settings_qt.py`
 
 `config.py` holds the **compiled-in defaults**; users need a way to point the
-extension at a different server (URL, API key, TLS verification, timeout)
+extension at a different server (URL, API key, timeout; TLS verification is not a setting)
 without editing source and rebuilding. Two pieces:
 
 - **`settings_qt.py`** (in `ServerToolsCoreLib`, not imported by `__init__.py`):
@@ -1667,7 +1624,7 @@ without editing source and rebuilding. Two pieces:
   rule above). Only Slicer-side code imports it directly.
   - `load_overrides()` → `{}` if the user never saved anything, otherwise only
     the fields that were actually saved.
-  - `save_overrides(server_url, token, verify_tls, timeout)`,
+  - `save_overrides(server_url, token, timeout)`,
     `clear_overrides()` ("restore defaults" — removes the whole group).
   - `apply_saved_overrides(client)` — applies `load_overrides()` onto a
     `ToolServerClient` via `configure()`, if any override exists.
@@ -1786,10 +1743,12 @@ must not start a 29 GB transfer.
 When the server comes up, the panel saves its URL and generated API key
 through `settings_qt.save_overrides` and `client.configure()` — the same path
 `ServerToolsSettings` uses, so every module immediately points at the new
-server with no restart. It deliberately does **not** touch `verify_tls`: that
-flag is irrelevant to an `http://localhost` URL, and clearing it here would
-silently disable certificate checking for whatever `https://` server the user
-points at next.
+server with no restart. The URL it saves is the `public_url` server_ctl.py
+reports (`deploy.client_url`: `PUBLIC_URL` from the deployment's `.env`, else
+the `tailscale serve` address), never the local listener, whose self-signed
+certificate the client refuses; with no public URL it saves nothing and names
+the ways to get one (`setup-tailscale.sh`, or `PUBLIC_URL` behind a reverse
+proxy or a server certificate).
 
 ### Which branch gets deployed
 
@@ -2197,15 +2156,12 @@ This confirms the four success criteria from the brief:
   one does not repaint it until the user leaves and re-enters the module (or
   reopens Slicer). `design.tokens()` itself always reflects the current mode;
   only the "when do we re-apply the stylesheet" question is coarse.
-- **`SlicerCloud` deploys over plain HTTP, on loopback only**: the generated
-  deployment publishes port 8000 on `127.0.0.1` and the panel configures
-  `http://localhost:8000`. TLS on a self-signed loopback certificate buys
-  nothing a Slicer user would verify, and would make the plug-and-play path
-  fail on a certificate warning. The constraint that makes it acceptable is
-  the bind address, which `server_ctl.py` writes into `.env` — the moment that
-  server is published on a network address it is medical images in the clear,
-  and it needs a TLS terminator in front. `server/SECURITY.md` says so; this
-  is the client-side half of the same statement.
+- **`SlicerCloud` requires a public address, even for a server on this
+  machine**: the generated deployment publishes port 8000 on `127.0.0.1` with
+  a self-signed certificate, which the client refuses, so the panel configures
+  the deployment's `public_url` -- `tailscale serve`'s address, or
+  `PUBLIC_URL` behind a reverse proxy or a server certificate -- and nothing
+  when there is none.
 - **The panel cannot deploy to a *remote* host**: it drives a clone on the
   machine Slicer runs on. Standing a server up on the lab GPU box is the same
   `scripts/setup-server.sh` over ssh, and then this panel is only used for its

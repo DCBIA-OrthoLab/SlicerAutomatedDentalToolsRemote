@@ -5,20 +5,20 @@ config over environment variables (see ARCHITECTURE.md). Do not commit a real
 production token — override these locally, or replace them at build time.
 """
 
-SERVER_URL = "http://localhost:8000"
-API_TOKEN = "dev-token"
-# Certificate verification is ON, and it is deliberately not a user setting.
-# This client sends medical images and an API key, and TLS without verification
-# protects neither: it encrypts the traffic to whoever answered, which on a
-# shared network is not necessarily the server. The standard deployment puts
-# `tailscale serve` in front of the server, which fetches and renews a
-# publicly-signed certificate, so True needs nothing configured here.
+# A placeholder, on purpose: `.invalid` never resolves, so nothing is sent
+# anywhere until a real URL is set in Server Tools Settings (or by Slicer
+# Cloud). That URL is the server's public https:// address, whose certificate a
+# public authority signed: the `https://<name>.<tailnet>.ts.net` one
+# `tailscale serve` publishes, or a domain behind a reverse proxy, or served
+# directly, with a Let's Encrypt or institutional certificate. That holds for a
+# server on this very machine too, since the self-signed certificate the server
+# presents on its own port is not one this client accepts.
 #
-# Against a certificate no public authority signed, set this to the PATH of that
-# certificate: `requests` accepts a file here and verifies against it alone.
-# That is a source edit on purpose -- no panel offers it, and a value saved by
-# an older client is ignored (see settings_qt.load_overrides).
-VERIFY_TLS = True
+# https:// only, and the certificate is always verified against the public
+# authorities, hostname included (see tls.py). Neither is a setting: there is
+# no VERIFY_TLS any more, no CA path, and no way to turn verification off.
+SERVER_URL = "https://set-your-server.invalid"
+API_TOKEN = "dev-token"
 TIMEOUT = 600
 
 # How many connections a single file's transfer uses at once (see transfer.py).
@@ -88,3 +88,11 @@ ZIP_COMPRESS = None
 # resumable -- the event stream reconnects and dedupes, where a dropped POST
 # simply lost an answer the GPU had already been spent computing.
 DETACHED_RUNS = True
+
+# Ceilings on an archive this client unpacks (a result, a checkpoint, a hosted
+# test file), checked from the archive's own directory BEFORE a byte is
+# written. Generous on purpose: a whole cohort's label volumes fit many times
+# over. What they stop is an archive that would fill the disk or the inode
+# table -- a zip bomb, from a compromised or misbehaving server.
+UNZIP_MAX_BYTES = 20 * 1024 ** 3
+UNZIP_MAX_MEMBERS = 100_000

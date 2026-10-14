@@ -10,11 +10,15 @@ side code (ServerToolsCore.py at startup, ServerToolsSettingsWidget) uses it.
 layer on top, edited via the "Server Tools Settings" module.
 """
 
+import logging
 from urllib.parse import urlsplit
 
 import qt
 
 from .client import checked_server_url, is_loopback
+from .errors import plain_text
+
+logger = logging.getLogger(__name__)
 
 _GROUP = "ServerTools"
 _KEY_SERVER_URL = f"{_GROUP}/ServerUrl"
@@ -30,23 +34,24 @@ def load_overrides() -> dict:
     overrides = {}
     if settings.contains(_KEY_SERVER_URL):
         saved = str(settings.value(_KEY_SERVER_URL))
-        # Dropped rather than applied when it is plain HTTP to a remote host,
-        # for the reason `verify_tls` is no longer read back either: a value a
-        # user saved before this client refused that scheme would otherwise
-        # keep sending scans in the clear for ever. Falling back to config.py
-        # leaves them on loopback, which is safe, and the settings panel says
-        # what happened the moment they open it.
+        # Any http:// URL -- loopback included, the default of older clients --
+        # is dropped rather than applied, for the reason `verify_tls` is no
+        # longer read back either: the server has no plain-HTTP listener, and
+        # a value saved before this client refused that scheme must not decide
+        # anything. The other settings still apply, Slicer still starts, the
+        # URL falls back to config.py's placeholder, and the settings panel
+        # shows it the moment they open it.
         try:
             overrides["server_url"] = checked_server_url(saved)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.error("The saved server URL was ignored: %s", exc)
     if settings.contains(_KEY_API_TOKEN):
         overrides["token"] = str(settings.value(_KEY_API_TOKEN))
     # `verify_tls` is deliberately NOT read back. It was a saved setting until
     # 2026-10-13, and a machine that had stored False would otherwise keep
     # certificate verification off for ever -- the one setting a user must not
-    # be able to turn off on a client that sends medical images. `config.py`
-    # owns it now, and a stale key in the file decides nothing.
+    # be able to turn off on a client that sends medical images. It is not a
+    # setting anywhere any more, and a stale key in the file decides nothing.
     if settings.contains(_KEY_TIMEOUT):
         overrides["timeout"] = int(settings.value(_KEY_TIMEOUT, 600))
     return overrides
@@ -54,7 +59,7 @@ def load_overrides() -> dict:
 
 def save_overrides(server_url: str, token: str, timeout: int) -> None:
     """Persist what a user may change. Certificate verification is not in that
-    set -- see config.VERIFY_TLS."""
+    set -- it is always on, see tls.py."""
     settings = qt.QSettings()
     settings.setValue(_KEY_SERVER_URL, server_url)
     settings.setValue(_KEY_API_TOKEN, token)
@@ -112,14 +117,14 @@ def notify_uploads_are_not_deidentified(server_url: str) -> None:
 
     host = urlsplit(server_url).hostname or server_url
     try:
-        slicer.util.warningDisplay(_(
+        slicer.util.warningDisplay(plain_text(_(
             "Files are uploaded unmodified.\n\n"
             "This client does not de-identify anything. What you select is sent to "
             "{0} as it sits on disk: the file names, the DICOM headers, and whatever "
             "identifiers they carry.\n\n"
             "De-identify your data before selecting it, or confine use to data that "
             "carries no protected health information."
-        ).format(host))
+        ).format(host)))
     except Exception:  # noqa: BLE001 - a missing dialog must not undo a save
         return
     mark_upload_notice_shown(server_url)

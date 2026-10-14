@@ -291,7 +291,7 @@ class FakeDeployment:
             "gpu": {"nvidia_runtime": False, "nvidia_smi": False},
             "clone": {"is_git_repo": False, "behind": 0, "error": "not installed yet"},
             "container": {"running": False, "state": None},
-            "server": {"url": "http://localhost:8000", "healthy": False},
+            "server": {"url": "https://localhost:8000", "healthy": False},
             "env": {"has_token": False},
         }
 
@@ -472,6 +472,55 @@ class TestChangingTheInstallFolder(PanelTestCase):
         self.assertEqual(_QSettings.store["SlicerCloud/InstallDir"], "/tmp/remembered")
 
 
+class TestServerUrlIsHttpsOnly(PanelTestCase):
+    """The URL an install hands back becomes every module's server, so the
+    rules apply here too: never http://, loopback included, and only the
+    deployment's public URL -- never the local self-signed listener, which the
+    client refuses to verify."""
+
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        client = SlicerCloud.get_client()
+        self.addCleanup(client.configure, server_url=client.server_url, token=client.token)
+
+    def _install_answering(self, answer):
+        class Recording(FakeDeployment):
+            def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+                return dict(answer)
+
+        SlicerCloud.LocalServerDeployment = Recording
+        widget = self.panel()
+        widget._deployment = None
+        widget.useServerCheck.checked = True
+        widget.onInstall()
+        return widget
+
+    def test_every_http_url_is_refused_and_nothing_is_saved(self):
+        widget = self.panel()
+        before = SlicerCloud.get_client().server_url
+        for url in ("http://localhost:8000", "http://192.0.2.1:8000"):
+            widget._applyServerSettings(url, "t")
+        self.assertEqual(SlicerCloud.get_client().server_url, before)
+        self.assertNotIn("ServerTools/ServerUrl", _QSettings.store)
+        self.assertEqual(len(DIALOGS["error"]), 2)
+        self.assertIn("https://", DIALOGS["error"][0])
+
+    def test_the_public_url_is_what_the_client_is_given(self):
+        self._install_answering({"url": "https://localhost:8000", "token": "t", "healthy": True,
+                                 "public_url": "https://visor.example.ts.net"})
+        self.assertEqual(SlicerCloud.get_client().server_url, "https://visor.example.ts.net")
+        self.assertEqual(_QSettings.store["ServerTools/ServerUrl"], "https://visor.example.ts.net")
+
+    def test_without_a_public_url_nothing_is_saved_and_the_panel_says_so(self):
+        before = SlicerCloud.get_client().server_url
+        self._install_answering({"url": "https://localhost:8000", "token": "t", "healthy": True,
+                                 "public_url": ""})
+        self.assertEqual(SlicerCloud.get_client().server_url, before)
+        self.assertNotIn("ServerTools/ServerUrl", _QSettings.store)
+        self.assertTrue(any("no public address yet" in text and "PUBLIC_URL" in text
+                            for text in DIALOGS["warning"]))
+
+
 class TestDockerMissing(PanelTestCase):
     def test_install_explains_instead_of_starting_a_doomed_job(self):
         """With docker absent the panel must say what to run, not clone and
@@ -500,7 +549,8 @@ class TestDockerMissing(PanelTestCase):
 class TestNetworkAccess(PanelTestCase):
     """Who can reach the server. The default has to stay loopback, the choice
     has to survive an update, and leaving loopback has to be said out loud --
-    this deployment carries medical images over plain HTTP."""
+    this deployment carries medical images under a certificate only this
+    computer can verify."""
 
     def setUp(self):
         PanelTestCase.setUp(self)
@@ -540,11 +590,11 @@ class TestNetworkAccess(PanelTestCase):
             self.assertFalse(address.startswith(("172.17.", "172.18.", "172.19.")),
                              f"{address} is a docker bridge")
 
-    def test_choosing_a_lan_address_warns_about_plain_http(self):
+    def test_choosing_a_lan_address_warns_that_no_other_machine_can_verify_it(self):
         widget = self.panel()
         self._select(widget, "192.168.1.20")
         self.assertEqual(len(DIALOGS["warning"]), 1)
-        self.assertIn("PLAIN HTTP", DIALOGS["warning"][0])
+        self.assertIn("cannot verify it", DIALOGS["warning"][0])
 
     def test_a_vpn_address_is_not_presented_as_the_same_risk(self):
         """Tailscale/WireGuard encrypt the link, so this one is informative
@@ -570,7 +620,7 @@ class TestNetworkAccess(PanelTestCase):
         class Recording(FakeDeployment):
             def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
                 captured["bind"] = bind
-                return {"url": "http://100.94.102.62:8000", "token": "t", "healthy": True}
+                return {"url": "https://100.94.102.62:8000", "token": "t", "healthy": True}
 
         SlicerCloud.LocalServerDeployment = Recording
         widget._deployment = None          # rebuild against the recording class

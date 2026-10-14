@@ -31,7 +31,7 @@ there is nothing to generate from and this is not the right skill - the tool has
 to be packaged first (`migrate-tool`, in the `VISOR-serve` repo). Check:
 
 ```bash
-curl -s http://localhost:8001/tools | python3 -c 'import json,sys; print(sorted(t["name"] for t in json.load(sys.stdin)))'
+curl -s https://<server's public address>/tools | python3 -c 'import json,sys; print(sorted(t["name"] for t in json.load(sys.stdin)))'
 ```
 
 ## 1. Inventory what the old interface actually offers

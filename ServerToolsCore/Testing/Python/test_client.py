@@ -82,11 +82,10 @@ class ToolServerClientTest(unittest.TestCase):
     # -- configure() (live settings panel updates) -----------------------
 
     def test_configure_updates_fields(self):
-        self.client.configure(server_url="https://other.org/", token="new-token", verify_tls=False, timeout=42)
+        self.client.configure(server_url="https://other.org/", token="new-token", timeout=42)
 
         self.assertEqual(self.client.server_url, "https://other.org")
         self.assertEqual(self.client.token, "new-token")
-        self.assertFalse(self.client.verify_tls)
         self.assertEqual(self.client.timeout, 42)
 
     def test_configure_partial_update_leaves_other_fields(self):
@@ -94,7 +93,6 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertEqual(self.client.server_url, "https://example.org")
         self.assertEqual(self.client.token, "only-token-changes")
-        self.assertTrue(self.client.verify_tls)
         self.assertEqual(self.client.timeout, 600)
 
     @mock.patch("requests.Session.get")
@@ -112,7 +110,6 @@ class ToolServerClientTest(unittest.TestCase):
     def test_properties_reflect_constructor_defaults(self):
         self.assertEqual(self.client.server_url, "https://example.org")
         self.assertEqual(self.client.token, "secret-token")
-        self.assertTrue(self.client.verify_tls)
         self.assertEqual(self.client.timeout, 600)
 
     # -- list_tools / get_tool_schema ---------------------------------
@@ -915,7 +912,7 @@ class RealServerSchemaTest(unittest.TestCase):
     literal "file" - see ARCHITECTURE.md."""
 
     def setUp(self):
-        self.client = ToolServerClient("http://localhost:8000", "dev-token")
+        self.client = ToolServerClient("https://localhost:8000", "dev-token")
 
     @mock.patch("requests.Session.get")
     def test_example_tool_nifti_file_argument_is_recognized(self, mock_get):
@@ -1051,7 +1048,7 @@ class ExampleToolRequestTest(unittest.TestCase):
     }
 
     def setUp(self):
-        self.client = ToolServerClient("http://localhost:8000", "dev-token")
+        self.client = ToolServerClient("https://localhost:8000", "dev-token")
 
     def _args(self, **overrides):
         args = {

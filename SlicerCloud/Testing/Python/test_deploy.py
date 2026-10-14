@@ -11,6 +11,7 @@ naive two-pipe reading walks straight into), and none of them would show up
 against a mocked `Popen`.
 """
 
+import io
 import os
 import shutil
 import stat
@@ -18,10 +19,15 @@ import time
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 # The module directory, which is where SlicerCloudLib sits — the same import
 # path Slicer itself provides once the module is installed.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+# ServerToolsCore, for the ServerToolsCoreLib.tls that deploy.py shares with
+# the client -- also on Slicer's own path once the extension is installed.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+                                "ServerToolsCore"))
 
 from SlicerCloudLib import deploy  # noqa: E402
 from SlicerCloudLib.deploy import DeploymentError, LocalServerDeployment  # noqa: E402
@@ -385,7 +391,52 @@ class TestListTools(TempInstallDir):
     not."""
 
     def test_an_unreachable_server_is_None_rather_than_an_error(self):
-        self.assertIsNone(self.deployment().list_tools("http://127.0.0.1:1", timeout=1))
+        self.assertIsNone(self.deployment().list_tools("https://127.0.0.1:1", timeout=1))
+
+    def test_the_default_is_https(self):
+        self.assertTrue(deploy.DEFAULT_SERVER_URL.startswith("https://"))
+
+    def test_a_remote_http_url_is_never_asked(self):
+        with mock.patch.object(deploy.tls, "_opener") as urlopen:
+            self.assertIsNone(self.deployment().list_tools("http://192.0.2.1:8000", timeout=1))
+        urlopen.assert_not_called()
+
+    def test_a_loopback_http_url_is_never_asked_either(self):
+        with mock.patch.object(deploy.tls, "_opener") as urlopen:
+            for url in ("http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"):
+                self.assertIsNone(self.deployment().list_tools(url, timeout=1))
+        urlopen.assert_not_called()
+
+    def test_no_url_is_unknown_rather_than_localhost(self):
+        with mock.patch.object(deploy.tls, "_opener") as urlopen:
+            self.assertIsNone(self.deployment().list_tools(None, timeout=1))
+        urlopen.assert_not_called()
+
+    def test_the_public_authorities_verify_it(self):
+        seen = {}
+
+        class _Answer(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Opener:
+            def __init__(self, context):
+                seen["context"] = context
+
+            def open(self, url, timeout):
+                seen["url"] = url
+                return _Answer(b'[{"name": "AMASSS"}]')
+
+        with mock.patch.object(deploy.tls, "_opener", _Opener):
+            names = self.deployment().list_tools("https://visor.example.ts.net/")
+        self.assertEqual(names, ["AMASSS"])
+        self.assertEqual(seen["url"], "https://visor.example.ts.net/tools")
+        self.assertTrue(seen["context"].check_hostname)
+        self.assertEqual(seen["context"].verify_mode, deploy.tls.ssl.CERT_REQUIRED)
+
 
     def test_both_shapes_GET_tools_could_answer_with(self):
         for payload, expected in (
@@ -396,6 +447,40 @@ class TestListTools(TempInstallDir):
         ):
             with self.subTest(payload=payload):
                 self.assertEqual(deploy.tool_names(payload), expected)
+
+
+class TestClientUrl(unittest.TestCase):
+    """Which URL the client is handed: the public one, or none at all."""
+
+    def test_the_public_url_is_handed_over(self):
+        # `up` reports it at the top level, `status` under `server`; a tailnet
+        # address and a reverse proxy's own domain are equally valid.
+        self.assertEqual(deploy.client_url({"url": "https://localhost:8000",
+                                            "public_url": "https://v.example.ts.net/"}),
+                         "https://v.example.ts.net")
+        self.assertEqual(deploy.client_url({"server": {"url": "https://localhost:8000",
+                                                       "public_url": "https://tools.example.org"}}),
+                         "https://tools.example.org")
+
+    def test_an_empty_public_url_means_none(self):
+        self.assertIsNone(deploy.client_url({"url": "https://localhost:8000", "public_url": ""}))
+        self.assertIsNone(deploy.client_url({"server": {"public_url": "", "url": "https://localhost:8000"}}))
+        self.assertIsNone(deploy.client_url({"tailnet_url": "https://v.example.ts.net"}))
+
+    def test_the_local_listener_is_never_handed_over(self):
+        for url in ("https://localhost:8000", "https://127.0.0.1:8000", "https://[::1]:8000",
+                    "http://localhost:8000", "http://v.example.ts.net"):
+            with self.subTest(url=url):
+                self.assertIsNone(deploy.client_url({"url": url}))
+                self.assertIsNone(deploy.client_url({"public_url": url}))
+        self.assertIsNone(deploy.client_url({}))
+        self.assertIsNone(deploy.client_url(None))
+
+    def test_the_message_names_every_way_to_get_a_public_address(self):
+        message = deploy.NO_PUBLIC_URL_MESSAGE
+        self.assertIn("setup-tailscale.sh", message)
+        self.assertIn("PUBLIC_URL", message)
+        self.assertIn("reverse proxy", message)
 
 
 class TestDockerInstall(TempInstallDir):

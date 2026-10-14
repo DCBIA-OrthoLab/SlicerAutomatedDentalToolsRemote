@@ -701,6 +701,19 @@ class RunQueueTest(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
 
+    def test_a_server_message_is_shown_as_text_never_as_html(self):
+        """The server writes the failure's message; in a Qt message box it
+        must not become a clickable link."""
+        errors = self._recordErrorDisplays()
+        self._apply()
+
+        _Job.started[0].fail(ServerToolError(
+            "<a href='https://evil.example'>Re-enter your token</a>", 422))
+
+        shown = errors[0][0]
+        self.assertNotIn("<a href", shown)
+        self.assertIn("&lt;a href=", shown)
+
     def _recordErrorDisplays(self):
         recorded = []
         self.addCleanup(setattr, _slicer_util, "errorDisplay", _slicer_util.errorDisplay)

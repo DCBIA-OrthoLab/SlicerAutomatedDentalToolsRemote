@@ -35,6 +35,7 @@ import ctk
 import qt
 
 from . import accepts_folder, argument_types, design, file_extensions_for, is_file_type
+from .errors import plain_text
 from .joystick import JoystickPad
 
 logger = logging.getLogger("ServerToolsCore.formgen")
@@ -702,7 +703,7 @@ def _explain(widget, help_text: str) -> None:
         return
     setter = getattr(widget, "setToolTip", None)
     if setter:
-        setter(help_text)
+        setter(plain_text(help_text))
 
 
 def _grouped(choices: dict, groups) -> list:
@@ -2109,7 +2110,7 @@ def set_tooltip(widget, text: str) -> None:
     target = getattr(widget, "container", widget)
     setter = getattr(target, "setToolTip", None)
     if setter:
-        setter(text or "")
+        setter(plain_text(text or ""))
 
 
 def row_widget(field):
@@ -2352,7 +2353,8 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
         widget.setProperty(ARG_NAME_PROPERTY, name)
         description = spec.get("description")
         if description:
-            widget.setToolTip(description)
+            # Schema text, from the server: never rendered as HTML.
+            widget.setToolTip(plain_text(description))
 
         text = label_for(name, spec)
         # The description hangs off the LABEL as well as off the field, and for
@@ -2364,7 +2366,7 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
         label = (design.required_label(text, explained) if spec.get("required")
                  else design.section_title(text, explained))
         if description:
-            label.setToolTip(description)
+            label.setToolTip(plain_text(description))
         target = (sections or {}).get(section_of(spec), layout)
         field = row_widget(widget)
         if hasattr(target, "addRow"):

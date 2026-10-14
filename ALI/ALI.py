@@ -43,6 +43,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule
 
 from ServerToolsCoreLib import slicer_io
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase
+from ServerToolsCoreLib.errors import plain_text
 
 logger = logging.getLogger("ALI")
 
@@ -155,7 +156,7 @@ class ALIWidget(ServerToolWidgetBase):
         markupFiles = self._findMarkupFiles(resultDir)
         loaded = self._loadMarkups(markupFiles)
 
-        slicer.util.infoDisplay(self._summarize(resultDir, report, len(markupFiles), loaded))
+        slicer.util.infoDisplay(plain_text(self._summarize(resultDir, report, len(markupFiles), loaded)))
 
     @staticmethod
     def _findMarkupFiles(resultDir: str) -> list:

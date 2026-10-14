@@ -28,7 +28,9 @@ from unittest import mock
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from tls_fixture import serve_tls, trust_test_ca  # noqa: E402
 from ServerToolsCoreLib import client as client_module
 from ServerToolsCoreLib.client import (ToolServerClient, is_log_event, new_run_id,
                                       normalise_run_event)
@@ -184,7 +186,8 @@ class _LiveServerTest(unittest.TestCase):
     def setUp(self):
         self.state = _State()
         handler = type("_BoundHandler", (_Handler,), {"state": self.state})
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        trust_test_ca(self)
+        self.server = serve_tls(ThreadingHTTPServer(("127.0.0.1", 0), handler))
         # A watcher that has read its terminal event closes the socket without
         # draining it, which is correct and which the stdlib server reports as
         # an unhandled ConnectionResetError all over the test output.
@@ -195,8 +198,8 @@ class _LiveServerTest(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        self.client = ToolServerClient(url, token="t", verify_tls=False, timeout=10)
+        url = f"https://localhost:{self.server.server_address[1]}"
+        self.client = ToolServerClient(url, token="t", timeout=10)
 
     def _watch(self, run_id="run-id-0123456789abcdef", **kwargs):
         received = []
@@ -433,16 +436,21 @@ class WatchRunTest(_LiveServerTest):
         self.state.events = [_event(0)]  # never terminal: only the stop can end it
         stop = threading.Event()
 
-        with mock.patch.object(client_module, "_RUN_EVENTS_RETRY_SECONDS", 0.01):
-            def stop_once_something_arrived():
-                while self.state.events_requests < 1:
-                    time.sleep(0.005)
-                stop.set()
+        received = []
 
-            threading.Thread(target=stop_once_something_arrived, daemon=True).start()
-            delivered, _received = self._watch(stop_event=stop)
+        def deliver(event):
+            received.append(event)
+            # Stopped once the client HAS the event, not once the server was
+            # asked for it: the response is still in flight at that point
+            # (a TLS handshake later), and a stop that wins that race
+            # rightly delivers nothing.
+            stop.set()
+
+        with mock.patch.object(client_module, "_RUN_EVENTS_RETRY_SECONDS", 0.01):
+            delivered = self.client.watch_run("run-id-0123456789abcdef", deliver, stop_event=stop)
 
         self.assertTrue(delivered)
+        self.assertEqual([event["seq"] for event in received], [0])
 
     def test_an_unreadable_frame_costs_one_frame_and_not_the_stream(self):
         self.state.events = [_event(0), "not json at all", _event(2, state="done", phase="done")]
@@ -535,7 +543,7 @@ class RunWithProgressTest(_LiveServerTest):
         """The panel has already released the run by the time this is called;
         there is nothing a user could do with the news, and a raise here would
         turn letting go of a run into a second error dialog."""
-        offline = ToolServerClient("http://127.0.0.1:1", token="t", verify_tls=False, timeout=1)
+        offline = ToolServerClient("https://127.0.0.1:1", token="t", timeout=1)
         self.assertFalse(offline.cancel_run(new_run_id()))
 
 

@@ -65,24 +65,51 @@ Installing and sharing a server is the server repository's subject —
 covers joining a workstation to the tailnet, on Ubuntu, Windows and macOS. What
 follows is only what happens on this side of the wire.
 
-### The normal case: a server behind `tailscale serve`
+### A server with a public address
 
-The standard deployment keeps the server on loopback in plain HTTP and puts
-`tailscale serve` in front of it as the TLS terminator, which fetches and
-renews its own certificate. So the address is `https://<name>.<tailnet>.ts.net`
-and that certificate is signed by a public authority. In **Server Tools
-Settings**, this means:
+The server listens on loopback with a self-signed certificate this client does
+not accept. The client talks to it only through a **public address**: an
+`https://` URL whose certificate a public authority signed — **for a server on
+this very computer too**. Any of these gives it one:
 
-- **URL** — the `https://` address printed at the end of the server install;
+- **`tailscale serve`** (`scripts/setup-tailscale.sh`) publishes it as
+  `https://<name>.<tailnet>.ts.net` and fetches and renews the certificate
+  itself;
+- **a reverse proxy** in front of it with a Let's Encrypt or institutional
+  certificate, its address set as `PUBLIC_URL` in the server's `.env`;
+- **the server itself on its own domain**, with its own public certificate,
+  likewise named in `PUBLIC_URL`.
+
+In **Server Tools Settings**, this means:
+
+- **URL** — that `https://` address, printed at the end of the server install;
 - **Token** — the server's API token, never its admin token.
 
-That is the whole configuration. Certificate verification is already on and
-needs nothing: the authority behind that certificate is in the bundle
-`requests` ships, so no file and no environment variable are involved.
+That is the whole configuration. Until it is saved, the URL is a placeholder
+(`https://set-your-server.invalid`) that reaches nothing.
 
-A device that has not joined the tailnet cannot reach the address at all, which
-is the access control; removing it from the Tailscale admin console is how
-access is withdrawn.
+The rules have no setting, flag or file that relaxes them
+(`ServerToolsCoreLib/tls.py`):
+
+- **`https://` only.** Every `http://` URL is refused, `http://localhost`
+  included; the server has no plain-HTTP listener at all. An `http://` URL
+  saved by an older client is ignored at startup (logged; the other settings
+  still apply) until an `https://` one is saved.
+- **Publicly-signed certificates only**, verified against the authorities in
+  certifi's bundle (the one `requests` ships), named explicitly so that
+  `REQUESTS_CA_BUNDLE` and its kin change nothing, hostname included. There is
+  no custom CA, no certificate pinning and never `verify=False`.
+- **No redirect is ever followed**, and no request to an `http://` URL ever
+  leaves the client: a redirect is how `https://` would become `http://`.
+- **What the server says is shown as text.** Its error messages, a text
+  tool's answer and a schema's descriptions never render as HTML in a dialog,
+  a label or a tooltip, and a result archive is unpacked only inside its
+  folder, under a size and entry-count ceiling.
+
+Behind `tailscale serve`, a device that has not joined the tailnet cannot reach
+the address at all, which is the access control; removing it from the
+Tailscale admin console is how access is withdrawn. Behind a reverse proxy,
+that control is the proxy's and the network's to provide.
 
 ### Where the address and the token live, and which one wins
 
@@ -111,31 +138,14 @@ access* which address to publish it on. The choice decides who can reach it:
 | an ordinary interface, shown as *local network* | anyone on that network |
 | Every network on this machine | anyone who can route to it |
 
-This path publishes the server's own **plain HTTP**, without the TLS terminator
-the installer sets up, so what protects the images and the API key is the
-network. On a private encrypted mesh that is enough and the panel says so; on an
-ordinary local network it is not, and the panel warns. `deploy.host_addresses`
-classifies the interfaces and skips Docker's own bridges — binding to one of
-those publishes the server to containers and to nothing else.
-
-Against an `http://` address certificate verification never comes into play:
-there is no certificate to verify, so pointing the client at a local
-development server on loopback is unaffected by it being mandatory.
-
-### A certificate no public authority signed
-
-If a deployment is fronted by something other than `tailscale serve` and its
-certificate is self-signed or institutional, `VERIFY_TLS` also accepts **a path
-to that `.crt`**, and then verifies against it alone. It is a source edit, not a
-panel field, which is the point: verification can be pointed at another
-certificate but not switched off.
-
-One thing to know before trying, because it sends people down a dead end:
-`requests` does not read the operating system's trust store. It reads the bundle
-inside Slicer's own Python, so installing a certificate system-wide never
-reaches this client — and neither does `REQUESTS_CA_BUNDLE`, since Slicer's
-launcher rebuilds its environment and that variable does not survive. Naming the
-file in `VERIFY_TLS` is what works.
+Whatever the choice, the address the panel hands every module is the
+deployment's public one (`public_url` from `server_ctl.py`: `PUBLIC_URL` when
+set, otherwise the `tailscale serve` address), never the server's own port:
+that port presents a self-signed certificate, which this client refuses.
+Without a public address the panel saves nothing and says how to get one.
+`deploy.host_addresses` classifies the interfaces and skips Docker's own
+bridges — binding to one of those publishes the server to containers and to
+nothing else.
 
 ---
 
