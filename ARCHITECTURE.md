@@ -199,7 +199,7 @@ interpreter launch:
 
 ## `client.py`
 
-- `ToolServerClient(server_url, token, timeout=600)`. There is no `verify_tls`: every request passes `verify=True`.
+- `ToolServerClient(server_url, token, timeout=600)`. There is no `verify_tls`: every request passes `verify=tls.ca_bundle()`.
 - `health()` → bool, never raises (a failed health check just means "offline").
   Uses a short fixed timeout (`_HEALTH_CHECK_TIMEOUT = 10`s), not the tool
   timeout — it feeds the status banner on every `enter()` and must not be able
@@ -439,9 +439,10 @@ and a bearer token. `client.checked_server_url` (which delegates to
 saved settings (`load_overrides` logs and drops it; the rest still applies),
 in the settings panel's Save and in SlicerCloud. Nothing is upgraded.
 
-Every request passes `verify=True`: the public authorities of the bundle
-`requests` ships (urllib, in `deploy.py`, uses the system store), hostname
-included. There is no `VERIFY_TLS`, no custom CA, no pinning and never
+Every request passes `verify=tls.ca_bundle()` -- certifi's bundle, named
+explicitly, because a bare `verify=True` lets `REQUESTS_CA_BUNDLE` or
+`CURL_CA_BUNDLE` swap the trusted authorities; urllib, in `deploy.py`, gets
+the same file as `cafile` -- hostname included. There is no `VERIFY_TLS`, no custom CA, no pinning and never
 `verify=False`. The server is therefore reached through a public address
 whose certificate a public authority signed -- the
 `https://<name>.<tailnet>.ts.net` one `tailscale serve` publishes, or its own
@@ -451,8 +452,25 @@ institutional certificate -- for a local install too; `config.SERVER_URL` is a `
 `::1`, `localhost`, `*.localhost`); it decides only whether data leaves the
 machine, never how it travels.
 
+No redirect is followed and nothing travels in clear: the pooled session
+mounts an adapter on `http://` that raises (`PlainHttpRefused`), has
+`max_redirects = 0`, and a response hook turns any 3xx into
+`RedirectRefused` before requests can act on it -- a 307 to an `http://` host
+would otherwise have a multipart body, scans and token, resent in clear.
+`tls.urlopen` builds its opener with a redirect handler that refuses and an
+`http://` handler that raises.
+
 The live-server tests (`tls_fixture.py`) issue a `localhost` certificate from
-a throwaway CA and trust it in the TEST only, through `REQUESTS_CA_BUNDLE`.
+a throwaway CA and trust it in the TEST only, by patching `tls.ca_bundle`.
+
+Server text is shown as text: `errors.plain_text` escapes anything Qt would
+take for HTML before a message box shows it (a failure's `detail`, capped at
+`_SERVER_MESSAGE_MAX_LEN`, a text tool's answer, a run's terminal message),
+the label factories in `design.py` are `PlainText`, and schema descriptions
+reach tooltips through the same helper. `slicer_io.unzip_folder` checks the
+whole archive first -- no entry outside the destination (absolute, `..`, a
+symlink, a symlinked folder), at most `config.UNZIP_MAX_MEMBERS` entries and
+`config.UNZIP_MAX_BYTES` -- and returns only the paths extraction wrote.
 
 ## `base_widget.py` — `ServerToolWidgetBase`
 

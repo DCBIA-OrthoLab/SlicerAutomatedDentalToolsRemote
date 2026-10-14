@@ -24,10 +24,11 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
-# test_tls.py: https:// only and verify=True everywhere, partly against a real
-# TLS server on 127.0.0.1 whose certificate a throwaway CA issued (tls_fixture.py,
-# which shells out to `openssl`; only the test trusts that CA, through
-# REQUESTS_CA_BUNDLE). Same reasoning: requests + stdlib only.
+# test_tls.py: https:// only, certifi's bundle on every request, no redirect
+# and no plain HTTP, partly against a real TLS server on 127.0.0.1 whose
+# certificate a throwaway CA issued (tls_fixture.py, which shells out to
+# `openssl`; only the test trusts that CA, by patching tls.ca_bundle). Same
+# reasoning: requests + stdlib only.
 add_test(
   NAME ServerToolsCore_test_tls
   COMMAND ${Python3_EXECUTABLE} -m unittest test_tls

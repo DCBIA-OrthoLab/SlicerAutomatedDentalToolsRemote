@@ -96,8 +96,15 @@ The rules have no setting, flag or file that relaxes them
   saved by an older client is ignored at startup (logged; the other settings
   still apply) until an `https://` one is saved.
 - **Publicly-signed certificates only**, verified against the authorities in
-  the bundle `requests` ships, hostname included. There is no custom CA, no
-  certificate pinning and never `verify=False`.
+  certifi's bundle (the one `requests` ships), named explicitly so that
+  `REQUESTS_CA_BUNDLE` and its kin change nothing, hostname included. There is
+  no custom CA, no certificate pinning and never `verify=False`.
+- **No redirect is ever followed**, and no request to an `http://` URL ever
+  leaves the client: a redirect is how `https://` would become `http://`.
+- **What the server says is shown as text.** Its error messages, a text
+  tool's answer and a schema's descriptions never render as HTML in a dialog,
+  a label or a tooltip, and a result archive is unpacked only inside its
+  folder, under a size and entry-count ceiling.
 
 Behind `tailscale serve`, a device that has not joined the tailnet cannot reach
 the address at all, which is the access control; removing it from the
