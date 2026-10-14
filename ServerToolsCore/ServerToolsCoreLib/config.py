@@ -88,3 +88,11 @@ ZIP_COMPRESS = None
 # resumable -- the event stream reconnects and dedupes, where a dropped POST
 # simply lost an answer the GPU had already been spent computing.
 DETACHED_RUNS = True
+
+# Ceilings on an archive this client unpacks (a result, a checkpoint, a hosted
+# test file), checked from the archive's own directory BEFORE a byte is
+# written. Generous on purpose: a whole cohort's label volumes fit many times
+# over. What they stop is an archive that would fill the disk or the inode
+# table -- a zip bomb, from a compromised or misbehaving server.
+UNZIP_MAX_BYTES = 20 * 1024 ** 3
+UNZIP_MAX_MEMBERS = 100_000
