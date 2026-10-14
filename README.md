@@ -65,21 +65,31 @@ Installing and sharing a server is the server repository's subject —
 covers joining a workstation to the tailnet, on Ubuntu, Windows and macOS. What
 follows is only what happens on this side of the wire.
 
-### The normal case: a server behind `tailscale serve`
+### The only case: a server behind `tailscale serve`
 
-The standard deployment keeps the server on loopback, over HTTPS with its own
-self-signed certificate, and puts `tailscale serve` in front of it as the
-public-facing TLS terminator, which fetches and
-renews its own certificate. So the address is `https://<name>.<tailnet>.ts.net`
-and that certificate is signed by a public authority. In **Server Tools
+Tailscale is required. The server listens on loopback with a self-signed
+certificate this client does not accept, and `tailscale serve` publishes it as
+`https://<name>.<tailnet>.ts.net` with a certificate signed by a public
+authority, which it fetches and renews itself. That is the one address this
+client talks to, **for a server on this very computer too**. In **Server Tools
 Settings**, this means:
 
 - **URL** — the `https://` address printed at the end of the server install;
 - **Token** — the server's API token, never its admin token.
 
-That is the whole configuration. Certificate verification is already on and
-needs nothing: the authority behind that certificate is in the bundle
-`requests` ships, so no file and no environment variable are involved.
+That is the whole configuration. Until it is saved, the URL is a placeholder
+(`https://set-your-server.invalid`) that reaches nothing.
+
+The rules have no setting, flag or file that relaxes them
+(`ServerToolsCoreLib/tls.py`):
+
+- **`https://` only.** Every `http://` URL is refused, `http://localhost`
+  included; the server has no plain-HTTP listener at all. An `http://` URL
+  saved by an older client is ignored at startup (logged; the other settings
+  still apply) until an `https://` one is saved.
+- **Publicly-signed certificates only**, verified against the authorities in
+  the bundle `requests` ships, hostname included. There is no custom CA, no
+  certificate pinning and never `verify=False`.
 
 A device that has not joined the tailnet cannot reach the address at all, which
 is the access control; removing it from the Tailscale admin console is how
@@ -112,37 +122,13 @@ access* which address to publish it on. The choice decides who can reach it:
 | an ordinary interface, shown as *local network* | anyone on that network |
 | Every network on this machine | anyone who can route to it |
 
-This path publishes the server's own HTTPS, whose certificate is self-signed
-and names only this computer (`localhost`, `127.0.0.1`, `::1`), without the
-TLS terminator the installer sets up. Another machine cannot verify that
-certificate, and this client never connects to a server it cannot verify, so
-the panel says so on a private mesh and warns on an ordinary local network. `deploy.host_addresses`
-classifies the interfaces and skips Docker's own bridges — binding to one of
-those publishes the server to containers and to nothing else.
-
-The client speaks `https://` only, with no setting to change that: the server
-has no plain-HTTP listener at all. A loopback `http://` URL (any of
-`127.0.0.0/8`, `::1`, `localhost` or `*.localhost`) left over from an older
-client is upgraded to `https://` on the same port; any other `http://` URL is
-refused. A server on this computer is verified against the certificate it
-presents over loopback (`ServerToolsCoreLib/tls.py`), hostname check included;
-trusting it on first use is acceptable only there, because those bytes never
-leave the machine.
-
-### A certificate no public authority signed
-
-If a deployment is fronted by something other than `tailscale serve` and its
-certificate is self-signed or institutional, `VERIFY_TLS` also accepts **a path
-to that `.crt`**, and then verifies against it alone. It is a source edit, not a
-panel field, which is the point: verification can be pointed at another
-certificate but not switched off.
-
-One thing to know before trying, because it sends people down a dead end:
-`requests` does not read the operating system's trust store. It reads the bundle
-inside Slicer's own Python, so installing a certificate system-wide never
-reaches this client — and neither does `REQUESTS_CA_BUNDLE`, since Slicer's
-launcher rebuilds its environment and that variable does not survive. Naming the
-file in `VERIFY_TLS` is what works.
+Whatever the choice, the address the panel hands every module is the tailnet
+one `tailscale serve` publishes, never the server's own port: that port
+presents a self-signed certificate, which this client refuses. Without a
+tailnet address the panel saves nothing and says Tailscale is required.
+`deploy.host_addresses` classifies the interfaces and skips Docker's own
+bridges — binding to one of those publishes the server to containers and to
+nothing else.
 
 ---
 
