@@ -116,7 +116,7 @@ If the change is server-side, check what actually arrives before touching the
 client - a hint the server drops looks exactly like a client that ignores it:
 
 ```bash
-curl -s https://<name>.<tailnet>.ts.net/tools | python3 -m json.tool | less
+curl -s https://<server's public address>/tools | python3 -m json.tool | less
 ```
 
 Then reload the module in Slicer. The panel refetches `GET /tools` on reload, so

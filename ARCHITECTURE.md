@@ -442,9 +442,11 @@ in the settings panel's Save and in SlicerCloud. Nothing is upgraded.
 Every request passes `verify=True`: the public authorities of the bundle
 `requests` ships (urllib, in `deploy.py`, uses the system store), hostname
 included. There is no `VERIFY_TLS`, no custom CA, no pinning and never
-`verify=False`. The server is therefore reached through the
-`https://<name>.<tailnet>.ts.net` address `tailscale serve` publishes, for a
-local install too; `config.SERVER_URL` is a `.invalid` placeholder until then.
+`verify=False`. The server is therefore reached through a public address
+whose certificate a public authority signed -- the
+`https://<name>.<tailnet>.ts.net` one `tailscale serve` publishes, or its own
+domain behind a reverse proxy or served directly with a Let's Encrypt or
+institutional certificate -- for a local install too; `config.SERVER_URL` is a `.invalid` placeholder until then.
 `tls.is_loopback` is the client's one loopback predicate (`127.0.0.0/8`,
 `::1`, `localhost`, `*.localhost`); it decides only whether data leaves the
 machine, never how it travels.
@@ -1723,10 +1725,12 @@ must not start a 29 GB transfer.
 When the server comes up, the panel saves its URL and generated API key
 through `settings_qt.save_overrides` and `client.configure()` — the same path
 `ServerToolsSettings` uses, so every module immediately points at the new
-server with no restart. The URL it saves is the tailnet one server_ctl.py
-reports (`deploy.client_url`), never the local listener, whose self-signed
-certificate the client refuses; with no tailnet URL it saves nothing and says
-Tailscale is required.
+server with no restart. The URL it saves is the `public_url` server_ctl.py
+reports (`deploy.client_url`: `PUBLIC_URL` from the deployment's `.env`, else
+the `tailscale serve` address), never the local listener, whose self-signed
+certificate the client refuses; with no public URL it saves nothing and names
+the ways to get one (`setup-tailscale.sh`, or `PUBLIC_URL` behind a reverse
+proxy or a server certificate).
 
 ### Which branch gets deployed
 
@@ -2134,11 +2138,12 @@ This confirms the four success criteria from the brief:
   one does not repaint it until the user leaves and re-enters the module (or
   reopens Slicer). `design.tokens()` itself always reflects the current mode;
   only the "when do we re-apply the stylesheet" question is coarse.
-- **`SlicerCloud` requires Tailscale, even for a server on this machine**:
-  the generated deployment publishes port 8000 on `127.0.0.1` with a
-  self-signed certificate, which the client refuses, so the panel configures
-  the `https://<name>.<tailnet>.ts.net` address `tailscale serve` publishes
-  and nothing when there is none.
+- **`SlicerCloud` requires a public address, even for a server on this
+  machine**: the generated deployment publishes port 8000 on `127.0.0.1` with
+  a self-signed certificate, which the client refuses, so the panel configures
+  the deployment's `public_url` -- `tailscale serve`'s address, or
+  `PUBLIC_URL` behind a reverse proxy or a server certificate -- and nothing
+  when there is none.
 - **The panel cannot deploy to a *remote* host**: it drives a clone on the
   machine Slicer runs on. Standing a server up on the lab GPU box is the same
   `scripts/setup-server.sh` over ssh, and then this panel is only used for its

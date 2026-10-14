@@ -65,16 +65,24 @@ Installing and sharing a server is the server repository's subject —
 covers joining a workstation to the tailnet, on Ubuntu, Windows and macOS. What
 follows is only what happens on this side of the wire.
 
-### The only case: a server behind `tailscale serve`
+### A server with a public address
 
-Tailscale is required. The server listens on loopback with a self-signed
-certificate this client does not accept, and `tailscale serve` publishes it as
-`https://<name>.<tailnet>.ts.net` with a certificate signed by a public
-authority, which it fetches and renews itself. That is the one address this
-client talks to, **for a server on this very computer too**. In **Server Tools
-Settings**, this means:
+The server listens on loopback with a self-signed certificate this client does
+not accept. The client talks to it only through a **public address**: an
+`https://` URL whose certificate a public authority signed — **for a server on
+this very computer too**. Any of these gives it one:
 
-- **URL** — the `https://` address printed at the end of the server install;
+- **`tailscale serve`** (`scripts/setup-tailscale.sh`) publishes it as
+  `https://<name>.<tailnet>.ts.net` and fetches and renews the certificate
+  itself;
+- **a reverse proxy** in front of it with a Let's Encrypt or institutional
+  certificate, its address set as `PUBLIC_URL` in the server's `.env`;
+- **the server itself on its own domain**, with its own public certificate,
+  likewise named in `PUBLIC_URL`.
+
+In **Server Tools Settings**, this means:
+
+- **URL** — that `https://` address, printed at the end of the server install;
 - **Token** — the server's API token, never its admin token.
 
 That is the whole configuration. Until it is saved, the URL is a placeholder
@@ -91,9 +99,10 @@ The rules have no setting, flag or file that relaxes them
   the bundle `requests` ships, hostname included. There is no custom CA, no
   certificate pinning and never `verify=False`.
 
-A device that has not joined the tailnet cannot reach the address at all, which
-is the access control; removing it from the Tailscale admin console is how
-access is withdrawn.
+Behind `tailscale serve`, a device that has not joined the tailnet cannot reach
+the address at all, which is the access control; removing it from the
+Tailscale admin console is how access is withdrawn. Behind a reverse proxy,
+that control is the proxy's and the network's to provide.
 
 ### Where the address and the token live, and which one wins
 
@@ -122,10 +131,11 @@ access* which address to publish it on. The choice decides who can reach it:
 | an ordinary interface, shown as *local network* | anyone on that network |
 | Every network on this machine | anyone who can route to it |
 
-Whatever the choice, the address the panel hands every module is the tailnet
-one `tailscale serve` publishes, never the server's own port: that port
-presents a self-signed certificate, which this client refuses. Without a
-tailnet address the panel saves nothing and says Tailscale is required.
+Whatever the choice, the address the panel hands every module is the
+deployment's public one (`public_url` from `server_ctl.py`: `PUBLIC_URL` when
+set, otherwise the `tailscale serve` address), never the server's own port:
+that port presents a self-signed certificate, which this client refuses.
+Without a public address the panel saves nothing and says how to get one.
 `deploy.host_addresses` classifies the interfaces and skips Docker's own
 bridges — binding to one of those publishes the server to containers and to
 nothing else.
