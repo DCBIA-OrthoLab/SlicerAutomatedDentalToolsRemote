@@ -433,13 +433,15 @@ interpreter launch:
 ## `tls.py` — HTTPS only, and the local server's own certificate
 
 The server has no plain-HTTP listener, and this client sends medical images
-and a bearer token, so `tls.require_https` refuses every server URL that is
-not `https://` — in the constructor, in `configure()`, in the settings panel's
+and a bearer token, so `client.checked_server_url` (which delegates to
+`tls.require_https`) refuses every server URL that is not `https://` — in the
+constructor, in `configure()`, in the saved settings, in the settings panel's
 Save and in SlicerCloud. There is no setting, flag or environment variable
-that relaxes it. A loopback `http://` URL (`localhost`, `127.0.0.1`, `[::1]`)
-saved by an older client is upgraded to `https://` on the same port, which is
-exactly what the local server serves there now; a non-loopback one is refused
-(at startup, `apply_saved_overrides` logs it and keeps the default URL).
+that relaxes it. A loopback `http://` URL (`tls.is_loopback`, the client's one
+predicate: `127.0.0.0/8`, `::1`, `localhost`, `*.localhost`) saved by an older
+client is upgraded to `https://` on the same port, which is exactly what the
+local server serves there now; a non-loopback one is refused (at startup,
+`load_overrides` logs it and keeps the default URL).
 
 The local deployment presents a self-signed certificate. For a loopback host
 with `VERIFY_TLS is True`, the pooled session's adapter (`_PinningAdapter`)

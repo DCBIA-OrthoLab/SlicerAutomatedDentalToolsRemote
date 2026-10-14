@@ -67,8 +67,9 @@ follows is only what happens on this side of the wire.
 
 ### The normal case: a server behind `tailscale serve`
 
-The standard deployment keeps the server on loopback in plain HTTP and puts
-`tailscale serve` in front of it as the TLS terminator, which fetches and
+The standard deployment keeps the server on loopback, over HTTPS with its own
+self-signed certificate, and puts `tailscale serve` in front of it as the
+public-facing TLS terminator, which fetches and
 renews its own certificate. So the address is `https://<name>.<tailnet>.ts.net`
 and that certificate is signed by a public authority. In **Server Tools
 Settings**, this means:
@@ -111,16 +112,22 @@ access* which address to publish it on. The choice decides who can reach it:
 | an ordinary interface, shown as *local network* | anyone on that network |
 | Every network on this machine | anyone who can route to it |
 
-This path publishes the server's own **plain HTTP**, without the TLS terminator
-the installer sets up, so what protects the images and the API key is the
-network. On a private encrypted mesh that is enough and the panel says so; on an
-ordinary local network it is not, and the panel warns. `deploy.host_addresses`
+This path publishes the server's own HTTPS, whose certificate is self-signed
+and names only this computer (`localhost`, `127.0.0.1`, `::1`), without the
+TLS terminator the installer sets up. Another machine cannot verify that
+certificate, and this client never connects to a server it cannot verify, so
+the panel says so on a private mesh and warns on an ordinary local network. `deploy.host_addresses`
 classifies the interfaces and skips Docker's own bridges — binding to one of
 those publishes the server to containers and to nothing else.
 
-Against an `http://` address certificate verification never comes into play:
-there is no certificate to verify, so pointing the client at a local
-development server on loopback is unaffected by it being mandatory.
+The client speaks `https://` only, with no setting to change that: the server
+has no plain-HTTP listener at all. A loopback `http://` URL (any of
+`127.0.0.0/8`, `::1`, `localhost` or `*.localhost`) left over from an older
+client is upgraded to `https://` on the same port; any other `http://` URL is
+refused. A server on this computer is verified against the certificate it
+presents over loopback (`ServerToolsCoreLib/tls.py`), hostname check included;
+trusting it on first use is acceptable only there, because those bytes never
+leave the machine.
 
 ### A certificate no public authority signed
 
