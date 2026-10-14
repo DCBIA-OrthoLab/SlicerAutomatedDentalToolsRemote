@@ -31,9 +31,11 @@ class ServerToolsSettings(ScriptedLoadableModule):
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = ["Automated Dental Tools team"]
         self.parent.helpText = _(
-            "Configure the remote tool server (URL, API key, TLS verification, timeout) used "
-            "by every Automated Dental Tools module built on ServerToolsCore. Changes apply "
-            "immediately and persist across Slicer restarts."
+            "Configure the remote tool server (URL, API key, timeout) used by every "
+            "Automated Dental Tools module built on ServerToolsCore. Changes apply "
+            "immediately and persist across Slicer restarts. The URL must be https://, "
+            "and its certificate is always verified against the public authorities: "
+            "that is not a setting."
         )
         self.parent.acknowledgementText = ""
 

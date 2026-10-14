@@ -76,6 +76,23 @@ class RequireHttpsTest(unittest.TestCase):
             ToolServerClient("https://a.example.org", "t").configure(verify_tls=False)
 
 
+class SettingsPanelWordingTest(unittest.TestCase):
+    def test_the_help_text_does_not_offer_tls_verification_as_a_setting(self):
+        """Read from the source: the module needs a real Slicer to import."""
+        import ast
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+                            "ServerToolsSettings", "ServerToolsSettings.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        texts = [ast.literal_eval(node.value.args[0]) for node in ast.walk(tree)
+                 if isinstance(node, ast.Assign)
+                 and any(isinstance(t, ast.Attribute) and t.attr == "helpText" for t in node.targets)]
+        self.assertEqual(len(texts), 1)
+        self.assertIn("(URL, API key, timeout)", texts[0])
+        self.assertNotIn("TLS verification,", texts[0])
+        self.assertIn("not a setting", texts[0])
+
+
 class ClientRefusesHttpTest(unittest.TestCase):
     def test_the_constructor_refuses_every_http_url(self):
         for url in _HTTP_URLS:
