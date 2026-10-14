@@ -763,7 +763,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             catalog = deployment.catalog(progress_cb=None) if status.get("cloned") else None
             registered = None
             if status.get("server", {}).get("healthy"):
-                registered = deployment.list_tools(status.get("server", {}).get("url"))
+                registered = deployment.list_tools(deploy.client_url(status))
             return status, catalog, registered
 
         self._startJob(_("Checking the server"), task, self._onRefreshed,
@@ -806,7 +806,14 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         def done(result):
             if configure and result.get("token"):
-                self._applyServerSettings(result.get("url") or DEFAULT_SERVER_URL, result["token"])
+                url = deploy.client_url(result)
+                if url:
+                    self._applyServerSettings(url, result["token"])
+                else:
+                    # No tailnet URL: nothing is saved rather than localhost,
+                    # whose self-signed certificate the client refuses.
+                    self._log(_(deploy.TAILSCALE_REQUIRED_MESSAGE))
+                    slicer.util.warningDisplay(_(deploy.TAILSCALE_REQUIRED_MESSAGE))
             if result.get("healthy"):
                 slicer.util.showStatusMessage(_("The tool server is running."), 5000)
             else:
@@ -1030,12 +1037,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         """Make this deployment the one every other module talks to.
 
         Certificate verification is not among the things saved here, and
-        cannot be: it is not a setting (see config.VERIFY_TLS). The
-        `https://localhost` URL this writes most of the time is verified
-        against the certificate the local server presents (tls.py).
-
-        A loopback http:// URL (an older server_ctl.py) is saved as https://;
-        any other http:// URL is refused rather than saved.
+        cannot be: it is always on, against the public authorities (tls.py).
+        `url` is the tailnet URL `tailscale serve` publishes (deploy.client_url);
+        an http:// URL is refused rather than saved, loopback included.
         """
         try:
             url = checked_server_url(url)

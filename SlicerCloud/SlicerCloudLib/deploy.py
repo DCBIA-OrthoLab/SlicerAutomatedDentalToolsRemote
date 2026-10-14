@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import urllib.error
+from urllib.parse import urlsplit
 
 from ServerToolsCoreLib import tls
 
@@ -36,9 +37,18 @@ _ERROR_TAIL_LINES = 12
 
 DEFAULT_REPO_URL = "https://github.com/DCBIA-OrthoLab/VISOR-serve.git"
 DEFAULT_BRANCH = "main"
-# https:// only: the local server presents a self-signed certificate, verified
-# against the one it presents over loopback (see ServerToolsCoreLib/tls.py).
+# Where the container listens on this machine, for DISPLAY only. The client
+# never uses it: the certificate the server presents there is self-signed, and
+# the client accepts only a publicly-signed one (ServerToolsCoreLib/tls.py).
+# What the client is given is the tailnet URL -- see client_url().
 DEFAULT_SERVER_URL = "https://localhost:8000"
+
+TAILSCALE_REQUIRED_MESSAGE = (
+    "Tailscale is required. The extension only talks to the server through the "
+    "https://<name>.<tailnet>.ts.net address `tailscale serve` publishes, whose "
+    "certificate is publicly signed -- for a server on this computer too. "
+    "Run scripts/setup-tailscale.sh in the server's folder, then press Refresh."
+)
 
 # Where a clone goes when the user has not said. The home directory, not
 # anywhere under the Slicer install: this holds a git clone plus up to ~29 GB
@@ -284,6 +294,30 @@ def probe_host() -> dict:
             "gpu_access": "runtime" if runtime else ("cdi" if cdi else None),
         },
     }
+
+
+def client_url(result):
+    """The URL the CLIENT may use for this deployment, or None.
+
+    server_ctl.py reports the address `tailscale serve` publishes as
+    `tailnet_url` (top level, or under `server`). A plain `url` is accepted
+    only when it is https:// and not this machine's loopback, which is the
+    local self-signed listener the client refuses to verify. There is no
+    fallback to localhost: without Tailscale there is no URL to hand over.
+    """
+    result = result or {}
+    server = result.get("server") or {}
+    for candidate in (result.get("tailnet_url"), server.get("tailnet_url"),
+                      result.get("url"), server.get("url")):
+        if not candidate:
+            continue
+        try:
+            url = tls.require_https(candidate)
+        except ValueError:
+            continue
+        if not tls.is_loopback(urlsplit(url).hostname):
+            return url
+    return None
 
 
 def tool_names(payload):
@@ -702,10 +736,12 @@ class LocalServerDeployment:
         `GET /tools` is the one unauthenticated endpoint besides `/health`, so
         this needs no token and stays inside the no-`requests` rule.
         """
+        if not url:
+            return None
         try:
-            # A loopback http:// URL from an older server_ctl.py is upgraded;
-            # any other http:// is refused, which reads here as "unknown".
-            url = tls.require_https(url or DEFAULT_SERVER_URL)
+            # https:// only and a publicly-signed certificate; anything else
+            # (an http:// URL, the local self-signed listener) reads "unknown".
+            url = tls.require_https(url)
             with tls.urlopen(f"{url}/tools", timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError):

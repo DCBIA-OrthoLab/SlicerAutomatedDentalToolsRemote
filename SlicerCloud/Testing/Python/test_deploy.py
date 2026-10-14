@@ -401,7 +401,18 @@ class TestListTools(TempInstallDir):
             self.assertIsNone(self.deployment().list_tools("http://192.0.2.1:8000", timeout=1))
         urlopen.assert_not_called()
 
-    def test_a_loopback_http_url_is_asked_over_https_through_the_pin(self):
+    def test_a_loopback_http_url_is_never_asked_either(self):
+        with mock.patch.object(deploy.tls.urllib.request, "urlopen") as urlopen:
+            for url in ("http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"):
+                self.assertIsNone(self.deployment().list_tools(url, timeout=1))
+        urlopen.assert_not_called()
+
+    def test_no_url_is_unknown_rather_than_localhost(self):
+        with mock.patch.object(deploy.tls.urllib.request, "urlopen") as urlopen:
+            self.assertIsNone(self.deployment().list_tools(None, timeout=1))
+        urlopen.assert_not_called()
+
+    def test_the_public_authorities_verify_it(self):
         seen = {}
 
         class _Answer(io.BytesIO):
@@ -415,12 +426,13 @@ class TestListTools(TempInstallDir):
             seen["url"], seen["context"] = url, context
             return _Answer(b'[{"name": "AMASSS"}]')
 
-        with mock.patch.object(deploy.tls, "pinned_certificate", return_value=None) as pin, \
-                mock.patch.object(deploy.tls.urllib.request, "urlopen", urlopen):
-            self.assertEqual(self.deployment().list_tools("http://localhost:8000"), ["AMASSS"])
-        self.assertEqual(seen["url"], "https://localhost:8000/tools")
-        self.assertEqual(pin.call_args.args[:2], ("localhost", 8000))
+        with mock.patch.object(deploy.tls.urllib.request, "urlopen", urlopen):
+            names = self.deployment().list_tools("https://visor.example.ts.net/")
+        self.assertEqual(names, ["AMASSS"])
+        self.assertEqual(seen["url"], "https://visor.example.ts.net/tools")
         self.assertTrue(seen["context"].check_hostname)
+        self.assertEqual(seen["context"].verify_mode, deploy.tls.ssl.CERT_REQUIRED)
+
 
     def test_both_shapes_GET_tools_could_answer_with(self):
         for payload, expected in (
@@ -431,6 +443,29 @@ class TestListTools(TempInstallDir):
         ):
             with self.subTest(payload=payload):
                 self.assertEqual(deploy.tool_names(payload), expected)
+
+
+class TestClientUrl(unittest.TestCase):
+    """Which URL the client is handed: the tailnet one, or none at all."""
+
+    def test_the_tailnet_url_wins(self):
+        self.assertEqual(deploy.client_url({"url": "https://localhost:8000",
+                                            "tailnet_url": "https://v.example.ts.net/"}),
+                         "https://v.example.ts.net")
+        self.assertEqual(deploy.client_url({"server": {"url": "https://localhost:8000",
+                                                       "tailnet_url": "https://v.example.ts.net"}}),
+                         "https://v.example.ts.net")
+
+    def test_the_local_listener_is_never_handed_over(self):
+        for url in ("https://localhost:8000", "https://127.0.0.1:8000", "https://[::1]:8000",
+                    "http://localhost:8000", "http://v.example.ts.net"):
+            with self.subTest(url=url):
+                self.assertIsNone(deploy.client_url({"url": url}))
+        self.assertIsNone(deploy.client_url({}))
+        self.assertIsNone(deploy.client_url(None))
+
+    def test_a_public_https_url_is_accepted(self):
+        self.assertEqual(deploy.client_url({"url": "https://v.example.ts.net"}), "https://v.example.ts.net")
 
 
 class TestDockerInstall(TempInstallDir):

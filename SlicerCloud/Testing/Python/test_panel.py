@@ -474,29 +474,49 @@ class TestChangingTheInstallFolder(PanelTestCase):
 
 class TestServerUrlIsHttpsOnly(PanelTestCase):
     """The URL an install hands back becomes every module's server, so the
-    HTTPS-only rule applies here too: a loopback http:// from an older
-    server_ctl.py is saved as https://, anything else http:// is refused."""
+    rules apply here too: never http://, loopback included, and only the
+    tailnet URL `tailscale serve` publishes -- never the local self-signed
+    listener, which the client refuses to verify."""
 
     def setUp(self):
         PanelTestCase.setUp(self)
         client = SlicerCloud.get_client()
         self.addCleanup(client.configure, server_url=client.server_url, token=client.token)
 
-    def test_a_loopback_http_url_is_saved_as_https(self):
-        widget = self.panel()
-        widget._applyServerSettings("http://localhost:8000", "t")
-        self.assertEqual(SlicerCloud.get_client().server_url, "https://localhost:8000")
-        self.assertEqual(_QSettings.store["ServerTools/ServerUrl"], "https://localhost:8000")
-        self.assertEqual(DIALOGS["error"], [])
+    def _install_answering(self, answer):
+        class Recording(FakeDeployment):
+            def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+                return dict(answer)
 
-    def test_a_remote_http_url_is_refused_and_nothing_is_saved(self):
+        SlicerCloud.LocalServerDeployment = Recording
+        widget = self.panel()
+        widget._deployment = None
+        widget.useServerCheck.checked = True
+        widget.onInstall()
+        return widget
+
+    def test_every_http_url_is_refused_and_nothing_is_saved(self):
         widget = self.panel()
         before = SlicerCloud.get_client().server_url
-        widget._applyServerSettings("http://192.0.2.1:8000", "t")
+        for url in ("http://localhost:8000", "http://192.0.2.1:8000"):
+            widget._applyServerSettings(url, "t")
         self.assertEqual(SlicerCloud.get_client().server_url, before)
         self.assertNotIn("ServerTools/ServerUrl", _QSettings.store)
-        self.assertEqual(len(DIALOGS["error"]), 1)
+        self.assertEqual(len(DIALOGS["error"]), 2)
         self.assertIn("https://", DIALOGS["error"][0])
+
+    def test_the_tailnet_url_is_what_the_client_is_given(self):
+        self._install_answering({"url": "https://localhost:8000", "token": "t", "healthy": True,
+                                 "tailnet_url": "https://visor.example.ts.net"})
+        self.assertEqual(SlicerCloud.get_client().server_url, "https://visor.example.ts.net")
+        self.assertEqual(_QSettings.store["ServerTools/ServerUrl"], "https://visor.example.ts.net")
+
+    def test_without_tailscale_nothing_is_saved_and_the_panel_says_so(self):
+        before = SlicerCloud.get_client().server_url
+        self._install_answering({"url": "https://localhost:8000", "token": "t", "healthy": True})
+        self.assertEqual(SlicerCloud.get_client().server_url, before)
+        self.assertNotIn("ServerTools/ServerUrl", _QSettings.store)
+        self.assertTrue(any("Tailscale is required" in text for text in DIALOGS["warning"]))
 
 
 class TestDockerMissing(PanelTestCase):
