@@ -12,6 +12,8 @@ layer on top, edited via the "Server Tools Settings" module.
 
 import qt
 
+from .client import checked_server_url
+
 _GROUP = "ServerTools"
 _KEY_SERVER_URL = f"{_GROUP}/ServerUrl"
 _KEY_API_TOKEN = f"{_GROUP}/ApiToken"
@@ -24,7 +26,17 @@ def load_overrides() -> dict:
     settings = qt.QSettings()
     overrides = {}
     if settings.contains(_KEY_SERVER_URL):
-        overrides["server_url"] = str(settings.value(_KEY_SERVER_URL))
+        saved = str(settings.value(_KEY_SERVER_URL))
+        # Dropped rather than applied when it is plain HTTP to a remote host,
+        # for the reason `verify_tls` is no longer read back either: a value a
+        # user saved before this client refused that scheme would otherwise
+        # keep sending scans in the clear for ever. Falling back to config.py
+        # leaves them on loopback, which is safe, and the settings panel says
+        # what happened the moment they open it.
+        try:
+            overrides["server_url"] = checked_server_url(saved)
+        except ValueError:
+            pass
     if settings.contains(_KEY_API_TOKEN):
         overrides["token"] = str(settings.value(_KEY_API_TOKEN))
     # `verify_tls` is deliberately NOT read back. It was a saved setting until

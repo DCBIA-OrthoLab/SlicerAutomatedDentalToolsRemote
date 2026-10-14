@@ -11,6 +11,7 @@ congestion window rather than by the link. Everything about WHICH bytes travel
 and what they mean stays here; that module only moves them.
 """
 
+import ipaddress
 import json
 import logging
 import math
@@ -23,7 +24,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -652,6 +653,47 @@ class ToolResult:
     checkpoint: Optional[RunCheckpoint] = None
 
 
+def is_loopback(host: str) -> bool:
+    """Whether `host` names this machine, by name or by address.
+
+    `127.0.0.1` is not the only loopback address: the whole `127.0.0.0/8` is,
+    and so is `::1`, which arrives from a URL wrapped in brackets.
+    """
+    if not host:
+        return False
+    host = host.strip("[]").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def checked_server_url(server_url: str) -> str:
+    """`server_url` without its trailing slash, refusing cleartext to a remote
+    host.
+
+    The client ships pointing at `http://localhost:8000` and a local server is
+    developed against over plain HTTP, so loopback keeps working untouched.
+    Anywhere else, `http://` puts the scans, the DICOM headers and the API
+    token on the wire in the clear, readable by anything between the two
+    machines. Verifying the certificate was made mandatory rather than optional
+    for the same reason (see config.VERIFY_TLS); allowing the scheme that has
+    no certificate at all would have left the door it closed standing open.
+
+    Raises ValueError, which the settings panel turns into a message.
+    """
+    parts = urlsplit(server_url)
+    if parts.scheme == "http" and not is_loopback(parts.hostname or ""):
+        raise ValueError(
+            f"Refusing to use {server_url!r}: plain HTTP to a remote host would "
+            f"send the scans and the API token in the clear. Use https:// for "
+            f"{parts.hostname}, or point the client at a server on this machine."
+        )
+    return server_url.rstrip("/")
+
+
 class ToolServerClient:
     def __init__(
         self,
@@ -664,7 +706,7 @@ class ToolServerClient:
         compress_uploads=True,
         detached_runs=False,
     ):
-        self._server_url = server_url.rstrip("/")
+        self._server_url = checked_server_url(server_url)
         self._token = token
         self._verify_tls = verify_tls
         self._timeout = timeout
@@ -709,7 +751,7 @@ class ToolServerClient:
         may belong to a different server entirely once any of these change.
         """
         if server_url is not None:
-            self._server_url = server_url.rstrip("/")
+            self._server_url = checked_server_url(server_url)
         if token is not None:
             self._token = token
         if verify_tls is not None:
