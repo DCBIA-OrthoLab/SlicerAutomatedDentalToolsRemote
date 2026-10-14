@@ -1,8 +1,8 @@
 """HTTPS only, verified against the public authorities, no knob (tls.py).
 
 The live tests run a real TLS server on 127.0.0.1 whose `localhost`
-certificate comes from a throwaway CA. Only the TEST trusts that CA, through
-`REQUESTS_CA_BUNDLE`; the client itself passes verify=True as it always does.
+certificate comes from a throwaway CA. Only the TEST trusts that CA, by
+patching tls.ca_bundle; the client passes it as `verify=` as it always does.
 """
 
 import json
@@ -160,8 +160,14 @@ class LiveServerTest(unittest.TestCase):
     def test_a_certificate_no_trusted_authority_signed_is_refused(self):
         """Without the test's CA, the client refuses the server outright:
         nothing in the production code trusts it."""
-        with mock.patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": ""}):
-            os.environ.pop("REQUESTS_CA_BUNDLE")
+        self.assertFalse(ToolServerClient(self.url, "token").health())
+
+    def test_the_environment_cannot_change_the_trusted_authorities(self):
+        """REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE naming the test CA change
+        nothing: the bundle is passed explicitly, not left to verify=True."""
+        from tls_fixture import ca_bundle
+        with mock.patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": ca_bundle(),
+                                          "CURL_CA_BUNDLE": ca_bundle()}):
             self.assertFalse(ToolServerClient(self.url, "token").health())
 
     def test_a_trusted_certificate_is_accepted_with_the_hostname_checked(self):
@@ -171,8 +177,8 @@ class LiveServerTest(unittest.TestCase):
         other = f"https://127.0.0.1:{self.server.server_address[1]}"
         self.assertFalse(ToolServerClient(other, "token").health())
 
-    def test_every_request_passes_verify_true(self):
-        trust_test_ca(self)
+    def test_every_request_is_verified_against_the_public_bundle(self):
+        import certifi
         seen = []
         original = requests.adapters.HTTPAdapter.send
 
@@ -182,24 +188,23 @@ class LiveServerTest(unittest.TestCase):
 
         client = ToolServerClient(self.url, "token")
         with mock.patch.object(requests.adapters.HTTPAdapter, "send", spy), \
-                mock.patch.object(requests.Session, "merge_environment_settings",
-                                  lambda self, url, proxies, stream, verify, cert: {
-                                      "proxies": {}, "stream": stream, "verify": verify, "cert": cert}):
+                mock.patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": "/tmp/attacker-ca.pem"}):
             client.health()
             client.batch_policy()
-        self.assertTrue(seen)
-        self.assertTrue(all(value is True for value in seen), seen)
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all(value == certifi.where() for value in seen), seen)
+        self.assertEqual(tls.ca_bundle(), certifi.where())
 
     def test_a_redirect_is_never_followed_whatever_the_method(self):
         trust_test_ca(self)
         _Health.requests_seen = []
         session = client_module._pooled_session()
         with self.assertRaises(client_module.RedirectRefused):
-            session.get(f"{self.url}/redirect", verify=True)
+            session.get(f"{self.url}/redirect", verify=tls.ca_bundle())
         with self.assertRaises(client_module.RedirectRefused):
-            session.post(f"{self.url}/run/x", data=b"scan bytes", verify=True)
+            session.post(f"{self.url}/run/x", data=b"scan bytes", verify=tls.ca_bundle())
         with self.assertRaises(client_module.RedirectRefused):
-            session.head(f"{self.url}/redirect", verify=True, allow_redirects=False)
+            session.head(f"{self.url}/redirect", verify=tls.ca_bundle(), allow_redirects=False)
         # Each request reached the server once; nothing was resent anywhere.
         self.assertEqual([command for command, _path in _Health.requests_seen],
                          ["GET", "POST", "HEAD"])
@@ -214,6 +219,17 @@ class LiveServerTest(unittest.TestCase):
         trust_test_ca(self)
         from ServerToolsCoreLib import transfer
         self.assertIsNone(transfer.probe_ranged(client_module._pooled_session(), f"{self.url}/redirect"))
+
+    def test_urllib_verifies_against_the_same_bundle_and_refuses_redirects(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.URLError):
+            tls.urlopen(f"{self.url}/health", timeout=5)      # not trusted
+        trust_test_ca(self)
+        with tls.urlopen(f"{self.url}/health", timeout=5) as response:
+            self.assertEqual(json.loads(response.read()), {"status": "ok"})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            tls.urlopen(f"{self.url}/redirect", timeout=5)
+        self.assertEqual(caught.exception.code, 307)
 
     def test_urllib_refuses_plain_http(self):
         for url in ("http://localhost:8000/tools", "http://tools.example.org/tools"):

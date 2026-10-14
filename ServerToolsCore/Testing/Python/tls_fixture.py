@@ -3,9 +3,9 @@
 The client speaks HTTPS only and verifies every certificate against the public
 authorities, with no knob to change that. So a test server on 127.0.0.1 gets a
 certificate for `localhost` issued by a throwaway CA made here, and the TEST --
-never the production code -- points requests at that CA through the
-`REQUESTS_CA_BUNDLE` environment variable for its own duration. The client
-still passes `verify=True` and checks the hostname, exactly as in production.
+never the production code -- patches `tls.ca_bundle` to name that CA for its
+own duration. The client still verifies and checks the hostname, exactly as in
+production; only the list of trusted authorities differs.
 """
 
 import atexit
@@ -67,7 +67,10 @@ def serve_tls(server):
 
 
 def trust_test_ca(testcase):
-    """For this test only, make requests trust the throwaway CA."""
-    patcher = mock.patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": ca_bundle()})
+    """For this test only, make the client trust the throwaway CA, by
+    replacing the one function that names the trusted authorities."""
+    from ServerToolsCoreLib import tls
+
+    patcher = mock.patch.object(tls, "ca_bundle", return_value=ca_bundle())
     patcher.start()
     testcase.addCleanup(patcher.stop)

@@ -1,6 +1,6 @@
 """HTTPS only, verified against the public certificate authorities.
 
-Standard library only, so `deploy.py` (urllib) and `client.py` (requests) share
+Standard library only, `certifi` aside (imported when first needed), so `deploy.py` (urllib) and `client.py` (requests) share
 it without either one pulling in the other's stack.
 
 Two rules live here and nowhere else, and neither has an off switch -- no
@@ -13,9 +13,11 @@ setting, flag, environment variable or config value relaxes them:
    client is refused with the same message.
 
 2. **The certificate is verified against the public authorities**, the
-   `certifi` bundle for `requests` and the system store for urllib, with the
-   hostname check on. There is no custom CA, no pinning and never
-   `verify=False`. The server is therefore reached through the name its
+   `certifi` bundle, named explicitly (`ca_bundle()`) for `requests` and for
+   urllib alike, with the hostname check on. There is no custom CA, no
+   pinning and never `verify=False` -- and not `verify=True` either, which
+   would let `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` in the environment swap the
+   trusted authorities for any others. The server is therefore reached through the name its
    publicly-signed certificate is issued for -- the
    `https://<name>.<tailnet>.ts.net` address `tailscale serve` publishes, or
    its own domain behind a reverse proxy or served directly with a Let's
@@ -80,6 +82,17 @@ def require_https(url: str) -> str:
     return "https" + text[len(parts.scheme):]
 
 
+def ca_bundle() -> str:
+    """The public certificate authorities every connection is verified
+    against: certifi's bundle, the one `requests` ships. Passed explicitly,
+    never left to `verify=True`, so no environment variable can replace it.
+    Imported here rather than at the top so the module stays importable where
+    only the standard library is."""
+    import certifi
+
+    return certifi.where()
+
+
 class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
     """Every redirect is an error. A redirect is how https:// becomes http://
     without the new URL ever passing require_https."""
@@ -105,4 +118,4 @@ def urlopen(url: str, timeout: float):
     """urllib's urlopen, https:// only, never following a redirect, verified
     against the public certificate authorities with the hostname check on."""
     url = require_https(url)
-    return _opener(ssl.create_default_context()).open(url, timeout=timeout)
+    return _opener(ssl.create_default_context(cafile=ca_bundle())).open(url, timeout=timeout)

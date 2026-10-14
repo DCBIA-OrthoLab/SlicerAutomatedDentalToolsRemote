@@ -657,7 +657,7 @@ def _pooled_session() -> requests.Session:
     )
     # Only https:// gets this adapter: every server URL went through
     # tls.require_https, so a plain-HTTP URL reaching the session is a bug.
-    # Every request passes verify=True: the public authorities of requests'
+    # Every request passes verify=tls.ca_bundle(): the public authorities of requests'
     # own bundle, hostname included, with no knob anywhere (see tls.py).
     session.mount("https://", adapter)
     session.mount("http://", _RefusePlainHttp())
@@ -789,7 +789,7 @@ class ToolServerClient:
     def health(self) -> bool:
         try:
             response = self._session.get(
-                f"{self._server_url}/health", timeout=_HEALTH_CHECK_TIMEOUT, verify=True
+                f"{self._server_url}/health", timeout=_HEALTH_CHECK_TIMEOUT, verify=tls.ca_bundle()
             )
             return bool(response.ok and response.json().get("status") == "ok")
         except (requests.RequestException, ValueError) as exc:
@@ -807,7 +807,7 @@ class ToolServerClient:
         try:
             response = self._session.get(
                 f"{self._server_url}/clients/me", headers={"Authorization": f"Bearer {self._token}"},
-                timeout=_HEALTH_CHECK_TIMEOUT, verify=True,
+                timeout=_HEALTH_CHECK_TIMEOUT, verify=tls.ca_bundle(),
             )
             if not response.ok:
                 return None
@@ -865,7 +865,7 @@ class ToolServerClient:
                 f"{self._server_url}/tools/{tool_name}/data",
                 headers={"Authorization": f"Bearer {self._token}"},
                 timeout=_TOOLS_FETCH_TIMEOUT,
-                verify=True,
+                verify=tls.ca_bundle(),
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not reach the tool server: {exc}") from exc
@@ -990,7 +990,7 @@ class ToolServerClient:
                 headers=headers,
                 stream=True,
                 timeout=self._timeout,
-                verify=True,
+                verify=tls.ca_bundle(),
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not reach the tool server: {exc}") from exc
@@ -1023,7 +1023,7 @@ class ToolServerClient:
     def _fetch_tools(self) -> dict:
         try:
             response = self._session.get(
-                f"{self._server_url}/tools", timeout=_TOOLS_FETCH_TIMEOUT, verify=True
+                f"{self._server_url}/tools", timeout=_TOOLS_FETCH_TIMEOUT, verify=tls.ca_bundle()
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not reach the tool server: {exc}") from exc
@@ -1199,7 +1199,7 @@ class ToolServerClient:
                         data=data,
                         files=files_payload or None,
                         timeout=self._timeout,
-                        verify=True,
+                        verify=tls.ca_bundle(),
                         stream=True,
                     )
                 except requests.RequestException as exc:
@@ -1370,7 +1370,7 @@ class ToolServerClient:
                     # contract has no heartbeat, so silence is the normal state
                     # of a running inference.
                     timeout=(_TOOLS_FETCH_TIMEOUT, _RUN_EVENTS_READ_TIMEOUT),
-                    verify=True,
+                    verify=tls.ca_bundle(),
                 )
             except requests.RequestException:
                 if stopped() or not within_startup_window():
@@ -1454,7 +1454,7 @@ class ToolServerClient:
         for attempt in range(2):
             try:
                 response = self._session.delete(
-                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=True
+                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=tls.ca_bundle()
                 )
             except requests.RequestException as exc:
                 logger.debug("Could not cancel a run (attempt %d): %s", attempt, exc)
@@ -1533,7 +1533,7 @@ class ToolServerClient:
                     headers=headers,
                     files=payload or None,
                     timeout=self._timeout,
-                    verify=True,
+                    verify=tls.ca_bundle(),
                     stream=True,
                 )
             except requests.RequestException as exc:
@@ -1756,7 +1756,7 @@ class ToolServerClient:
         for attempt in range(2):
             try:
                 response = self._session.delete(
-                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=True
+                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=tls.ca_bundle()
                 )
                 if response.ok or response.status_code == 404:
                     return

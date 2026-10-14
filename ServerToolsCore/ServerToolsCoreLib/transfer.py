@@ -39,6 +39,7 @@ from typing import Callable, Optional
 
 import requests
 
+from . import tls
 from .errors import ServerToolError
 
 logger = logging.getLogger("ServerToolsCore.transfer")
@@ -253,7 +254,7 @@ def _open_session(session, server_url, headers, name, size, chunk_bytes) -> dict
             headers=headers,
             json={"filename": name, "size": size, "chunk_size": chunk_bytes},
             timeout=_PART_TIMEOUT,
-            verify=True,
+            verify=tls.ca_bundle(),
         )
     except requests.RequestException as exc:
         raise ServerToolError(f"Could not start the upload of '{name}': {exc}") from exc
@@ -316,7 +317,7 @@ def _send_parts(
             headers=part_headers,
             data=data,
             timeout=_PART_TIMEOUT,
-            verify=True,
+            verify=tls.ca_bundle(),
         )
         if not response.ok:
             raise ServerToolError(f"Part {index} refused: {_message(response)}")
@@ -342,7 +343,7 @@ def _missing_parts(session, server_url, headers, upload_id, fallback):
             f"{server_url}/uploads/{upload_id}",
             headers=headers,
             timeout=_PART_TIMEOUT,
-            verify=True,
+            verify=tls.ca_bundle(),
         )
         if response.ok:
             return response.json().get("missing_parts", fallback)
@@ -357,7 +358,7 @@ def _discard(session, server_url, headers, upload_id) -> None:
             f"{server_url}/uploads/{upload_id}",
             headers=headers,
             timeout=_PART_TIMEOUT,
-            verify=True,
+            verify=tls.ca_bundle(),
         )
     except requests.RequestException as exc:
         logger.debug("could not discard upload %s: %s", upload_id, exc)
@@ -490,7 +491,7 @@ def _fetch_span(session, url, headers, file_descriptor, start, end, size, meter,
     request_headers["Accept-Encoding"] = "identity"
 
     with session.get(
-        url, headers=request_headers, stream=True, timeout=_PART_TIMEOUT, verify=True
+        url, headers=request_headers, stream=True, timeout=_PART_TIMEOUT, verify=tls.ca_bundle()
     ) as response:
         if not response.ok:
             raise ServerToolError(f"Range {start}-{end} refused: {_message(response)}")
@@ -538,7 +539,7 @@ def probe_ranged(session, url, headers=None):
         response = session.head(
             url, headers=dict(headers or {}), timeout=_PART_TIMEOUT,
             # Never followed: a redirect is how https:// becomes http://.
-            verify=True, allow_redirects=False,
+            verify=tls.ca_bundle(), allow_redirects=False,
         )
     except requests.RequestException as exc:
         logger.debug("range probe failed for %s: %s", url, exc)
