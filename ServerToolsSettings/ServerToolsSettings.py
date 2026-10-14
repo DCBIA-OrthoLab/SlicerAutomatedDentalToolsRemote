@@ -8,7 +8,11 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadab
 
 from ServerToolsCoreLib import config, design, get_client
 from ServerToolsCoreLib.client import checked_server_url
-from ServerToolsCoreLib.settings_qt import clear_overrides, save_overrides
+from ServerToolsCoreLib.settings_qt import (
+    clear_overrides,
+    notify_uploads_are_not_deidentified,
+    save_overrides,
+)
 from ServerToolsCoreLib.worker import BackgroundJob
 
 logger = logging.getLogger("ServerToolsCore.settings")
@@ -129,6 +133,10 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         self.client.configure(server_url=server_url, token=token, timeout=timeout)
         logger.info("Server settings saved: url=%s timeout=%s", server_url, timeout)
         slicer.util.showStatusMessage(_("Server settings saved."), 3000)
+        # After the save, not before: the notice is about what this server will
+        # receive, and a user who cancels out of it has still changed nothing
+        # they did not ask to change.
+        notify_uploads_are_not_deidentified(server_url)
         self._refreshStatus()
 
     def onRestoreButton(self) -> None:
