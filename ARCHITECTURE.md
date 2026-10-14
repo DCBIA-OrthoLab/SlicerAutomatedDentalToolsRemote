@@ -34,6 +34,7 @@ SlicerAutomatedDentalTools/
 │       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT, TRANSFER_* (compiled-in defaults)
 │       ├── client.py                       # ToolServerClient — the only class that speaks HTTP
 │       ├── transfer.py                     # parallel chunked upload / ranged download of big files
+│       ├── tls.py                          # https:// only, and the loopback certificate pin
 │       ├── errors.py                       # ServerToolError + HTTP status → message mapping
 │       ├── digest.py                       # what a reviewer changed in a folder, by content not mtime
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
@@ -426,7 +427,30 @@ interpreter launch:
   unconditionally drops the cached `/tools` schema, since it may no longer
   belong to the newly-configured server. This is what lets
   `ServerToolsSettings` change the server URL/API key at runtime without a
-  Slicer restart — see the dedicated section below.
+  Slicer restart — see the dedicated section below. A `server_url` that is
+  not `https://` raises `tls.InsecureServerUrl` before anything changes.
+
+## `tls.py` — HTTPS only, and the local server's own certificate
+
+The server has no plain-HTTP listener, and this client sends medical images
+and a bearer token, so `tls.require_https` refuses every server URL that is
+not `https://` — in the constructor, in `configure()`, in the settings panel's
+Save and in SlicerCloud. There is no setting, flag or environment variable
+that relaxes it. A loopback `http://` URL (`localhost`, `127.0.0.1`, `[::1]`)
+saved by an older client is upgraded to `https://` on the same port, which is
+exactly what the local server serves there now; a non-loopback one is refused
+(at startup, `apply_saved_overrides` logs it and keeps the default URL).
+
+The local deployment presents a self-signed certificate. For a loopback host
+with `VERIFY_TLS is True`, the pooled session's adapter (`_PinningAdapter`)
+verifies against the certificate that server presents, read once per
+(host, port) with `ssl.get_server_certificate` into a private 0600 temp file,
+hostname check still on, and re-read once when verification fails (the server
+regenerated it). Trust on first use is acceptable only over loopback: the
+bytes never leave the machine, and a process able to bind that port already
+reads the files being sent. A remote host keeps `VERIFY_TLS` untouched, and
+`verify=False` is never sent — a hand-edited `VERIFY_TLS = False` is ignored.
+`deploy.py` uses the same module through `tls.urlopen`.
 
 ### A run that says what it is doing, and a run that can be stopped
 
@@ -1648,7 +1672,8 @@ over before the first byte left.
 - Tuned via `config.py`: `TRANSFER_PARALLELISM` (4), `TRANSFER_CHUNK_MB` (8),
   `TRANSFER_COMPRESS` (True).
 
-`test_transfer.py` drives all of this against a real `ThreadingHTTPServer` that
+`test_transfer.py` drives all of this against a real `ThreadingHTTPServer`
+(wrapped in TLS with a throwaway certificate, `tls_fixture.py`) that
 can drop parts, corrupt them, cut ranges short and refuse ranges altogether -
 mocks prove nothing about concurrency or byte offsets.
 
@@ -1786,10 +1811,10 @@ must not start a 29 GB transfer.
 When the server comes up, the panel saves its URL and generated API key
 through `settings_qt.save_overrides` and `client.configure()` — the same path
 `ServerToolsSettings` uses, so every module immediately points at the new
-server with no restart. It deliberately does **not** touch `verify_tls`: that
-flag is irrelevant to an `http://localhost` URL, and clearing it here would
-silently disable certificate checking for whatever `https://` server the user
-points at next.
+server with no restart. It deliberately does **not** touch `verify_tls`: the
+`https://localhost` URL it saves is verified through the loopback pin
+(`tls.py`), and clearing it here would silently disable certificate checking
+for whatever remote server the user points at next.
 
 ### Which branch gets deployed
 
@@ -2197,15 +2222,15 @@ This confirms the four success criteria from the brief:
   one does not repaint it until the user leaves and re-enters the module (or
   reopens Slicer). `design.tokens()` itself always reflects the current mode;
   only the "when do we re-apply the stylesheet" question is coarse.
-- **`SlicerCloud` deploys over plain HTTP, on loopback only**: the generated
-  deployment publishes port 8000 on `127.0.0.1` and the panel configures
-  `http://localhost:8000`. TLS on a self-signed loopback certificate buys
-  nothing a Slicer user would verify, and would make the plug-and-play path
-  fail on a certificate warning. The constraint that makes it acceptable is
-  the bind address, which `server_ctl.py` writes into `.env` — the moment that
-  server is published on a network address it is medical images in the clear,
-  and it needs a TLS terminator in front. `server/SECURITY.md` says so; this
-  is the client-side half of the same statement.
+- **`SlicerCloud` deploys over HTTPS with a self-signed certificate, on
+  loopback by default**: the generated deployment publishes port 8000 on
+  `127.0.0.1` and the panel configures `https://localhost:8000`, verified
+  against the certificate the server presents over loopback (`tls.py`). That
+  certificate names only `localhost`, `127.0.0.1` and `::1`, so the moment the
+  server is published on a network address no other machine can verify it,
+  and it needs a TLS terminator with a real certificate in front
+  (`tailscale serve`). `server/SECURITY.md` says so; this is the client-side
+  half of the same statement.
 - **The panel cannot deploy to a *remote* host**: it drives a clone on the
   machine Slicer runs on. Standing a server up on the lab GPU box is the same
   `scripts/setup-server.sh` over ssh, and then this panel is only used for its
