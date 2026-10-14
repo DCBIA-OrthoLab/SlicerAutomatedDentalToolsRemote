@@ -21,7 +21,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
 from ServerToolsCoreLib import design, get_client
-from ServerToolsCoreLib.settings_qt import save_overrides
+from ServerToolsCoreLib.settings_qt import notify_uploads_are_not_deidentified, save_overrides
 from ServerToolsCoreLib.worker import BackgroundJob
 from SlicerCloudLib import deploy
 from SlicerCloudLib.deploy import (
@@ -1035,6 +1035,10 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         save_overrides(url, token, client.timeout)
         client.configure(server_url=url, token=token)
         self._log(_("Saved {0} as the server used by every module.").format(url))
+        # A deployment bound to anything but loopback is reachable by other
+        # machines, and what they will receive is unmodified. The bind warning
+        # above covers who can READ the traffic; this covers what is in it.
+        notify_uploads_are_not_deidentified(url)
 
     # ------------------------------------------------------------------
     # Rendering

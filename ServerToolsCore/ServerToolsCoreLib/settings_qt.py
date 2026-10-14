@@ -10,15 +10,18 @@ side code (ServerToolsCore.py at startup, ServerToolsSettingsWidget) uses it.
 layer on top, edited via the "Server Tools Settings" module.
 """
 
+from urllib.parse import urlsplit
+
 import qt
 
-from .client import checked_server_url
+from .client import checked_server_url, is_loopback
 
 _GROUP = "ServerTools"
 _KEY_SERVER_URL = f"{_GROUP}/ServerUrl"
 _KEY_API_TOKEN = f"{_GROUP}/ApiToken"
 _KEY_VERIFY_TLS = f"{_GROUP}/VerifyTls"
 _KEY_TIMEOUT = f"{_GROUP}/Timeout"
+_KEY_UPLOAD_NOTICE_HOST = f"{_GROUP}/UploadNoticeShownFor"
 
 
 def load_overrides() -> dict:
@@ -60,6 +63,66 @@ def save_overrides(server_url: str, token: str, timeout: int) -> None:
     # sitting in the file looking as though it still decided something.
     settings.remove(_KEY_VERIFY_TLS)
     settings.sync()
+
+
+def upload_notice_due(server_url: str) -> bool:
+    """Whether the "nothing is de-identified" notice still has to be shown for
+    `server_url`.
+
+    Never for loopback: nothing leaves the machine, so there is nothing to warn
+    about and a dialog on every save would only teach people to dismiss it.
+
+    Tracked per host rather than once and for all. Pointing the client at a
+    different server is the moment the question matters again, and the answer
+    may differ: one server may be the operator's own machine and the next one
+    an institution's, under another agreement.
+    """
+    host = urlsplit(server_url).hostname or ""
+    if not host or is_loopback(host):
+        return False
+    return str(qt.QSettings().value(_KEY_UPLOAD_NOTICE_HOST, "")) != host
+
+
+def mark_upload_notice_shown(server_url: str) -> None:
+    """Remember that the notice was shown for this host, so it is not repeated."""
+    host = urlsplit(server_url).hostname or ""
+    if not host:
+        return
+    settings = qt.QSettings()
+    settings.setValue(_KEY_UPLOAD_NOTICE_HOST, host)
+    settings.sync()
+
+
+def notify_uploads_are_not_deidentified(server_url: str) -> None:
+    """Say once, per server, that this client de-identifies nothing.
+
+    The README has said so since the client existed, and a README is not where
+    somebody finds out what leaves their machine. This fires at the one moment
+    the question is live: a server that is not this machine has just been
+    pointed at, and nothing has been sent yet.
+
+    Best effort by design -- failing to show a dialog must not cost the user
+    the setting they just saved.
+    """
+    if not upload_notice_due(server_url):
+        return
+
+    import slicer
+    from slicer.i18n import tr as _
+
+    host = urlsplit(server_url).hostname or server_url
+    try:
+        slicer.util.warningDisplay(_(
+            "Files are uploaded unmodified.\n\n"
+            "This client does not de-identify anything. What you select is sent to "
+            "{0} as it sits on disk: the file names, the DICOM headers, and whatever "
+            "identifiers they carry.\n\n"
+            "De-identify your data before selecting it, or confine use to data that "
+            "carries no protected health information."
+        ).format(host))
+    except Exception:  # noqa: BLE001 - a missing dialog must not undo a save
+        return
+    mark_upload_notice_shown(server_url)
 
 
 def clear_overrides() -> None:
