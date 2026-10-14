@@ -317,6 +317,13 @@ class FailureTest(_Live):
             self._client().run(_TOOL, run_id=new_run_id())
         self.assertIn("Zz", str(caught.exception))
 
+    def test_a_failed_run_s_message_is_capped(self):
+        from ServerToolsCoreLib.client import _SERVER_MESSAGE_MAX_LEN
+        self.state.events = [_terminal(1, state="failed", message="x" * 10_000)]
+        with self.assertRaises(ServerToolError) as caught:
+            self._client().run(_TOOL, run_id=new_run_id())
+        self.assertLessEqual(len(str(caught.exception)), _SERVER_MESSAGE_MAX_LEN)
+
     def test_a_cancelled_run_is_not_a_failure(self):
         """One closes a panel quietly, the other opens an error dialog."""
         self.state.events = [_terminal(1, state="cancelled")]

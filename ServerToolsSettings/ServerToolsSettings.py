@@ -13,6 +13,7 @@ from ServerToolsCoreLib.settings_qt import (
     notify_uploads_are_not_deidentified,
     save_overrides,
 )
+from ServerToolsCoreLib.errors import plain_text
 from ServerToolsCoreLib.worker import BackgroundJob
 
 logger = logging.getLogger("ServerToolsCore.settings")
@@ -125,7 +126,7 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         try:
             server_url = checked_server_url(server_url)
         except ValueError as exc:
-            slicer.util.errorDisplay(str(exc))
+            slicer.util.errorDisplay(plain_text(str(exc)))
             return
         self.urlEdit.text = server_url
 

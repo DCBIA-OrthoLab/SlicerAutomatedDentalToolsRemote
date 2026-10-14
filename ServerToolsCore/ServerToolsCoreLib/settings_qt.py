@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import qt
 
 from .client import checked_server_url, is_loopback
+from .errors import plain_text
 
 logger = logging.getLogger(__name__)
 
@@ -116,14 +117,14 @@ def notify_uploads_are_not_deidentified(server_url: str) -> None:
 
     host = urlsplit(server_url).hostname or server_url
     try:
-        slicer.util.warningDisplay(_(
+        slicer.util.warningDisplay(plain_text(_(
             "Files are uploaded unmodified.\n\n"
             "This client does not de-identify anything. What you select is sent to "
             "{0} as it sits on disk: the file names, the DICOM headers, and whatever "
             "identifiers they carry.\n\n"
             "De-identify your data before selecting it, or confine use to data that "
             "carries no protected health information."
-        ).format(host))
+        ).format(host)))
     except Exception:  # noqa: BLE001 - a missing dialog must not undo a save
         return
     mark_upload_notice_shown(server_url)

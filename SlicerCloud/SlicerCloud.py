@@ -23,6 +23,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadab
 from ServerToolsCoreLib import design, get_client
 from ServerToolsCoreLib.client import checked_server_url
 from ServerToolsCoreLib.settings_qt import notify_uploads_are_not_deidentified, save_overrides
+from ServerToolsCoreLib.errors import plain_text
 from ServerToolsCoreLib.worker import BackgroundJob
 from SlicerCloudLib import deploy
 from SlicerCloudLib.deploy import (
@@ -631,23 +632,23 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if kind == "loopback":
             return
         if kind == "vpn":
-            slicer.util.infoDisplay(_(
+            slicer.util.infoDisplay(plain_text(_(
                 "The server will be reachable at {0} — from the machines on that private "
                 "network only.\n\n"
                 "Its certificate is self-signed for this computer only, so the other "
                 "machines need a publicly-signed certificate in front of it, e.g. "
                 "`tailscale serve`, or a reverse proxy with a Let's Encrypt certificate."
-            ).format(address))
+            ).format(address)))
         else:
             shown = address or _("every address on this machine")
-            slicer.util.warningDisplay(_(
+            slicer.util.warningDisplay(plain_text(_(
                 "The server will be reachable at {0}.\n\n"
                 "Its certificate is self-signed for this computer only: another machine "
                 "cannot verify it, and this client refuses a server it cannot verify.\n\n"
                 "Give it a publicly-signed certificate first -- `tailscale serve`, or a "
                 "reverse proxy with a Let's Encrypt or institutional certificate (PUBLIC_URL) "
                 "— see SECURITY.md in the server repository."
-            ).format(shown))
+            ).format(shown)))
 
     def _onInstallDirChanged(self, _path=None) -> None:
         if self._loadingSettings:
@@ -731,10 +732,10 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._log(f"error: {message}")
         if isinstance(exc, DeploymentError):
             # Written for the user by deploy.py or by server_ctl.py — shown verbatim.
-            slicer.util.errorDisplay(message)
+            slicer.util.errorDisplay(plain_text(message))
         else:
             logger.exception("%s failed", name)
-            slicer.util.errorDisplay(_("{0} failed: {1}").format(name, message))
+            slicer.util.errorDisplay(plain_text(_("{0} failed: {1}").format(name, message)))
         # `refresh` is False for the refresh job itself. Otherwise a status
         # check that fails every time — no Python 3 on the machine, say —
         # would re-launch itself from its own error handler, for ever.
@@ -818,11 +819,11 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             if result.get("healthy"):
                 slicer.util.showStatusMessage(_("The tool server is running."), 5000)
             else:
-                slicer.util.warningDisplay(_(
+                slicer.util.warningDisplay(plain_text(_(
                     "The container was started but {0}/health did not answer in time. It may "
                     "still be installing its dependencies — check the Log, or press Refresh in "
                     "a few minutes."
-                ).format(result.get("url") or DEFAULT_SERVER_URL))
+                ).format(result.get("url") or DEFAULT_SERVER_URL)))
             self.onRefresh()
 
         self._startJob(_("Installing and starting the server"), task, done)
@@ -1046,7 +1047,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             url = checked_server_url(url)
         except ValueError as exc:
             self._log(str(exc))
-            slicer.util.errorDisplay(str(exc))
+            slicer.util.errorDisplay(plain_text(str(exc)))
             return
         client = get_client()
         save_overrides(url, token, client.timeout)

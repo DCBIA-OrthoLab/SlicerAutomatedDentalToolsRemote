@@ -688,6 +688,15 @@ def toggle_button(text: str) -> qt.QPushButton:
     return button
 
 
+def _plain_label(text: str) -> qt.QLabel:
+    """A QLabel that shows its text literally. Labels here carry schema text --
+    an argument's label, a group name -- which comes from the server, and a
+    QLabel left on Qt's AutoText would render a `<a href>` in it as a link."""
+    label = qt.QLabel(text)
+    label.setTextFormat(qt.Qt.PlainText)
+    return label
+
+
 def section_title(text: str, explained: bool = False) -> qt.QLabel:
     """The name of a field, beside it.
 
@@ -707,7 +716,7 @@ def section_title(text: str, explained: bool = False) -> qt.QLabel:
     other.
     """
     t = tokens()
-    label = qt.QLabel(text)
+    label = _plain_label(text)
     hint = (f" border-bottom: 1px dotted {t['TEXT_MUTED']};"
             f" padding-bottom: 1px;" if explained else "")
     label.setStyleSheet(f"color: {t['TEXT_MUTED']}; font-weight: 600;{hint}")
@@ -756,7 +765,7 @@ def group_heading(text: str) -> qt.QLabel:
     switch.
     """
     t = tokens()
-    label = qt.QLabel(text)
+    label = _plain_label(text)
     label.setStyleSheet(
         f"color: {t['TEXT_MUTED']}; font-weight: 700;"
         f" background: transparent; border: none;"
@@ -799,7 +808,7 @@ def hint_label(text: str) -> qt.QLabel:
     is what marks a label as having one.
     """
     t = tokens()
-    label = qt.QLabel(text)
+    label = _plain_label(text)
     label.setWordWrap(True)
     label.setStyleSheet(f"color: {t['TEXT_MUTED']}; font-size: 8pt; padding-bottom: {SPACING_XS}px;")
     return label
@@ -1053,7 +1062,7 @@ def warning_label(text: str) -> qt.QLabel:
     """A visible, wrapped, danger-colored label — used when part of a module's
     UI could not be built, so a failure is never just a silent blank panel."""
     t = tokens()
-    label = qt.QLabel(text)
+    label = _plain_label(text)
     label.setWordWrap(True)
     label.setStyleSheet(f"color: {t['DANGER']}; font-weight: 600; padding: {SPACING_SM}px;")
     return label

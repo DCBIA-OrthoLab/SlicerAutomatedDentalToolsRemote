@@ -35,6 +35,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
 from ServerToolsCoreLib import design, formgen, get_client, slicer_io, testfile_entries
+from ServerToolsCoreLib.errors import plain_text
 from ServerToolsCoreLib.worker import BackgroundJob
 from VISULib import edits, index, review
 
@@ -1472,9 +1473,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                 # truncated or hand-edited, and saving now happens on the way
                 # OUT of a patient -- so an unreadable one would take the
                 # panel down mid-navigation rather than at a button press.
-                slicer.util.errorDisplay(
+                slicer.util.errorDisplay(plain_text(
                     _("Could not write {name}: {error}").format(
-                        name=artifact.name, error=exc))
+                        name=artifact.name, error=exc)))
                 continue
             moved += count
             files += 1 if count else 0

@@ -1657,8 +1657,10 @@ class ToolServerClient:
         if state == "cancelled":
             raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
         if state != "done":
+            message = terminal.get("message")
             raise ServerToolError(
-                terminal.get("message") or f"'{tool_name}' failed on the server."
+                str(message)[:_SERVER_MESSAGE_MAX_LEN] if message
+                else f"'{tool_name}' failed on the server."
             )
 
         # The terminal event carries either a pointer to fetch, or a small
@@ -1955,7 +1957,11 @@ class ToolServerClient:
         if isinstance(payload, dict):
             message = payload.get("detail") or payload.get("message")
             if message:
-                return message
+                # Capped like the raw body below: it ends up in a dialog, and
+                # a server is not owed an unbounded one.
+                if not isinstance(message, str):
+                    message = json.dumps(message)
+                return message[:_SERVER_MESSAGE_MAX_LEN]
 
         text = (getattr(response, "text", None) or "").strip()
         if not text:

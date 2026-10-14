@@ -42,6 +42,14 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
+# test_plain_text.py: server text (a failure's message, a schema description)
+# is shown as text in dialogs, labels and tooltips, never as HTML. Same stubs.
+add_test(
+  NAME ServerToolsCore_test_plain_text
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_plain_text
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
 # test_formgen.py does need qt/ctk/slicer, but only as the small stand-ins in
 # qt_stubs.py: it checks which widgets a schema produces and what they read
 # back as, which is pure Python once the widget classes are stubbed. Same
