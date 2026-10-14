@@ -10,11 +10,14 @@ side code (ServerToolsCore.py at startup, ServerToolsSettingsWidget) uses it.
 layer on top, edited via the "Server Tools Settings" module.
 """
 
+import logging
 from urllib.parse import urlsplit
 
 import qt
 
 from .client import checked_server_url, is_loopback
+
+logger = logging.getLogger(__name__)
 
 _GROUP = "ServerTools"
 _KEY_SERVER_URL = f"{_GROUP}/ServerUrl"
@@ -30,16 +33,17 @@ def load_overrides() -> dict:
     overrides = {}
     if settings.contains(_KEY_SERVER_URL):
         saved = str(settings.value(_KEY_SERVER_URL))
-        # Dropped rather than applied when it is plain HTTP to a remote host,
-        # for the reason `verify_tls` is no longer read back either: a value a
-        # user saved before this client refused that scheme would otherwise
+        # A loopback http:// saved by an older client comes back as https://
+        # on the same port. Plain HTTP to a remote host is dropped rather than
+        # applied, for the reason `verify_tls` is no longer read back either:
+        # a value saved before this client refused that scheme would otherwise
         # keep sending scans in the clear for ever. Falling back to config.py
         # leaves them on loopback, which is safe, and the settings panel says
         # what happened the moment they open it.
         try:
             overrides["server_url"] = checked_server_url(saved)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.error("The saved server URL was ignored: %s", exc)
     if settings.contains(_KEY_API_TOKEN):
         overrides["token"] = str(settings.value(_KEY_API_TOKEN))
     # `verify_tls` is deliberately NOT read back. It was a saved setting until

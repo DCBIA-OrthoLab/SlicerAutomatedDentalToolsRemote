@@ -63,7 +63,7 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         rootLayout.addWidget(box)
 
         self.urlEdit = qt.QLineEdit()
-        self.urlEdit.setToolTip(_("e.g. https://tools.example.org"))
+        self.urlEdit.setToolTip(_("https:// only, e.g. https://tools.example.org"))
         formLayout.addRow(design.required_label(_("Server URL")), self.urlEdit)
 
         self.tokenEdit = qt.QLineEdit()
@@ -119,12 +119,14 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         # Checked before anything is written, so a refused URL never reaches
         # the settings file: saving first would leave a value on disk that
         # `load_overrides` drops again at the next start, with nothing on
-        # screen to say why the server reverted.
+        # screen to say why the server reverted. A loopback http:// comes
+        # back as https://, and the field shows what was actually saved.
         try:
             server_url = checked_server_url(server_url)
         except ValueError as exc:
             slicer.util.errorDisplay(str(exc))
             return
+        self.urlEdit.text = server_url
 
         token = self.tokenEdit.text
         timeout = self.timeoutSpin.value

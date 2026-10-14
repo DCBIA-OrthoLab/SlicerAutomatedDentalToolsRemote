@@ -5,7 +5,10 @@ config over environment variables (see ARCHITECTURE.md). Do not commit a real
 production token — override these locally, or replace them at build time.
 """
 
-SERVER_URL = "http://localhost:8000"
+# https:// only -- see tls.py. The local deployment serves its own self-signed
+# certificate here, which the client verifies against the certificate read
+# over loopback; nothing in this file needs to change for it.
+SERVER_URL = "https://localhost:8000"
 API_TOKEN = "dev-token"
 # Certificate verification is ON, and it is deliberately not a user setting.
 # This client sends medical images and an API key, and TLS without verification

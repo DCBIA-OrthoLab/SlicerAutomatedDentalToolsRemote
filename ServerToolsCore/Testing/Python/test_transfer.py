@@ -25,10 +25,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import requests
 
-from ServerToolsCoreLib import transfer
+from tls_fixture import serve_tls  # noqa: E402
+from ServerToolsCoreLib import client, transfer
 from ServerToolsCoreLib.errors import ServerToolError
 
 
@@ -164,12 +166,14 @@ class _LiveServerTest(unittest.TestCase):
     def setUp(self):
         self.state = _State()
         handler = type("_BoundHandler", (_Handler,), {"state": self.state})
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.server = serve_tls(ThreadingHTTPServer(("127.0.0.1", 0), handler))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        self.session = requests.Session()
+        self.url = f"https://127.0.0.1:{self.server.server_address[1]}"
+        # The client's own pooled session: it is what pins the loopback
+        # certificate, exactly as in production.
+        self.session = client._pooled_session()
         self.addCleanup(self.session.close)
         self.work = tempfile.mkdtemp(prefix="transfer_test_")
         self.addCleanup(shutil.rmtree, self.work, True)

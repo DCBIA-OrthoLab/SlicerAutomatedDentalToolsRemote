@@ -11,7 +11,6 @@ congestion window rather than by the link. Everything about WHICH bytes travel
 and what they mean stays here; that module only moves them.
 """
 
-import ipaddress
 import json
 import logging
 import math
@@ -24,11 +23,14 @@ import re
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import requests
 
-from . import transfer
+from . import tls, transfer
+# Re-exported: the one loopback predicate, which settings_qt and others import
+# from here.
+from .tls import is_loopback  # noqa: F401
 from .errors import RunCancelled, ServerToolError, error_for_status
 
 logger = logging.getLogger("ServerToolsCore.client")
@@ -594,6 +596,31 @@ def _asks_to_stop(args: dict) -> bool:
     return bool(str(wanted or "").strip())
 
 
+class _PinningAdapter(requests.adapters.HTTPAdapter):
+    """Every request of the pooled session passes here, so this is the one
+    place where a loopback server's own certificate replaces `verify=True`
+    (see tls.py for why that is safe over loopback and nowhere else).
+
+    A verification failure against a REMEMBERED certificate is retried once
+    with a fresh read: the local server regenerates its certificate when it is
+    reinstalled, and a client that had pinned the old one would otherwise
+    refuse it until Slicer restarts. The handshake fails before a byte of the
+    body is sent, so resending the same request is safe.
+    """
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        pinned = tls.verify_for(request.url, verify)
+        try:
+            return super().send(request, stream=stream, timeout=timeout, verify=pinned,
+                                cert=cert, proxies=proxies)
+        except requests.exceptions.SSLError:
+            if pinned is verify or pinned is True:
+                raise
+        fresh = tls.verify_for(request.url, verify, refresh=True)
+        return super().send(request, stream=stream, timeout=timeout, verify=fresh,
+                            cert=cert, proxies=proxies)
+
+
 def _pooled_session() -> requests.Session:
     """One Session for every call this client makes, instead of a fresh
     connection per request.
@@ -606,7 +633,7 @@ def _pooled_session() -> requests.Session:
     (10 per host, blocking above that) would quietly serialise them.
     """
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(
+    adapter = _PinningAdapter(
         pool_connections=_CONNECTION_POOL_SIZE,
         pool_maxsize=_CONNECTION_POOL_SIZE,
         # Retries stay with the callers: transfer.py resends the one part that
@@ -614,7 +641,8 @@ def _pooled_session() -> requests.Session:
         # blind per-request retry cannot do.
         max_retries=0,
     )
-    session.mount("http://", adapter)
+    # Only https:// gets this adapter: every server URL went through
+    # tls.require_https, so a plain-HTTP URL reaching the session is a bug.
     session.mount("https://", adapter)
     return session
 
@@ -653,45 +681,23 @@ class ToolResult:
     checkpoint: Optional[RunCheckpoint] = None
 
 
-def is_loopback(host: str) -> bool:
-    """Whether `host` names this machine, by name or by address.
-
-    `127.0.0.1` is not the only loopback address: the whole `127.0.0.0/8` is,
-    and so is `::1`, which arrives from a URL wrapped in brackets.
-    """
-    if not host:
-        return False
-    host = host.strip("[]").lower()
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def checked_server_url(server_url: str) -> str:
-    """`server_url` without its trailing slash, refusing cleartext to a remote
-    host.
+    """`server_url` as an https:// URL without its trailing slash, or raise.
 
-    The client ships pointing at `http://localhost:8000` and a local server is
-    developed against over plain HTTP, so loopback keeps working untouched.
-    Anywhere else, `http://` puts the scans, the DICOM headers and the API
-    token on the wire in the clear, readable by anything between the two
-    machines. Verifying the certificate was made mandatory rather than optional
-    for the same reason (see config.VERIFY_TLS); allowing the scheme that has
-    no certificate at all would have left the door it closed standing open.
+    Every path that accepts a server URL goes through here (the constructor,
+    `configure()`, the saved settings, the settings panel), and the rule itself
+    lives in tls.require_https: the server has no plain-HTTP listener at all,
+    so `http://` is never used, on loopback or anywhere else. A loopback
+    `http://` URL -- the default of older clients -- is upgraded to `https://`
+    on the same port, which is exactly what the local server serves there; any
+    other `http://` would put the scans, the DICOM headers and the API token
+    on the wire in the clear, and is refused. Verifying the certificate is
+    mandatory for the same reason (see config.VERIFY_TLS and tls.py).
 
-    Raises ValueError, which the settings panel turns into a message.
+    Raises tls.InsecureServerUrl, a ValueError, which the settings panel turns
+    into a message.
     """
-    parts = urlsplit(server_url)
-    if parts.scheme == "http" and not is_loopback(parts.hostname or ""):
-        raise ValueError(
-            f"Refusing to use {server_url!r}: plain HTTP to a remote host would "
-            f"send the scans and the API token in the clear. Use https:// for "
-            f"{parts.hostname}, or point the client at a server on this machine."
-        )
-    return server_url.rstrip("/")
+    return tls.require_https(server_url)
 
 
 class ToolServerClient:
@@ -749,6 +755,9 @@ class ToolServerClient:
         place, so every module sharing get_client() sees the change without a
         Slicer restart. Drops the cached /tools schema unconditionally - it
         may belong to a different server entirely once any of these change.
+
+        A `server_url` that is not https:// raises tls.InsecureServerUrl
+        before anything is changed (a loopback http:// is upgraded instead).
         """
         if server_url is not None:
             self._server_url = checked_server_url(server_url)
