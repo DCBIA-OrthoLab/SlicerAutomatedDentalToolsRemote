@@ -3,8 +3,10 @@
 Automatic dental and craniofacial analysis in 3D Slicer — segmentation,
 landmark identification, orientation, registration and classification of CBCT
 scans, intraoral surface scans and MRI. Every computation runs on a remote tool
-server, so a laptop that cannot run a segmentation can still ask for one:
-nothing is installed into Slicer's interpreter and no model is downloaded.
+server, so a laptop that cannot run a segmentation can still ask for one: a
+ported module installs nothing into Slicer's interpreter and downloads no model.
+`CNE` and `MRI2CBCT` are not yet ported and still install their own dependencies
+and download their own models.
 
 <p align="center">
     <img src="SlicerAutomaticTools.png" alt="Automated Dental Tools Remote logo" width="200"/>
@@ -200,7 +202,7 @@ Panels that do not send work to the server:
 
 | Name | Description |
 |------|-------------|
-| [CNE](#cne-module) | Summarizes clinical notes with a local language model and builds a comorbidity dashboard from them. Successor of the former `MedX` module. |
+| [CNE](#cne-module) | Summarizes clinical notes with a local language model and builds a comorbidity dashboard from them. Successor of the former `MedX` module. **Not yet ported to the server**: it installs `llama-cpp-python` into Slicer's interpreter and downloads a language model of roughly 4.5 GB on first use. |
 | [MRI2CBCT](#mri2cbct-module) | Registers MRI onto CBCT of the temporomandibular joint. **The one imaging module not yet ported to the server**: it installs nnU-Net into Slicer's interpreter and downloads its model on first use. |
 | [VISU](VISU) | Opens a folder a tool has already produced and pairs scan, mask and landmarks for review, one case at a time, with the arrow keys to step through a cohort. Computes nothing. |
 | [Medical Data Anonymizer](#medical-data-anonymizer-module) | Anonymizes identifiers in medical documents (DOCX, PDF, TXT, CSV, XML, ODT) on this machine. |
