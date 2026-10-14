@@ -7,6 +7,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
 from ServerToolsCoreLib import config, design, get_client
+from ServerToolsCoreLib.client import checked_server_url
 from ServerToolsCoreLib.settings_qt import clear_overrides, save_overrides
 from ServerToolsCoreLib.worker import BackgroundJob
 
@@ -109,6 +110,16 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         server_url = self.urlEdit.text.strip()
         if not server_url:
             slicer.util.errorDisplay(_("Server URL cannot be empty."))
+            return
+
+        # Checked before anything is written, so a refused URL never reaches
+        # the settings file: saving first would leave a value on disk that
+        # `load_overrides` drops again at the next start, with nothing on
+        # screen to say why the server reverted.
+        try:
+            server_url = checked_server_url(server_url)
+        except ValueError as exc:
+            slicer.util.errorDisplay(str(exc))
             return
 
         token = self.tokenEdit.text
