@@ -11,6 +11,7 @@ naive two-pipe reading walks straight into), and none of them would show up
 against a mocked `Popen`.
 """
 
+import io
 import os
 import shutil
 import stat
@@ -18,10 +19,15 @@ import time
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 # The module directory, which is where SlicerCloudLib sits — the same import
 # path Slicer itself provides once the module is installed.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+# ServerToolsCore, for the ServerToolsCoreLib.tls that deploy.py shares with
+# the client -- also on Slicer's own path once the extension is installed.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+                                "ServerToolsCore"))
 
 from SlicerCloudLib import deploy  # noqa: E402
 from SlicerCloudLib.deploy import DeploymentError, LocalServerDeployment  # noqa: E402
@@ -385,7 +391,36 @@ class TestListTools(TempInstallDir):
     not."""
 
     def test_an_unreachable_server_is_None_rather_than_an_error(self):
-        self.assertIsNone(self.deployment().list_tools("http://127.0.0.1:1", timeout=1))
+        self.assertIsNone(self.deployment().list_tools("https://127.0.0.1:1", timeout=1))
+
+    def test_the_default_is_https(self):
+        self.assertTrue(deploy.DEFAULT_SERVER_URL.startswith("https://"))
+
+    def test_a_remote_http_url_is_never_asked(self):
+        with mock.patch.object(deploy.tls.urllib.request, "urlopen") as urlopen:
+            self.assertIsNone(self.deployment().list_tools("http://192.0.2.1:8000", timeout=1))
+        urlopen.assert_not_called()
+
+    def test_a_loopback_http_url_is_asked_over_https_through_the_pin(self):
+        seen = {}
+
+        class _Answer(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(url, timeout, context):
+            seen["url"], seen["context"] = url, context
+            return _Answer(b'[{"name": "AMASSS"}]')
+
+        with mock.patch.object(deploy.tls, "pinned_certificate", return_value=None) as pin, \
+                mock.patch.object(deploy.tls.urllib.request, "urlopen", urlopen):
+            self.assertEqual(self.deployment().list_tools("http://localhost:8000"), ["AMASSS"])
+        self.assertEqual(seen["url"], "https://localhost:8000/tools")
+        self.assertEqual(pin.call_args.args[:2], ("localhost", 8000))
+        self.assertTrue(seen["context"].check_hostname)
 
     def test_both_shapes_GET_tools_could_answer_with(self):
         for payload, expected in (

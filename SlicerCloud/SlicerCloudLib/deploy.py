@@ -3,7 +3,9 @@
 Same dependency rule as `client.py` (see ARCHITECTURE.md): **this module
 imports neither `slicer` nor `qt`**, so it runs — and is unit-tested — in plain
 CI with no Slicer interpreter. Everything it does is `subprocess` plus the
-standard library.
+standard library, and `ServerToolsCoreLib.tls` (standard library too) for the
+one request it makes, so the HTTPS-only rule and the loopback certificate pin
+are the client's own rather than a copy.
 
 It is deliberately thin. The real logic lives in the server repository's
 `scripts/server_ctl.py`, which this class clones and then calls: the panel and
@@ -26,14 +28,17 @@ import subprocess
 import sys
 import threading
 import urllib.error
-import urllib.request
+
+from ServerToolsCoreLib import tls
 
 # How much of a failed command's output travels with its error message.
 _ERROR_TAIL_LINES = 12
 
 DEFAULT_REPO_URL = "https://github.com/DCBIA-OrthoLab/VISOR-serve.git"
 DEFAULT_BRANCH = "main"
-DEFAULT_SERVER_URL = "http://localhost:8000"
+# https:// only: the local server presents a self-signed certificate, verified
+# against the one it presents over loopback (see ServerToolsCoreLib/tls.py).
+DEFAULT_SERVER_URL = "https://localhost:8000"
 
 # Where a clone goes when the user has not said. The home directory, not
 # anywhere under the Slicer install: this holds a git clone plus up to ~29 GB
@@ -138,7 +143,8 @@ def find_python() -> str:
 
 
 #: What `bind` means when nothing has been chosen. Loopback, because this
-#: deployment speaks plain HTTP and it carries medical images.
+#: deployment's certificate is self-signed and only this computer can verify
+#: it (by reading it over loopback), and it carries medical images.
 BIND_LOCALHOST = "127.0.0.1"
 #: The empty string is not "unset" here — it is how the compose file is told to
 #: publish on every interface, IPv4 and IPv6 both. See its own comment.
@@ -155,8 +161,9 @@ def host_addresses():
     A VPN address is singled out rather than lumped in with the rest because it
     is a genuinely different risk: publishing on a Tailscale/WireGuard address
     reaches only the machines in that private mesh, over an encrypted link,
-    while the same server on a LAN address is plain HTTP anyone on the wire can
-    read. The two must not look like the same choice in a list.
+    while the same server on a LAN address presents a self-signed certificate
+    that no other machine can verify. The two must not look like the same
+    choice in a list.
 
     Docker's own bridges are skipped: binding the server to `docker0` publishes
     it to containers and nothing else, which is never what anyone means.
@@ -695,9 +702,11 @@ class LocalServerDeployment:
         `GET /tools` is the one unauthenticated endpoint besides `/health`, so
         this needs no token and stays inside the no-`requests` rule.
         """
-        url = (url or DEFAULT_SERVER_URL).rstrip("/")
         try:
-            with urllib.request.urlopen(f"{url}/tools", timeout=timeout) as response:
+            # A loopback http:// URL from an older server_ctl.py is upgraded;
+            # any other http:// is refused, which reads here as "unknown".
+            url = tls.require_https(url or DEFAULT_SERVER_URL)
+            with tls.urlopen(f"{url}/tools", timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError):
             return None

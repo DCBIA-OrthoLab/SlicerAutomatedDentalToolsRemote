@@ -21,6 +21,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
 from ServerToolsCoreLib import design, get_client
+from ServerToolsCoreLib.client import checked_server_url
 from ServerToolsCoreLib.settings_qt import notify_uploads_are_not_deidentified, save_overrides
 from ServerToolsCoreLib.worker import BackgroundJob
 from SlicerCloudLib import deploy
@@ -368,9 +369,10 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.bindCombo.setToolTip(_(
             "Which machines can reach this server. 'This computer only' is the default and "
             "keeps it off the network entirely.\n\n"
-            "This server speaks plain HTTP: on a private encrypted network (Tailscale, "
-            "WireGuard) the traffic is protected by that network, on an ordinary local "
-            "network it is not, and neither is the API key."
+            "This server speaks HTTPS with a self-signed certificate only this computer "
+            "can verify, and this client never connects to a server it cannot verify. "
+            "To share it, publish it through a private encrypted network (Tailscale) "
+            "with a certificate the other machines can verify."
         ))
         advancedForm.addRow(design.section_title(_("Network access")), self.bindCombo)
         self.bindCombo.currentIndexChanged.connect(self._onBindChanged)
@@ -631,18 +633,19 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             slicer.util.infoDisplay(_(
                 "The server will be reachable at {0} — from the machines on that private "
                 "network only.\n\n"
-                "It speaks plain HTTP, so what protects the images and the API key here is "
-                "the network's own encryption. That is the safest way to share this server."
+                "Its certificate is self-signed for this computer only, so the other "
+                "machines need the network to provide a certificate they can verify "
+                "(`tailscale serve`). That is the safest way to share this server."
             ).format(address))
         else:
             shown = address or _("every address on this machine")
             slicer.util.warningDisplay(_(
                 "The server will be reachable at {0}.\n\n"
-                "It speaks PLAIN HTTP: on an ordinary network, anyone able to watch the "
-                "traffic can read the images being sent and the API key that protects them. "
-                "Medical images should not travel this way.\n\n"
-                "Prefer a private encrypted network (Tailscale, WireGuard) if one is listed, "
-                "or put a TLS terminator in front — see SECURITY.md in the server repository."
+                "Its certificate is self-signed for this computer only: another machine "
+                "cannot verify it, and this client refuses a server it cannot verify.\n\n"
+                "Prefer a private encrypted network (Tailscale) if one is listed, or put a "
+                "TLS terminator with a real certificate in front — see SECURITY.md in the "
+                "server repository."
             ).format(shown))
 
     def _onInstallDirChanged(self, _path=None) -> None:
@@ -1027,10 +1030,19 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         """Make this deployment the one every other module talks to.
 
         Certificate verification is not among the things saved here, and
-        cannot be: it is not a setting (see config.VERIFY_TLS). It is also
-        irrelevant to the `http://localhost` URL this writes most of the time,
-        since `requests` never consults it without TLS to verify.
+        cannot be: it is not a setting (see config.VERIFY_TLS). The
+        `https://localhost` URL this writes most of the time is verified
+        against the certificate the local server presents (tls.py).
+
+        A loopback http:// URL (an older server_ctl.py) is saved as https://;
+        any other http:// URL is refused rather than saved.
         """
+        try:
+            url = checked_server_url(url)
+        except ValueError as exc:
+            self._log(str(exc))
+            slicer.util.errorDisplay(str(exc))
+            return
         client = get_client()
         save_overrides(url, token, client.timeout)
         client.configure(server_url=url, token=token)

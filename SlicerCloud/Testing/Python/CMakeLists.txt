@@ -1,6 +1,7 @@
 #-----------------------------------------------------------------------------
 # test_deploy.py imports SlicerCloudLib.deploy only, which pulls in neither
-# slicer nor qt (it is subprocess plus the standard library). test_panel.py
+# slicer nor qt (it is subprocess plus the standard library, and the stdlib-only
+# ServerToolsCoreLib.tls it shares with the client). test_panel.py
 # does need them, but only as the stand-ins in ServerToolsCore's qt_stubs.py.
 # Both are therefore plain Python3 ctests rather than slicer_add_python_unittest
 # — no need to pay for a full Slicer interpreter launch. Same rationale as
