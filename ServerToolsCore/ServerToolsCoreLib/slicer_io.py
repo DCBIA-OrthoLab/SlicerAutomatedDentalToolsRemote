@@ -136,6 +136,25 @@ def zip_folder(folder: str, dest_path: str, compress: Optional[bool] = None) -> 
     return dest_path
 
 
+def list_files(folder: str) -> list:
+    """Every file under `folder`, as a path relative to it with `/`
+    separators, hidden files left out -- the NAMES a paired split is asked
+    about. Nothing is read."""
+    found = []
+    for directory, subdirs, files in os.walk(folder):
+        subdirs[:] = [d for d in subdirs if not d.startswith(".")]
+        for name in files:
+            if name.startswith("."):
+                continue
+            found.append(os.path.relpath(os.path.join(directory, name), folder).replace(os.sep, "/"))
+    return sorted(found)
+
+
+def entry_size(path: str) -> int:
+    """Bytes in a file or a folder, as a batch counts them."""
+    return _entry_size(path)
+
+
 def zip_subset(folder: str, entries, dest_path: str, compress: Optional[bool] = None) -> str:
     """Pack SOME of a folder's top-level entries, named as if the whole folder.
 

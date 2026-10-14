@@ -163,6 +163,11 @@ class _CohortView:
         self.remainder = remainder  # the "+ N more" line, or None
 
 
+# Marks a batch of a PAIRED cohort: `(PAIRED_BATCH, {argument: [entries]},
+# patient count)`, where an ordinary batch is `(argument, [entries])`.
+PAIRED_BATCH = "__paired__"
+
+
 def _batch_dirname(index) -> str:
     """What one batch of a cohort calls its folder.
 
@@ -1288,12 +1293,18 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         each batch is what keeps a tool matching landmarks or masks to scans by
         patient name working -- it can still find the patient it is looking at.
         """
-        axis, entries = batch if batch else (None, None)
+        if batch and batch[0] == PAIRED_BATCH:
+            # A paired batch: every paired argument is packed from ITS entries
+            # of the same patients (`_pairedBatches`).
+            per_argument = batch[1]
+        else:
+            axis, entries = batch if batch else (None, None)
+            per_argument = {axis: entries} if axis else {}
         files = {}
         for arg_name, mode in self._inputModes.items():
             path = self._prepareOneInputFile(
                 workspace, arg_name, mode,
-                entries=entries if arg_name == axis else None,
+                entries=per_argument.get(arg_name),
             )
             if path is not None:
                 files[arg_name] = path
@@ -1815,7 +1826,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """
         try:
             args = self.collectArgs()
-            batches = self._cohortBatches()
+            batches = self._cohortBatches(args)
         except Exception as exc:
             slicer.util.errorDisplay(str(exc))
             return
@@ -1843,13 +1854,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay(str(exc))
             return
 
-        sizes = [len(batch[1]) for batch in batches] if batches[0] else []
+        # Patients for a paired batch, entries for an ordinary one: what the
+        # cohort's "N of M" counts.
+        sizes = ([batch[2] if batch[0] == PAIRED_BATCH else len(batch[1]) for batch in batches]
+                 if batches[0] else [])
         cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
         if cohort:
             # Asked once per cohort, when it is queued: whether this
             # workstation's batches may run side by side is the server
             # operator's decision, and it can change between two cohorts.
-            self._batchPolicy = self.client.batch_policy()
+            client = getattr(self, "client", None)
+            self._batchPolicy = client.batch_policy() if client is not None else None
         chosen = (self._outputFolderWidget.currentPath
                   if self._outputFolderWidget else None)
         if cohort:
@@ -1886,9 +1901,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             ))
         self._pumpRuns()
 
-    def _cohortBatches(self) -> list:
+    def _cohortBatches(self, args=None) -> list:
         """How to divide this run's inputs: `[(axis, [entries]), ...]`, or
         `[None]` for a cohort that travels whole.
+
+        A tool whose inputs are PAIRED publishes `paired_batch` instead, and is
+        divided by `_pairedBatches` -- every batch the same patients in every
+        paired folder.
 
         The server decides IF and HOW MUCH (its `GET /tools` `batch` field, and
         see its conventions.py for why a tool pairing two folders is never
@@ -1901,6 +1920,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # getattr throughout: this runs before anything else reads the panel's
         # state, so it must hold for a panel whose form was never built -- a
         # server that was down at setup(), or a widget under test.
+        paired = self._pairedPlan(args)
+        if paired:
+            return self._pairedBatches(paired, args)
         plan = (getattr(self, "_schema", None) or {}).get("batch")
         axis = (plan or {}).get("axis")
         if not axis:
@@ -1941,6 +1963,135 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             plan.get("max_mb"), plan.get("max_files"),
         )
         return [(axis, entries) for entries in batches]
+
+    # ---- paired cohorts ------------------------------------------------
+    def _pairedPlan(self, args):
+        """`{axes, max_mb, max_files}` when this tool pairs its inputs, for the
+        mode chosen when it is a facade; else None."""
+        plan = (getattr(self, "_schema", None) or {}).get("paired_batch")
+        if not plan:
+            return None
+        if "modes" in plan:
+            mode = (args or {}).get(plan.get("by") or "mode")
+            return (plan.get("modes") or {}).get(mode)
+        return plan
+
+    def _pairedFolders(self, axes):
+        """`{axis: local folder}` when every paired axis is a folder on this
+        machine that this panel packs itself; else None (the cohort travels
+        whole, as it always did)."""
+        prepare = getattr(self, "prepareInputFiles", None)
+        if getattr(prepare, "__func__", None) is not ServerToolWidgetBase.prepareInputFiles:
+            return None
+        if not getattr(self, "_outputFolderWidget", None):
+            return None
+        widgets = getattr(self, "_inputWidgets", None) or {}
+        hidden = getattr(self, "_hiddenArgs", None) or ()
+        folders = {}
+        for axis in axes:
+            widget = widgets.get(axis)
+            if not widget or axis in hidden:
+                return None
+            for attribute in ("volume_name", "server_name"):
+                reader = getattr(widget, attribute, None)
+                if reader and reader():
+                    return None
+            folder = getattr(widget, "currentPath", "")
+            if not folder or not os.path.isdir(folder):
+                return None
+            folders[axis] = folder
+        return folders
+
+    def _pairedBatches(self, plan, args) -> list:
+        """Divide a paired cohort by PATIENT, as the tool itself pairs them.
+
+        The tool is asked (by name only -- nothing is uploaded) which files go
+        together; patients are then packed into batches by size, counting
+        every paired folder, and each batch packs each folder from its own
+        entries for those patients. Whatever the tool pairs with nobody is
+        reported here and left out, as a whole run would leave it out.
+
+        Never a batch of ONE patient when there are several: the server unpacks
+        an archive holding a single folder by stepping into it, which would
+        strip a patient's own folder name, and a few tools treat a lone patient
+        differently from the same patient among others.
+        """
+        axes = plan.get("axes") or []
+        folders = self._pairedFolders(axes)
+        if not folders:
+            return [None]
+        names = {axis: slicer_io.list_files(folder) for axis, folder in folders.items()}
+        mode_argument = {}
+        full = (getattr(self, "_schema", None) or {}).get("paired_batch") or {}
+        if "modes" in full:
+            key = full.get("by") or "mode"
+            mode_argument = {key: (args or {}).get(key)}
+        try:
+            answer = self.client.pairs(self.TOOL_NAME, names, mode_argument)
+        except ServerToolError as exc:
+            # Sending the cohort whole is what every client did before this
+            # existed, and it is never wrong -- only slower to upload.
+            logger.warning("'%s': the server could not pair the inputs (%s); sending the cohort whole.",
+                           self.TOOL_NAME, exc)
+            return [None]
+        groups = answer.get("groups") or []
+        unpaired = {axis: keys for axis, keys in (answer.get("unpaired") or {}).items() if keys}
+        if unpaired:
+            lines = [f"{len(keys)} in '{axis}' only: {', '.join(keys[:5])}{' ...' if len(keys) > 5 else ''}"
+                     for axis, keys in unpaired.items()]
+            slicer.util.warningDisplay(
+                _("Some patients have no partner in the other folder and will not be "
+                  "processed, as in a run of the whole cohort:\n\n") + "\n".join(lines),
+                windowTitle=self.TOOL_NAME)
+        if len(groups) < 2:
+            return [None]
+
+        max_bytes = int((plan.get("max_mb") or 0) * 1024 * 1024)
+        max_patients = int(plan.get("max_files") or 0)
+        sized = []
+        for group in groups:
+            entries = group.get("entries") or {}
+            size = sum(slicer_io.entry_size(os.path.join(folders[axis], entry))
+                       for axis, found in entries.items() for entry in found)
+            sized.append((group, size))
+        batches, current, current_bytes = [], [], 0
+        for group, size in sized:
+            full_now = current and (
+                (max_patients > 0 and len(current) >= max_patients)
+                or (max_bytes > 0 and current_bytes + size > max_bytes))
+            if full_now:
+                batches.append(current)
+                current, current_bytes = [], 0
+            current.append(group)
+            current_bytes += size
+        if current:
+            batches.append(current)
+        # No lone patient: fold a one-patient batch into its neighbour.
+        index = 0
+        while len(batches) > 1 and index < len(batches):
+            if len(batches[index]) == 1:
+                neighbour = index - 1 if index > 0 else index + 1
+                batches[neighbour] = (batches[neighbour] + batches[index]
+                                      if neighbour < index else batches[index] + batches[neighbour])
+                del batches[index]
+                index = 0
+                continue
+            index += 1
+        if len(batches) < 2:
+            return [None]
+
+        shared = answer.get("shared") or {}
+        result = []
+        for batch in batches:
+            per_axis = {axis: set(shared.get(axis) or []) for axis in axes}
+            for group in batch:
+                for axis, found in (group.get("entries") or {}).items():
+                    per_axis.setdefault(axis, set()).update(found)
+            result.append((PAIRED_BATCH, {axis: sorted(found) for axis, found in per_axis.items()},
+                           sum(len(group.get("keys") or [group.get("key")]) for group in batch)))
+        logger.info("'%s': %d paired patients sent as %d batches (<= %s MB, <= %s patients each)",
+                    self.TOOL_NAME, len(groups), len(result), plan.get("max_mb"), plan.get("max_files"))
+        return result
 
     def _runLabel(self, files: dict, index=None, total=None) -> str:
         """Name a run after what it was given, so several lines of progress read.

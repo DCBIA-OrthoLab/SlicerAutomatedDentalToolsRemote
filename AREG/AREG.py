@@ -97,6 +97,9 @@ class AREGWidget(ServerToolWidgetBase):
     """
 
     TOOL_NAME = "AREG"
+    # Merged across the batches of a divided cohort, as every engine writes
+    # its own; without this only the first batch's report survived the merge.
+    RUN_REPORT = "AREG_report.json"
     # No FILE_INPUTS: the schema types `t1`, `t2` and `t1_masks` as
     # ["folder", "zip_file"], so "auto" already gives each one a picker that
     # takes a folder and zips it before upload. `t1`/`t2` are also flagged

@@ -777,6 +777,34 @@ class ToolServerClient:
             logger.debug("Health check failed: %s", exc)
             return False
 
+    def pairs(self, tool_name: str, inputs: dict, arguments: Optional[dict] = None) -> dict:
+        """Ask the server which of these file NAMES go together, for splitting a
+        cohort whose inputs are paired (`paired_batch` in GET /tools).
+
+        `inputs` is `{argument: [relative file path, ...]}`. Names only: nothing
+        is uploaded. The answer is the tool's own pairing --
+        `{"groups": [{"key", "entries": {argument: [entry]}}], "shared":
+        {argument: [entry]}, "unpaired": {argument: [key]}}` -- so this client
+        never re-implements how a tool pairs its files.
+        """
+        try:
+            response = self._session.post(
+                f"{self._server_url}/tools/{tool_name}/pairs",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"inputs": inputs, "arguments": arguments or {}},
+                timeout=self._timeout, verify=self._verify_tls,
+            )
+        except requests.RequestException as exc:
+            raise ServerToolError(f"Could not ask the server how to pair the inputs: {exc}")
+        if not response.ok:
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = None
+            raise ServerToolError(detail or f"The server answered {response.status_code} "
+                                            f"when asked how to pair the inputs.")
+        return response.json()
+
     def batch_policy(self) -> Optional[dict]:
         """How the server will run this workstation's cohort batches, or None.
 
