@@ -59,7 +59,7 @@ class VFACERemote(ScriptedLoadableModule):
         ScriptedLoadableModule.__init__(self, parent)
         # "V FACE", with the space: that is the name in the module selector
         # today, and somebody looking for it types what they saw.
-        self.parent.title = _("V FACE")
+        self.parent.title = _("V FACE Remote")
         self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = [
