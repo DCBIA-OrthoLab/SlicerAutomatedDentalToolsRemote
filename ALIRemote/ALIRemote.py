@@ -61,7 +61,7 @@ class ALIRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("ALI Remote")
-        self.parent.categories = ["Automated Dental Tools"]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = [
             "Maxime Gillot (UoM)",

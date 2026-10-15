@@ -44,7 +44,7 @@ class GreedyRegRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("GreedyReg Remote")
-        self.parent.categories = ["Automated Dental Tools"]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = ["Lucia Cevidanes (UoM)", "Juan Carlos Prieto (UoNC)"]
         self.parent.helpText = _("""

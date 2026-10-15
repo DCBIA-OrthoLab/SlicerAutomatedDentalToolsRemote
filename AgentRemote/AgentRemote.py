@@ -98,7 +98,7 @@ class AgentRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("Agent Remote")
-        self.parent.categories = [translate("qSlicerAbstractCoreModule", "Automated Dental Tools")]
+        self.parent.categories = [translate("qSlicerAbstractCoreModule", "Automated Dental Tools Remote")]
         self.parent.dependencies = []
         self.parent.contributors = ["Alexandre Buisson (University of North Carolina)"]
         self.parent.helpText = _("""

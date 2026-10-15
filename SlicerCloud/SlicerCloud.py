@@ -201,7 +201,7 @@ class SlicerCloud(ScriptedLoadableModule):
         # the server, which is done once per machine rather than once per
         # cohort, and a clinician scanning the module list for a tool should
         # not have to step over it.
-        self.parent.categories = ["Automated Dental Tools.Advanced"]
+        self.parent.categories = ["Automated Dental Tools Remote.Advanced"]
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = ["Automated Dental Tools team"]
         self.parent.helpText = _("""

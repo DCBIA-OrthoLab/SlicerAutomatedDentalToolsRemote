@@ -12,7 +12,7 @@ class SurgMovPredRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("SurgMovPred Remote")
-        self.parent.categories = ["Automated Dental Tools"]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = ["Paul Dumont, University of North Carolina, Chapel Hill"]
         self.parent.helpText = _("""

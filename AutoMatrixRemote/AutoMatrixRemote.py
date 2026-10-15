@@ -45,7 +45,7 @@ class AutoMatrixRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("AutoMatrix Remote")
-        self.parent.categories = ["Automated Dental Tools"]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = [
             "Gaelle Leroux (UoM)",

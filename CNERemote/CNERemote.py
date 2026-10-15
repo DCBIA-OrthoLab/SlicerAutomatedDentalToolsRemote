@@ -141,7 +141,7 @@ class CNERemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("CNE Remote")
-        self.parent.categories = ["Automated Dental Tools" ]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = []  # TODO: add here list of module names that this module requires
         self.parent.contributors = ["Paul Dumont, University of North Carolina, Chapell Hill"]  
         self.parent.helpText = _("""

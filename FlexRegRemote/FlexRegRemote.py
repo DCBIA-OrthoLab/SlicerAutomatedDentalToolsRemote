@@ -54,7 +54,7 @@ class FlexRegRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("FlexReg Remote")
-        self.parent.categories = ["Automated Dental Tools"]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = []
         self.parent.contributors = ["Nathan Hutin (UoM)", "Luc Anchling (UoM)"]
         self.parent.helpText = _(

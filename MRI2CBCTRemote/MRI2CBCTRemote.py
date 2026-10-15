@@ -145,7 +145,7 @@ class MRI2CBCTRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("MRI2CBCT Remote")
-        self.parent.categories = ["Automated Dental Tools"]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         # No extension dependency: this module pip-installs the nnU-Net it needs
         # itself (see install_nnunet) and never calls the SlicerNNUNet extension.
         # Declaring it made the module fail to load wherever it was absent.

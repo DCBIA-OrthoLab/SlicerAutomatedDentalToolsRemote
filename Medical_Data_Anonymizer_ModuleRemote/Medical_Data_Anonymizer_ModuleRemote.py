@@ -38,7 +38,7 @@ class Medical_Data_Anonymizer_ModuleRemote(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = "Medical Data Anonymizer"
-        self.parent.categories = ["Automated Dental Tools"]
+        self.parent.categories = ["Automated Dental Tools Remote"]
         self.parent.dependencies = []
         self.parent.contributors = ["Jonas Bianchi,Alexandre BUisson, Paul Dumont"]
         self.parent.helpText = """This module anonymizes text files using Presidio."""
