@@ -11,7 +11,7 @@ class ServerToolsCore(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("Server Tools Core")
-        self.parent.categories = ["Automated Dental Tools.Advanced"]
+        self.parent.categories = ["Automated Dental Tools Remote.Advanced"]
         self.parent.dependencies = []
         self.parent.contributors = ["Automated Dental Tools team"]
         self.parent.hidden = True

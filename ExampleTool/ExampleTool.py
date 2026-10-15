@@ -12,7 +12,7 @@ class ExampleTool(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("Example Tool")
-        self.parent.categories = ["Automated Dental Tools.Advanced"]
+        self.parent.categories = ["Automated Dental Tools Remote.Advanced"]
         self.parent.dependencies = ["ServerToolsCore"]
         self.parent.contributors = ["Jules Grivot Pelisson, University of North Carolina, Chapel Hill"]
         self.parent.helpText = _("""
