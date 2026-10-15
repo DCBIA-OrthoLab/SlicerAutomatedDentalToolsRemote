@@ -19,7 +19,7 @@ Python and never touch `slicer` - the stub only gets the import statement past
 a Slicer that isn't running, so the test is not measuring the stub.
 
 Usage:
-    python3 -m unittest ASO/Testing/Python/test_aso_client.py
+    python3 -m unittest ASORemote/Testing/Python/test_aso_client.py
 """
 
 import copy
@@ -100,7 +100,7 @@ def _load_aso_module():
     """
     import importlib.util
 
-    path = os.path.join(_REPO_ROOT, "ASO", "ASO.py")
+    path = os.path.join(_REPO_ROOT, "ASORemote", "ASORemote.py")
     spec = importlib.util.spec_from_file_location("aso_module", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -309,7 +309,7 @@ class DeclarationTest(unittest.TestCase):
         """Every override below would only repeat what the server already says,
         and an override written against a remembered schema is the one thing
         that can drift out of sync with it."""
-        self.assertEqual(ASOWidget.TOOL_NAME, "ASO")
+        self.assertEqual(ASORemoteWidget.TOOL_NAME, "ASO")
         self.assertEqual(ASORemoteWidget.FILE_INPUTS, ServerToolWidgetBase.FILE_INPUTS)
         self.assertIsNone(ASORemoteWidget.RESULT_KIND)
         self.assertTrue(ASORemoteWidget.AUTO_UI)

@@ -2512,10 +2512,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         is already under way.
         """
         # `moduleName` when Slicer set it, and the class name otherwise --
-        # `ASOWidget` is the `ASO` module. NOT `TOOL_NAME`: that is the
-        # SERVER's name for the tool, and the two differ wherever a module
-        # was named before the tool was (`BATCHDENTALSEG` against
-        # `Batch_Dental_Seg`).
+        # `ASORemoteWidget` is the `ASORemote` module. NOT `TOOL_NAME`: that is
+        # the SERVER's name for the tool, and the two now differ everywhere,
+        # since every module carries the `Remote` suffix that keeps it from
+        # colliding with AutomatedDentalTools while the tool it calls is still
+        # plain `ASO`.
         name = getattr(self, "moduleName", "") or type(self).__name__
         if name.endswith("Widget"):
             name = name[: -len("Widget")]

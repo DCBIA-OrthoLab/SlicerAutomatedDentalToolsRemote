@@ -13,7 +13,7 @@ ScriptedLoadableModule and ServerToolWidgetBase, which need a real Slicer. Its
 declarations are read out of the source with `ast` instead.
 
 Usage:
-    python3 -m unittest DOCShapeAXI/Testing/Python/test_docshapeaxi_client.py
+    python3 -m unittest DOCShapeAXIRemote/Testing/Python/test_docshapeaxi_client.py
 """
 
 import ast
@@ -215,7 +215,7 @@ def _argument(name: str) -> dict:
 
 
 def _module_source() -> str:
-    with open(os.path.join(_REPO_ROOT, "DOCShapeAXI", "DOCShapeAXI.py"), encoding="utf-8") as handle:
+    with open(os.path.join(_REPO_ROOT, "DOCShapeAXIRemote", "DOCShapeAXIRemote.py"), encoding="utf-8") as handle:
         return handle.read()
 
 

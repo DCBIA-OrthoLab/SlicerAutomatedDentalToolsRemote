@@ -20,7 +20,7 @@ Python and never touch `slicer` — the stub only gets the import statement past
 a Slicer that isn't running, so the test is not measuring the stub.
 
 Usage:
-    python3 -m unittest AREG/Testing/Python/test_areg_client.py
+    python3 -m unittest AREGRemote/Testing/Python/test_areg_client.py
 """
 
 import os
@@ -96,7 +96,7 @@ def _load_areg_module():
     """
     import importlib.util
 
-    path = os.path.join(_REPO_ROOT, "AREG", "AREG.py")
+    path = os.path.join(_REPO_ROOT, "AREGRemote", "AREGRemote.py")
     spec = importlib.util.spec_from_file_location("areg_module", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -107,7 +107,7 @@ AREGRemoteWidget = _load_areg_module().AREGRemoteWidget
 
 
 def _module_source() -> str:
-    with open(os.path.join(_REPO_ROOT, "AREG", "AREG.py"), encoding="utf-8") as handle:
+    with open(os.path.join(_REPO_ROOT, "AREGRemote", "AREGRemote.py"), encoding="utf-8") as handle:
         return handle.read()
 
 
@@ -484,7 +484,7 @@ class DeclarationTest(unittest.TestCase):
         """Every override below would only repeat the schema, and an override
         written against a remembered schema is the one thing that can drift out
         of sync with it."""
-        self.assertEqual(AREGWidget.TOOL_NAME, "AREG")
+        self.assertEqual(AREGRemoteWidget.TOOL_NAME, "AREG")
         self.assertEqual(AREGRemoteWidget.FILE_INPUTS, ServerToolWidgetBase.FILE_INPUTS)
         self.assertIsNone(AREGRemoteWidget.RESULT_KIND)
         self.assertTrue(AREGRemoteWidget.AUTO_UI)

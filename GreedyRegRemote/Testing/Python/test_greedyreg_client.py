@@ -14,7 +14,7 @@ test would be measuring the stub. Its declarations are read out of the source
 with `ast` instead - which is drift-proof in a way restating them here is not.
 
 Usage:
-    python3 -m unittest GreedyReg/Testing/Python/test_greedyreg_client.py
+    python3 -m unittest GreedyRegRemote/Testing/Python/test_greedyreg_client.py
 """
 
 import ast
@@ -302,7 +302,7 @@ def _argument(name: str) -> dict:
 
 
 def _module_source() -> str:
-    with open(os.path.join(_REPO_ROOT, "GreedyReg", "GreedyReg.py"), encoding="utf-8") as handle:
+    with open(os.path.join(_REPO_ROOT, "GreedyRegRemote", "GreedyRegRemote.py"), encoding="utf-8") as handle:
         return handle.read()
 
 

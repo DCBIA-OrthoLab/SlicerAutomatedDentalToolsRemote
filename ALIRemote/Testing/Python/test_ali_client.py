@@ -15,7 +15,7 @@ The module's declarations are asserted instead, against the same functions it
 delegates to.
 
 Usage:
-    python3 -m unittest ALI/Testing/Python/test_ali_client.py
+    python3 -m unittest ALIRemote/Testing/Python/test_ali_client.py
 """
 
 import json

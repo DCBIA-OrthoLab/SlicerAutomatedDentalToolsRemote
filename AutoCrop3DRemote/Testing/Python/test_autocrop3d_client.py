@@ -14,7 +14,7 @@ _REPO = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 _CORE = os.path.join(_REPO, "ServerToolsCore")
 sys.path.insert(0, os.path.join(_CORE, "Testing", "Python"))
 sys.path.insert(0, _CORE)
-sys.path.insert(0, os.path.join(_REPO, "AutoCrop3D"))
+sys.path.insert(0, os.path.join(_REPO, "AutoCrop3DRemote"))
 
 import test_hosted_test_files as fixtures  # noqa: F401,E402 - installs the stubs
 from test_hosted_test_files import _util  # noqa: E402
@@ -23,7 +23,7 @@ from ServerToolsCoreLib import formgen, slicer_io  # noqa: E402
 
 import AutoCrop3D  # noqa: E402
 
-Widget = AutoCrop3D.AutoCrop3DRemoteWidget
+Widget = AutoCrop3DRemote.AutoCrop3DRemoteWidget
 
 
 class DeclarationsTest(unittest.TestCase):
