@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-set(MODULE_NAME MRI2CBCT_CLI_utils)
+set(MODULE_NAME MRI2CBCT_CLIRemote_utils)
 
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS

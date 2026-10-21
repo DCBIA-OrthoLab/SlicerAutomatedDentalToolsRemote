@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <executable>
-  <title>Agent_CLI</title>
+  <title>Agent_CLI Remote</title>
   <category>Automated Dental Tools.Advanced</category>
   <description><![CDATA[Agent CLI Router]]></description>
   <version>0.1.0</version>

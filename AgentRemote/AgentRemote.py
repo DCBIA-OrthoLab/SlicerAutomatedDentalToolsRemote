@@ -598,7 +598,7 @@ class AgentRemoteWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "temp_folder":slicer.util.tempDirectory(),
             "history": json.dumps(historySnapshot)
         }
-        CLI = slicer.modules.agent_cli
+        CLI = slicer.modules.agent_cliremote
             
         self.cliNode = slicer.cli.run(CLI, None, cliParams)
 
@@ -827,7 +827,7 @@ class AgentRemoteWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         import sys
         import json
 
-        agent_cli_dir = os.path.dirname(slicer.modules.agent_cli.path)
+        agent_cli_dir = os.path.dirname(slicer.modules.agent_cliremote.path)
         if agent_cli_dir not in sys.path:
             sys.path.insert(0, agent_cli_dir)
 
@@ -1074,7 +1074,7 @@ class AgentRemoteLogic(ScriptedLoadableModuleLogic):
             "folders": folders,
             "prompt": prompt
         }
-        CLI = slicer.modules.agent_cli
+        CLI = slicer.modules.agent_cliremote
         self.cliNode = slicer.cli.run(CLI, None, cliParams, wait=False)
         output_text = self.cliNode.GetOutputText()
         stopTime = time.time()

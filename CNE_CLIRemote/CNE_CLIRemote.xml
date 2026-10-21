@@ -2,7 +2,7 @@
 <executable>
   <category>Automated Dental Tools.Advanced</category>
   <index>0</index>
-  <title>CNE_CLI</title>
+  <title>CNE_CLI Remote</title>
   <description><![CDATA[Apply a Gaussian blur to an image]]></description>
   <version>0.1.0.</version>
   <documentation-url>https://github.com/username/project</documentation-url>
