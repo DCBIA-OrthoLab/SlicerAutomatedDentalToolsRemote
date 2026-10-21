@@ -577,7 +577,7 @@ class CNERemoteLogic(ScriptedLoadableModuleLogic):
 
         os.makedirs(notesFolder_output, exist_ok=True)
 
-        CLI_module = slicer.modules.cne_cli
+        CLI_module = slicer.modules.cne_cliremote
         parameters = {
             "notesFolder_input": notesFolder_input,
             "notesType": notesType,
