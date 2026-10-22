@@ -198,7 +198,7 @@ def _icon_url(svg: str) -> str:
         if not os.path.isdir(folder):
             os.makedirs(folder)
         written = os.path.join(folder, "sadt_%s.svg" % digest)
-        with open(written, "w") as handle:
+        with open(written, "w", encoding="utf-8") as handle:
             handle.write(svg)
         path = written.replace("\\", "/")
     except Exception:  # noqa: BLE001 - see above; the rule is simply left out
