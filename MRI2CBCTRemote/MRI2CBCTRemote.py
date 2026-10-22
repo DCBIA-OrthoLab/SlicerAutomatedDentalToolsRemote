@@ -1216,7 +1216,8 @@ QSlider::handle:horizontal:hover {
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with urllib.request.urlopen(url) as response, open(dest_path, "wb") as out_file:
+        # Called only with the fixed https release URLs below.
+        with urllib.request.urlopen(url) as response, open(dest_path, "wb") as out_file:  # nosec B310
             progress = qt.QProgressDialog(
                 f"{label}: {dest_path.name}", "Cancel", 0, 100, self.parent)
             progress.setCancelButton(None)
@@ -1457,8 +1458,8 @@ QSlider::handle:horizontal:hover {
 
             temp_path = os.path.join(directory, "temp.zip")
 
-            # Download the zip file from the url
-            with urllib.request.urlopen(url) as response, open(
+            # Download the zip file from the url, a fixed https test-file URL.
+            with urllib.request.urlopen(url) as response, open(  # nosec B310
                 temp_path, "wb"
             ) as out_file:
                 # Pop up a progress bar with a QProgressDialog

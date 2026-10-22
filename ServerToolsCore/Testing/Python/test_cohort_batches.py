@@ -15,6 +15,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import types
 import zipfile
 
 _HERE = os.path.abspath(os.path.dirname(__file__))
@@ -207,8 +208,8 @@ class ZipSubsetTest(unittest.TestCase):
 
         self.assertEqual(
             self._members(out),
-            ["a.nii.gz", os.path.join("patient1", "000.dcm"),
-             os.path.join("patient1", "001.dcm")],
+            # Forward slashes on every system: that is how a zip names members.
+            ["a.nii.gz", "patient1/000.dcm", "patient1/001.dcm"],
         )
 
     def test_nothing_outside_the_batch_is_packed(self):
@@ -297,6 +298,9 @@ class ApplyQueuesOneRunPerBatchTest(unittest.TestCase):
         panel._outputFolderWidget = _Widget(self.output)
         panel.collectArgs = lambda: {"suffix": "_seg"}
         panel._pumpRuns = lambda: None
+        # A server that predates the batch policy endpoint: the panel keeps
+        # its own concurrency.
+        panel.client = types.SimpleNamespace(batch_policy=lambda: None)
         self.panel = panel
         # The workspaces outlive onApplyButton -- a run holds one until it ends.
         self.addCleanup(self._cleanWorkspaces)

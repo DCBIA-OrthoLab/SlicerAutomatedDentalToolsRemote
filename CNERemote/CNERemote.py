@@ -535,7 +535,8 @@ class CNERemoteLogic(ScriptedLoadableModuleLogic):
             # --- Start the download ---
             import urllib.request
             try:
-                urllib.request.urlretrieve(modelUrl, destPath, reporthook=download_progress)
+                # Always an https Hugging Face URL built above.
+                urllib.request.urlretrieve(modelUrl, destPath, reporthook=download_progress)  # nosec B310
                 progressDialog.setValue(100)
                 slicer.util.showStatusMessage(f"AI model download completed!", 3000)
                 

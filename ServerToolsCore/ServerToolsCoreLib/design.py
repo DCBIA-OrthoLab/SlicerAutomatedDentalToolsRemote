@@ -189,7 +189,7 @@ def _icon_url(svg: str) -> str:
     Forward slashes whatever the platform: a stylesheet `url()` is a URL, and
     a Windows path pasted into one resolves to nothing.
     """
-    digest = hashlib.md5(svg.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(svg.encode("utf-8")).hexdigest()[:12]
     if digest in _ICON_FILES:
         return _ICON_FILES[digest]
     path = ""

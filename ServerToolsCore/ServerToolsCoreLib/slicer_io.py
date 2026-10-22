@@ -97,7 +97,8 @@ _COMPRESS_LEVEL = 1
 
 # Hosts whose link is faster than the compressor, so deflating on the way out
 # costs more than it saves (see config.ZIP_COMPRESS for the measurements).
-_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+# 0.0.0.0 is compared against, never bound.
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")  # nosec B104
 
 
 def _link_is_fast(server_url: str) -> bool:

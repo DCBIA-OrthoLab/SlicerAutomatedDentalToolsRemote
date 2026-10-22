@@ -122,8 +122,8 @@ class PreviewWiringTest(unittest.TestCase):
     """The module reads the pads the way the preview expects them."""
 
     def setUp(self):
-        sys.path.insert(0, os.path.join(ROOT, "FlexReg"))
-        from FlexReg import CORNERS, TEETH
+        sys.path.insert(0, os.path.join(ROOT, "FlexRegRemote"))
+        from FlexRegRemote import CORNERS, TEETH
 
         self.CORNERS = CORNERS
         self.TEETH = TEETH

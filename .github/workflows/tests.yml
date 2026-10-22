@@ -1,0 +1,54 @@
+name: tests
+
+# The client suites stub Slicer, Qt and the server, so they need nothing but
+# Python and requests, and finish in well under a minute.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The suites read the checkout and nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      # Windows and macOS clinicians run the same client: a failure on one
+      # system says nothing about the others, and all three are worth seeing.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Python Slicer Stable and Preview both ship.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install requests
+        run: python -m pip install requests
+
+      # Every module's Testing/Python folder is its own suite, found from the
+      # checkout so a new module is tested without editing this file. Each
+      # runs from its own folder because that is where its imports start.
+      - name: Run every module's suite
+        shell: bash
+        run: |
+          status=0
+          for dir in $(git ls-files '*/Testing/Python/test_*.py' | xargs -n1 dirname | sort -u); do
+            echo "::group::$dir"
+            (cd "$dir" && python -m unittest discover -p 'test_*.py') || status=1
+            echo "::endgroup::"
+          done
+          exit $status

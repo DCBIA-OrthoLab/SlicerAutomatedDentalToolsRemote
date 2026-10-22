@@ -21,7 +21,7 @@ from test_hosted_test_files import _util  # noqa: E402
 
 from ServerToolsCoreLib import formgen, slicer_io  # noqa: E402
 
-import AutoCrop3D  # noqa: E402
+import AutoCrop3DRemote  # noqa: E402
 
 Widget = AutoCrop3DRemote.AutoCrop3DRemoteWidget
 

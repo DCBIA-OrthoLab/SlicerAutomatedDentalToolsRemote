@@ -1952,7 +1952,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         name = self.TOOL_NAME
         for path in files.values():
             if isinstance(path, str) and path:
-                basename = os.path.basename(path.rstrip(os.sep))
+                # Both separators: Qt hands a Windows path over with forward slashes.
+                basename = os.path.basename(path.rstrip("/\\"))
                 if basename:
                     name = basename
                     break
