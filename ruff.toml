@@ -1,0 +1,15 @@
+# What the lint job in .github/workflows/tests.yml enforces. Only rules that
+# point at a bug, not at style: the code predates any linter, and a style pass
+# over it belongs in its own pull request, not in every unrelated one.
+target-version = "py312"
+
+[lint]
+select = [
+    "E9",    # syntax errors
+    "F63",   # comparisons that are always true or false
+    "F7",    # statements in the wrong place (return outside a function, ...)
+    "F82",   # undefined names
+    "PLE",   # pylint errors: logging and format strings that cannot work
+    "B006",  # a mutable default argument, shared between calls
+    "B023",  # a closure that captures a loop variable
+]

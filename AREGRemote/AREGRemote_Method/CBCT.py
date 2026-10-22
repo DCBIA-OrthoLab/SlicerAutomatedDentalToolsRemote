@@ -151,7 +151,7 @@ class Semi_CBCT(Method):
         scan_folder_t1: str,
         scan_folder_t2: str,
         mask_folder_t1: str = None,
-        liste_keys=["scanT1", "scanT2", "segT1"],
+        liste_keys=("scanT1", "scanT2", "segT1"),
     ):
         out = ""
         scan_extension = [".nrrd", ".nrrd.gz", ".nii", ".nii.gz", ".gipl", ".gipl.gz"]
