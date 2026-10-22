@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.error
 import urllib.request
 
@@ -73,12 +74,14 @@ def _unpack(package, dest):
             archive.extractall(dest, filter="data")
         return glob.glob(os.path.join(dest, "Slicer-*", "Slicer"))[0]
     if _OS == "win":
-        target = os.path.join(dest, "Slicer")
+        # Backslashes only: NSIS takes a /D with a forward slash in it for no
+        # path at all and installs under Program Files instead.
+        target = os.path.abspath(os.path.join(dest, "Slicer"))
         installer = package + ".exe"
         os.replace(package, installer)
         # NSIS: /S is silent, and /D must come last, unquoted.
         subprocess.run([installer, "/S", "/D=" + target], check=True)
-        return os.path.join(target, "Slicer.exe")
+        return _wait_for(os.path.join(target, "Slicer.exe"))
     mount = os.path.join(dest, "mount")
     subprocess.run(["hdiutil", "attach", package, "-nobrowse", "-quiet", "-mountpoint", mount],
                    check=True)
@@ -88,6 +91,16 @@ def _unpack(package, dest):
     finally:
         subprocess.run(["hdiutil", "detach", mount, "-quiet"], check=False)
     return os.path.join(dest, "Slicer.app", "Contents", "MacOS", "Slicer")
+
+
+def _wait_for(executable, timeout=600):
+    """An NSIS installer can hand over to a copy of itself and return early."""
+    deadline = time.monotonic() + timeout
+    while not os.path.isfile(executable):
+        if time.monotonic() > deadline:
+            raise SystemExit(f"{executable} never appeared")
+        time.sleep(5)
+    return executable
 
 
 def main():

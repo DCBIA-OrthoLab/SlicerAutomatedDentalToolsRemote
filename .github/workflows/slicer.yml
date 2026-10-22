@@ -47,7 +47,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq --no-install-recommends xvfb \
-            libglu1-mesa libopengl0 libegl1 libnss3 libpulse0 libxkbcommon-x11-0 \
+            libglu1-mesa libopengl0 libegl1 libnss3 libpulse0 libpulse-mainloop-glib0 libxkbcommon-x11-0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-xinerama0 libxcb-xkb1 libxcb-shape0 libxcb-cursor0 \
             libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxi6 libsm6 libice6
@@ -61,6 +61,21 @@ jobs:
           exe=$(python ServerToolsCore/Testing/Slicer/install_slicer.py \
             --stability "$STABILITY" --dest "$RUNNER_TEMP/slicer")
           echo "exe=$exe" >> "$GITHUB_OUTPUT"
+
+      # Every shared library Slicer cannot resolve, all at once, rather than
+      # the first one the loader stops on. Slicer's own binaries and the xcb
+      # platform plugin only: the wheels under lib/Python bring theirs.
+      - name: Linux libraries Slicer cannot find
+        if: runner.os == 'Linux'
+        env:
+          SLICER: ${{ steps.slicer.outputs.exe }}
+        run: |
+          cd "$(dirname "$SLICER")"
+          missing=$(./Slicer --launch /bin/bash -c \
+            'find bin lib -maxdepth 2 -type f \( -name "*.so*" -o -name SlicerApp-real \) -exec ldd {} + 2>/dev/null;
+             find . -path "*platforms/libqxcb*.so" -exec ldd {} + 2>/dev/null' \
+            | grep "not found" | sort -u || true)
+          if [ -n "$missing" ]; then echo "$missing"; exit 1; fi
 
       - name: Smoke test
         shell: bash

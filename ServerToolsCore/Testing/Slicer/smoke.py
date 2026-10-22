@@ -135,10 +135,21 @@ def _settle(timeout=60):
     print(f"[warning] threads still running at exit: {[t.name for t in others]}")
 
 
+# What Slicer's launcher sets for its own libraries. The TLS fixture shells
+# out to the system's openssl, which these point at Slicer's copies instead:
+# on macOS that openssl then fails outright.
+_LAUNCHER_ONLY = ("DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "LD_LIBRARY_PATH",
+                  "OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_ENGINES")
+
+
 def _run_unit_suites(failures):
     sys.path.insert(0, _UNIT_TESTS)
-    suite = unittest.defaultTestLoader.loadTestsFromNames(_UNIT_SUITES)
-    result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)
+    saved = {name: os.environ.pop(name) for name in _LAUNCHER_ONLY if name in os.environ}
+    try:
+        suite = unittest.defaultTestLoader.loadTestsFromNames(_UNIT_SUITES)
+        result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)
+    finally:
+        os.environ.update(saved)
     if not result.wasSuccessful():
         failures.append(
             f"unit suites in Slicer's Python: {len(result.failures)} failures, "
