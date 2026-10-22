@@ -67,12 +67,17 @@ def _is_cli(folder, name):
 def _check_loaded(names, failures):
     import slicer
 
+    missing = False
     for name in names:
         if hasattr(slicer.modules, name.lower()):
             print(f"[loaded] {name}")
         else:
+            missing = True
             failures.append(f"{name}: not loaded by Slicer")
             print(f"[MISSING] {name}")
+    if missing:
+        factory = slicer.app.moduleManager().factoryManager()
+        print(f"[search paths] {factory.searchPaths}")
 
 
 def _check_panel(name, failures):
@@ -163,7 +168,9 @@ def main(argv):
     args = parser.parse_args(argv)
     modules = _declared_modules()
     if args.list_module_paths:
-        print("\n".join(modules.values()))
+        # Forward slashes: Slicer's Windows launcher drops a module path
+        # written with backslashes, and every module is then missing.
+        print("\n".join(path.replace("\\", "/") for path in modules.values()))
         return 0
 
     import slicer
