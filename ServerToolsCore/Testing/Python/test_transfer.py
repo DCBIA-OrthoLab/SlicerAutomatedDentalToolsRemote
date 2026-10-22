@@ -351,6 +351,27 @@ class DownloadTest(_LiveServerTest):
         with open(destination, "rb") as handle:
             self.assertEqual(handle.read(), payload)
 
+    def test_ranges_reassemble_where_the_os_has_no_positioned_write(self):
+        """Windows has no os.pwrite; the parallel download must not need it."""
+        payload = os.urandom(700_000)
+        url = self._result(payload)
+        destination = os.path.join(self.work, "out.zip")
+
+        real_pwrite = getattr(os, "pwrite", None)
+        if real_pwrite is not None:
+            del os.pwrite
+        try:
+            transfer.download_ranged(
+                self.session, url, destination, len(payload),
+                chunk_bytes=100_000, parallelism=4,
+            )
+        finally:
+            if real_pwrite is not None:
+                os.pwrite = real_pwrite
+
+        with open(destination, "rb") as handle:
+            self.assertEqual(handle.read(), payload)
+
     def test_ranges_really_do_travel_at_the_same_time(self):
         """Same barrier, on the way down: four ranges must be open at once."""
         payload = os.urandom(800_000)          # 8 ranges, exactly two groups of 4

@@ -402,7 +402,11 @@ def download_ranged(
     # return value so the existing signature is untouched.
     last_part_times.clear()
 
-    file_descriptor = os.open(destination, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+    # O_BINARY exists only on Windows, where its absence would let the C
+    # runtime turn every \n written into \r\n.
+    file_descriptor = os.open(
+        destination, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    )
     try:
         if not size:
             # Nothing to range over. The empty file has just been created,
@@ -521,11 +525,24 @@ def _fetch_span(session, url, headers, file_descriptor, start, end, size, meter,
             )
 
 
+# Windows has no os.pwrite: there, a seek and a write stand in for it, and the
+# lock keeps another worker's seek from landing between the two.
+_seek_and_write_lock = threading.Lock()
+
+
+def _pwrite(file_descriptor, data, offset) -> int:
+    if hasattr(os, "pwrite"):
+        return os.pwrite(file_descriptor, data, offset)
+    with _seek_and_write_lock:
+        os.lseek(file_descriptor, offset, os.SEEK_SET)
+        return os.write(file_descriptor, data)
+
+
 def _pwrite_all(file_descriptor, data, offset) -> int:
-    """os.pwrite may write short; the offset is ours to advance either way."""
+    """A positioned write may write short; the offset is ours to advance either way."""
     written = 0
     while written < len(data):
-        written += os.pwrite(file_descriptor, data[written:], offset + written)
+        written += _pwrite(file_descriptor, data[written:], offset + written)
     return written
 
 
