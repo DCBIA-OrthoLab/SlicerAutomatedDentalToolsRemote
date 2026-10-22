@@ -5,7 +5,6 @@ import os
 import glob
 import sys
 import csv
-import sys
 import logging
 
 # ===== Logging Configuration =====
@@ -47,7 +46,6 @@ def resample_fn(img, args):
     output_size = args['size'] 
     fit_spacing = args['fit_spacing']
     iso_spacing = args['iso_spacing']
-    pixel_dimension = args['pixel_dimension']
     center = args['center']
     rightSide = args['rightSide']
     isMRI = args['mri']

@@ -2,7 +2,6 @@ from .Point import Point
 from .Line import Line
 import numpy as np
 from typing import Union
-import math
 import logging
 import sys
 
@@ -146,7 +145,7 @@ The position of the point have to be give by a dictionnary like this
             loop = 2
         out = True
         for i in range(loop):
-            if not True in [l in landmark for l in List]:
+            if True not in [l in landmark for l in List]:
                 out = False
         return out
 
@@ -309,7 +308,7 @@ class Distance(Measure):
         try :
             direction1 = lst_measurement[0][0:3]
             direction2 = lst_measurement[1][0:3]
-        except :
+        except Exception:
             logger.error('AN ERROR OCCURED')
             logger.info(f"lst_measurement : {lst_measurement}")
             direction1 = "No_direction"
@@ -351,7 +350,7 @@ class Distance(Measure):
             try :
                 direction1 = lst_measurement[0][0]
                 direction2 = lst_measurement[1][0]
-            except :
+            except Exception:
                 logger.error('AN ERROR OCCURED AGAIN')
                 logger.error(f"lst_measurement : {lst_measurement}")
                 direction1 = "No_direction"
@@ -911,7 +910,7 @@ class Diff2Measure(Measure):
     def isUtilMeasure(self):
         out = True
         if self.lr == 0 and self.ap == 0 and self.si == 0:
-            out == False
+            out = False
 
         return out
 

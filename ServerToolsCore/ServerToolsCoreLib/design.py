@@ -833,7 +833,6 @@ def value_field(text: str):
     this row (see `FileOrFolderInput`), and a box a clinician can type a path
     into which is then ignored is worse than no box.
     """
-    t = tokens()
     field = qt.QLineEdit(text)
     field.setReadOnly(True)
     # Shown from the START: a path is longest on its left and a file name is

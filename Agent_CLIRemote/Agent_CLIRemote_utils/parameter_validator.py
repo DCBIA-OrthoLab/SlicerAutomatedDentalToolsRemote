@@ -349,31 +349,31 @@ class ValidationReport:
 
         # Missing required
         if validation_result["missing_required"]:
-            report.append(f"\nMissing Required Parameters:")
+            report.append("\nMissing Required Parameters:")
             for param in validation_result["missing_required"]:
                 report.append(f"   - {param}")
 
         # Errors
         if validation_result["errors"]:
-            report.append(f"\nErrors:")
+            report.append("\nErrors:")
             for error in validation_result["errors"]:
                 report.append(f"   - {error}")
 
         # Warnings
         if validation_result["warnings"]:
-            report.append(f"\nWarnings:")
+            report.append("\nWarnings:")
             for warning in validation_result["warnings"]:
                 report.append(f"   - {warning}")
 
         # Extra params
         if validation_result["extra_params"]:
-            report.append(f"\nExtra Parameters (not in spec):")
+            report.append("\nExtra Parameters (not in spec):")
             for param in validation_result["extra_params"]:
                 report.append(f"   - {param}")
 
         # Validated params
         if validation_result["params"]:
-            report.append(f"\nValidated Parameters:")
+            report.append("\nValidated Parameters:")
             for key, value in validation_result["params"].items():
                 if isinstance(value, list):
                     report.append(f"   {key}: {value} (list with {len(value)} items)")

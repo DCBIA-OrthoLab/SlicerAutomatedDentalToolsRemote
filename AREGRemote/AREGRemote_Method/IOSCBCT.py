@@ -1,11 +1,7 @@
 from AREGRemote_Method.Method import Method
 from AREGRemote_Method.Progress import DisplayAREGIOSCBCT, DisplayALICBCT,DisplayASOIOS,DisplayASOCBCT,DisplayCrownSeg,DisplayALIIOS
-import webbrowser
 import os
 import slicer
-import json
-import time
-import qt
 import csv
 import platform
 
@@ -63,8 +59,6 @@ class IOSCBCT(Method):
 
     def TestReference(self, ref_folder: str):
         out = None
-        scan_extension = [".nrrd", ".nrrd.gz", ".nii", ".nii.gz", ".gipl", ".gipl.gz"]
-        lm_extension = [".json"]
 
         if self.NumberScan(ref_folder) == 0:
             out = "The selected folder must contain scans"
@@ -134,7 +128,6 @@ class IOSCBCT(Method):
         return ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr"]
 
     def CheckboxisChecked(self, diccheckbox: dict, in_str=False):
-        out = ""
         listchecked = []
         if not len(diccheckbox) == 0:
             for checkboxs in diccheckbox.values():
@@ -720,7 +713,6 @@ class Auto_IOSCBCT(IOSCBCT):
 
         PreOrientProcess_IOS = slicer.modules.pre_aso_ios
         SegProcess_IOS = slicer.modules.crownsegmentationcli
-        OrientProcess_IOS = slicer.modules.semi_aso_ios
         
         
         list_process.append(

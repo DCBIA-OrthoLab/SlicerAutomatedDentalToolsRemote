@@ -40,10 +40,10 @@ class Point:
             good = False
             if isinstance(position, list):
                 if len(position) == 3:
-                    if not False in [
+                    if False not in [
                         isinstance(value, (int, float, np.ndarray))
                         for value in position
-                    ] and not True in np.isnan(position):
+                    ] and True not in np.isnan(position):
                         good = True
             if not good:
                 raise KeyError(self.name, self.time)

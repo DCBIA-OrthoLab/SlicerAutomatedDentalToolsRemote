@@ -168,7 +168,7 @@ class Medical_Data_Anonymizer_ModuleRemoteWidget(ScriptedLoadableModuleWidget):
             bgColor = palette.color(qt.QPalette.Window)
             luminance = (0.299 * bgColor.red() + 0.587 * bgColor.green() + 0.114 * bgColor.blue()) / 255.0
             return luminance < 0.5
-        except:
+        except Exception:
             return False
 
     def _getStyleSheet(self, isDarkMode):
@@ -417,12 +417,12 @@ class Medical_Data_Anonymizer_ModuleRemoteWidget(ScriptedLoadableModuleWidget):
                     self.statusLabel.setText(f"Loading {lang_name} model...")
                     slicer.app.processEvents()
                     spacy.load(model_name)
-                except:
+                except Exception:
                     self.statusLabel.setText(f"Installing {lang_name} model...")
                     slicer.app.processEvents()
                     try:
                         spacy.cli.download(model_name)
-                    except:
+                    except Exception:
                         logger.warning(f"Could not download {model_name}")
 
             self.statusLabel.setText("Dependencies installed successfully!")
@@ -560,7 +560,7 @@ class Medical_Data_Anonymizer_ModuleRemoteWidget(ScriptedLoadableModuleWidget):
                                         for table in tables:
                                             for row in table:
                                                 full_text += " ".join([str(cell) if cell else "" for cell in row]) + "\n"
-                        except:
+                        except Exception:
                             pass
                 
                 elif file_ext == ".csv":

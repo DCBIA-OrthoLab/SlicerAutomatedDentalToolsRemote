@@ -1,16 +1,12 @@
 import os
 import shutil
-from typing import Annotated
-import urllib.request
 import vtk
 import slicer
 import qt
 from slicer.i18n import tr as _
-from slicer.i18n import translate
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin
 from slicer.parameterNodeWrapper import parameterNodeWrapper
-from slicer import vtkMRMLScalarVolumeNode
 import importlib
 
 import sys
@@ -515,7 +511,7 @@ class CNERemoteLogic(ScriptedLoadableModuleLogic):
             
             # --- Create the popup (QProgressDialog) ---
             progressDialog = qt.QProgressDialog(dialogText, "Cancel", 0, 100)
-            progressDialog.setWindowTitle(f"CNE - Preparing AI Model")
+            progressDialog.setWindowTitle("CNE - Preparing AI Model")
             progressDialog.setWindowModality(qt.Qt.WindowModal) 
             progressDialog.setMinimumDuration(0)
             progressDialog.show()
@@ -538,7 +534,7 @@ class CNERemoteLogic(ScriptedLoadableModuleLogic):
                 # Always an https Hugging Face URL built above.
                 urllib.request.urlretrieve(modelUrl, destPath, reporthook=download_progress)  # nosec B310
                 progressDialog.setValue(100)
-                slicer.util.showStatusMessage(f"AI model download completed!", 3000)
+                slicer.util.showStatusMessage("AI model download completed!", 3000)
                 
             except Exception as e:
                 if os.path.exists(destPath):
@@ -594,7 +590,6 @@ class CNERemoteLogic(ScriptedLoadableModuleLogic):
 
     def onCliProgress(self, caller, event):
         """Callback triggered on CLI progress updates."""
-        progress = caller.GetProgress()
 
     def onCliModified(self, caller, event):
         """Callback triggered when CLI status changes (completed, cancelled, etc.)."""

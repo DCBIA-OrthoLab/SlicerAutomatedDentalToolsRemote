@@ -20,7 +20,6 @@ Usage - add to MRI2CBCT.py setup():
 
 import os
 import sys
-import math
 import glob
 import vtk
 import qt

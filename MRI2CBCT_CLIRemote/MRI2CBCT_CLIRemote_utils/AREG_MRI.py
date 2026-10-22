@@ -200,7 +200,7 @@ def process_images(mri_path, cbct_mask_path, output_folder, patient_id, mri_path
         cbct_mask_image = itk.imread(cbct_mask_path, itk.F)
     except Exception as e:
         logger.error("=" * 62)
-        logger.error(f"AN ERROR OCCURED, PLEASE MAKE SURE YOU FILES ARE NOT CORRUPTED AND OF A ACCEPTED FORMAT, EXAMPLE: nii.gz")
+        logger.error("AN ERROR OCCURED, PLEASE MAKE SURE YOU FILES ARE NOT CORRUPTED AND OF A ACCEPTED FORMAT, EXAMPLE: nii.gz")
         logger.error("=" * 62)
         logger.error(e)
         logger.error(f"{patient_id} failed")
@@ -212,7 +212,7 @@ def process_images(mri_path, cbct_mask_path, output_folder, patient_id, mri_path
         TransformObj_Fine = ElastixReg(cbct_mask_image, mri_image, initial_transform=None)
     except Exception as e:
         logger.error("=" * 62)
-        logger.error(f" REGISTRATION FAILED. PLEASE MAKE SURE THE IMAGES ARE OF SIMILAR SIZE, ORIENTATION, AND APPOXIMATED")
+        logger.error(" REGISTRATION FAILED. PLEASE MAKE SURE THE IMAGES ARE OF SIMILAR SIZE, ORIENTATION, AND APPOXIMATED")
         logger.error("=" * 62)
         logger.error(e)
         return
@@ -223,8 +223,8 @@ def process_images(mri_path, cbct_mask_path, output_folder, patient_id, mri_path
     
     os.makedirs(output_folder, exist_ok=True)
     
-    output_image_path = os.path.join(output_folder,os.path.basename(mri_path_original).replace('.nii.gz', f'_reg.nii.gz'))
-    output_image_path_transform = os.path.join(output_folder,os.path.basename(mri_path_original).replace('.nii.gz', f'_reg_transform.tfm'))
+    output_image_path = os.path.join(output_folder,os.path.basename(mri_path_original).replace('.nii.gz', '_reg.nii.gz'))
+    output_image_path_transform = os.path.join(output_folder,os.path.basename(mri_path_original).replace('.nii.gz', '_reg_transform.tfm'))
     
     sitk.WriteTransform(transform, output_image_path_transform)
 

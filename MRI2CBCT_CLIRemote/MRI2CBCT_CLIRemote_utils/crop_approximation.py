@@ -4,7 +4,6 @@ import argparse
 import numpy as np
 import nibabel as nib
 import SimpleITK as sitk
-import torch.nn.functional as F
 from sklearn.model_selection import ParameterSampler
 from torchreg import AffineRegistration
 
@@ -40,7 +39,7 @@ def save_as_nifti(moving_tensor, static_path, output_path):
     # Create a new Nifti1Image using the numpy data and the affine from the reference image
     try:
         new_nifti = nib.Nifti1Image(moving_tensor.cpu().numpy(), static_nifti.affine, static_nifti.header)
-    except:
+    except Exception:
         new_nifti = nib.Nifti1Image(moving_tensor, static_nifti.affine, static_nifti.header)
     
     # Save the new NIfTI image to disk

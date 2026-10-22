@@ -6,8 +6,6 @@ import os
 import sys
 from pathlib import Path
 from enum import Flag, auto
-import qt
-import sys
 
 # ===== Logging Configuration =====
 logger = logging.getLogger("VFACE_segmentation_logic")
@@ -213,7 +211,6 @@ class SegmentationLogic:
     def _runSegmentationForVolume(self, volumeNode):
         """Run the segmentation"""
         try:
-            from SlicerNNUNetLib import Parameter
             
             #Model Configuration
             parameter = self._getModelParameter()
@@ -267,7 +264,7 @@ class SegmentationLogic:
                         test_seg = self.logic.loadSegmentation()
                         if test_seg:
                             segmentation_finished = True
-                    except:
+                    except Exception:
                         segmentation_finished = False
                         
             except Exception as e:
@@ -531,7 +528,7 @@ class SegmentationLogic:
     def _exportMergedVTK(self, segmentationNode):
         """Export VTK"""
         try:
-            import os, re
+            import os
             from vtk.util.numpy_support import vtk_to_numpy
             
             self.log_info("MergedVTK: Start")
@@ -668,13 +665,13 @@ class SegmentationLogic:
     def _exportVTKPerLabel(self, segmentationNode):
         """Export VTK per label - one VTK file per segment"""
         try:
-            import os, re
+            import os
+            import re
             
             self.log_info("PerLabelVTK: Start")
             
             segmentationNode.CreateClosedSurfaceRepresentation()
             segmentation = segmentationNode.GetSegmentation()
-            segSafe = re.sub(r"[^0-9A-Za-z_-]+", "_", segmentationNode.GetName())
             
             tr = segmentationNode.GetParentTransformNode()
             parentMat = vtk.vtkMatrix4x4()
@@ -818,7 +815,7 @@ class SegmentationLogic:
     def isNNUNetModuleInstalled():
         """Check if nnunet is installed"""
         try:
-            import SlicerNNUNetLib
+            import SlicerNNUNetLib  # noqa: F401 - only checks that it imports
             return True
         except ImportError:
             return False

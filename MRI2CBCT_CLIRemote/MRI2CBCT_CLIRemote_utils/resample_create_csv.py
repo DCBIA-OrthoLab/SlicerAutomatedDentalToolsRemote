@@ -1,7 +1,6 @@
 import SimpleITK as sitk
 import os
 import pandas as pd
-import argparse
 import sys
 import logging
 

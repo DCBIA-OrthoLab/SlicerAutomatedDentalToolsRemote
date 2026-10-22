@@ -1,15 +1,26 @@
-# What the lint job in .github/workflows/tests.yml enforces. Only rules that
-# point at a bug, not at style: the code predates any linter, and a style pass
-# over it belongs in its own pull request, not in every unrelated one.
+# What the lint job in .github/workflows/tests.yml enforces: pyflakes and the
+# pycodestyle errors ruff checks by default, plus the rules below that point
+# at a bug. Style beyond that is left to whoever touches the code.
 target-version = "py312"
 
 [lint]
 select = [
-    "E9",    # syntax errors
-    "F63",   # comparisons that are always true or false
-    "F7",    # statements in the wrong place (return outside a function, ...)
-    "F82",   # undefined names
+    "E4", "E7", "E9",  # imports, statements and syntax errors
+    "F",     # pyflakes: unused or undefined names, bad comparisons
     "PLE",   # pylint errors: logging and format strings that cannot work
     "B006",  # a mutable default argument, shared between calls
     "B023",  # a closure that captures a loop variable
 ]
+ignore = [
+    # Slicer modules put a folder on sys.path before importing from it.
+    "E402",
+    # `from slicer.ScriptedLoadableModule import *` is how Slicer's own
+    # module template starts; the names it brings in are Slicer's to keep.
+    "F403", "F405",
+    # Pure layout: one-line `if x: y`, a lambda bound to a name, `l` and `I`.
+    "E701", "E731", "E741",
+]
+
+[lint.per-file-ignores]
+# A package's __init__ imports what it re-exports.
+"__init__.py" = ["F401"]
