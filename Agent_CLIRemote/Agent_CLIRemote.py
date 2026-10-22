@@ -5,8 +5,8 @@ import json
 import os
 import argparse
 import logging
-from Agent_CLIRemote_utils.utils import (load_manifest, build_tool_spec, extract_parameters, build_cli_args,
-                                   get_tool_def, complete_with_defaults, chat_with_auto_pull,
+from Agent_CLIRemote_utils.utils import (load_manifest, extract_parameters, build_cli_args,
+                                   complete_with_defaults, chat_with_auto_pull,
                                    cross_encoder_retrieve_candidates, get_router_model)
 from Agent_CLIRemote_utils.parameter_extraction_improved import ImprovedParameterExtractor
 from Agent_CLIRemote_utils.parameter_validator import ParameterValidator
@@ -69,7 +69,6 @@ def _run(input, module_dir):
     if not os.path.isfile(manifest_path):
         manifest_path = os.path.join(module_dir, "Resources", "manifest.yaml")
     manifest = load_manifest(manifest_path)
-    tools = build_tool_spec(manifest)
     improved_extractor = ImprovedParameterExtractor(manifest_path)
     parameter_validator = ParameterValidator(manifest_path)
 

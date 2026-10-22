@@ -2,9 +2,7 @@
 
 import argparse
 import os
-import re
 import shutil
-from pathlib import Path
 
 import sys
 import logging

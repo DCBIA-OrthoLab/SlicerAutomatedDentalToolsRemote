@@ -1,20 +1,16 @@
 from .Method import Method
-from .utils_CBCT import GetDictPatients, GetPatients
-import os, sys
+from .utils_CBCT import GetDictPatients
+import os
+import sys
 
 import glob
 import json
 import vtk
 import numpy as np
 
-from glob import iglob
 import slicer
-import time
-import qt
 import platform
-import re
 
-import sys
 import logging
 
 # ===== Logging Configuration =====
@@ -32,8 +28,6 @@ logger.addHandler(console_handler)
 class Approximation_MRI2CBCT(Method):
     def __init__(self, widget):
         super().__init__(widget)
-        documentsLocation = qt.QStandardPaths.DocumentsLocation
-        documents = qt.QStandardPaths.writableLocation(documentsLocation)
         self._lastOutputFolder = None
         self._keepResultInScene = False
 

@@ -223,7 +223,7 @@ class MyDict(MyList):
 
         out = False
         pre, suf = self.decomp(landmark)
-        if not None in (pre, suf):
+        if None not in (pre, suf):
             out = True
         return out
 
@@ -242,7 +242,7 @@ class MyDict(MyList):
     def existInDict(self, landmark: str):
         pre, suf = self.decomp(landmark)
         out = {landmark: False}
-        if not None in (pre, suf):
+        if None not in (pre, suf):
             out = {pre: True, suf: True}
 
         return out

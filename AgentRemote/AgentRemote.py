@@ -446,9 +446,9 @@ class AgentRemoteWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.ClearButton.toolTip = _("Click to clear your chat with the agent")
             self.ui.ClearButton.enabled = True
         else:
-            self.ui.ClearButton.toolTip = _(f"Start a chat with the LLM to be able to clear it")
+            self.ui.ClearButton.toolTip = _("Start a chat with the LLM to be able to clear it")
             self.ui.ClearButton.enabled = False
-            self.ui.SaveButton.toolTip = _(f"Start a chat with the LLM to be able to save it")
+            self.ui.SaveButton.toolTip = _("Start a chat with the LLM to be able to save it")
             self.ui.SaveButton.enabled = False
 
     def to_html(self, text):
@@ -614,7 +614,6 @@ class AgentRemoteWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onCliUpdated(self, caller, event):
         import time
         import json
-        import subprocess
         cliNode = caller
 
         status = cliNode.GetStatus()
@@ -692,7 +691,7 @@ class AgentRemoteWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                         self.add_agent_message(output_text)
                         
                 else:
-                    output_text = f"""After reflection, I wasn't able to choose a module to run. Try to explain your need in another way."""
+                    output_text = """After reflection, I wasn't able to choose a module to run. Try to explain your need in another way."""
                     self.add_agent_message(output_text)
             else:
                 self.add_agent_message(output_text)

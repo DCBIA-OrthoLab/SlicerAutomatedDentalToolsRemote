@@ -1,8 +1,11 @@
 #!/usr/bin/env python-real
-import sys, argparse, os, traceback, glob, json
-from pathlib import Path
-
 import sys
+import argparse
+import os
+import traceback
+import glob
+import json
+
 import logging
 
 # ===== Logging Configuration =====
@@ -142,7 +145,7 @@ def main(args):
     # STEP 3 : Loading the model in memory
     # ---------------------------------------------------------
     print("<filter-progress>0.20</filter-progress>", flush=True)
-    print(f"<filter-comment>Loading model...</filter-comment>", flush=True)
+    print("<filter-comment>Loading model...</filter-comment>", flush=True)
     
     try:
         logger.info(f"Initializing Llama engine with {modelPath}...")
@@ -237,7 +240,7 @@ def main(args):
                 failed_files.append(filename)
                 traceback.print_exc(file=sys.stderr)
                 continue
-        logger.info(f"Processing complete:")
+        logger.info("Processing complete:")
         logger.info(f"Successfully processed: {successfully_processed}/{total_files}")
         if failed_files:
             logger.info(f"Failed files: {', '.join(failed_files)}")
@@ -245,7 +248,7 @@ def main(args):
     except ImportError:
         logger.error("ERROR: 'llama-cpp-python' library is not installed in Slicer.")
         sys.exit(1)
-    except Exception as e:
+    except Exception:
         logger.error("ERROR OCCURRED DURING INFERENCE:")
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)

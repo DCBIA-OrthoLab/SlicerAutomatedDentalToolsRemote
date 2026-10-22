@@ -1,14 +1,9 @@
 from .Method import Method
-from .utils_CBCT import GetDictPatients, GetPatients
-import os, sys
+from .utils_CBCT import GetDictPatients
+import sys
 
-import SimpleITK as sitk
-import numpy as np
 
-from glob import iglob
 import slicer
-import time
-import qt
 import platform
 
 import logging
@@ -29,8 +24,6 @@ logger.addHandler(console_handler)
 class Process_MRI(Method):
     def __init__(self, widget):
         super().__init__(widget)
-        documentsLocation = qt.QStandardPaths.DocumentsLocation
-        documents = qt.QStandardPaths.writableLocation(documentsLocation)
 
     def getGPUUsage(self):
         if platform.system() == "Darwin":

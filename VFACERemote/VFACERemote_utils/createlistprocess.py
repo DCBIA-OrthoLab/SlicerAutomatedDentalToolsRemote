@@ -8,7 +8,7 @@ if current_dir not in sys.path:
 from .Progress import DisplayASOCBCT,DisplayAMASSS,DisplayAREGCBCT,DisplayALICBCT
 from glob import iglob
 import slicer
-from .functionaq3dc import AQ3DCLogic, AQ3DCWidget
+from .functionaq3dc import AQ3DCLogic
 import qt
 import re
 import shutil
@@ -1248,7 +1248,7 @@ def run_bds(input_path, output_path, model_name="DentalSegmentator", device="cud
     try:
         from VFACERemote_utils.segmentation_logic import run_dental_segmentation, ExportFormat
         
-        logger.info(f"[BDS] Starting dental segmentation...")
+        logger.info("[BDS] Starting dental segmentation...")
         logger.info(f"[BDS] Input folder: {input_path}")
         logger.info(f"[BDS] Output folder: {output_path}")
         logger.info(f"[BDS] Model: {model_name}")
@@ -1265,16 +1265,16 @@ def run_bds(input_path, output_path, model_name="DentalSegmentator", device="cud
         )
         
         if success:
-            logger.info(f"[BDS] Dental segmentation completed successfully")
+            logger.info("[BDS] Dental segmentation completed successfully")
             logger.info(f"[BDS] Results saved to: {output_path}")
         else:
-            logger.error(f"[BDS] Dental segmentation failed")
+            logger.error("[BDS] Dental segmentation failed")
             
         return success
         
     except ImportError as e:
         logger.error(f"[BDS] Failed to import segmentation logic: {str(e)}")
-        logger.error(f"[BDS] Make sure segmentation_logic.py is in the parent directory")
+        logger.error("[BDS] Make sure segmentation_logic.py is in the parent directory")
         return False
     except Exception as e:
         logger.error(f"[BDS] Error in dental segmentation: {str(e)}")
@@ -1314,21 +1314,12 @@ def reorganizeStat(patient_compute):
 
             dic_stats["Landmarks"].append(patient_compute["Landmarks"][i])
 
-            T1=False
-            T2=False
-            if "T1" in patient_compute["Type of measurement"][i]:
-                T1=True
-            if "T2" in patient_compute["Type of measurement"][i]:
-                T2=True
-
-
-            type = "skeletal"
             tooth = None
             for t in TOOTHS :
                 if t in patient_compute["Landmarks"][i] :
                     tooth = t
 
-            if tooth != None:
+            if tooth is not None:
                 #Arch : upper=0, lower=1
                 if "U" in tooth :
                     dic_stats["Arch"].append(0)
@@ -1556,7 +1547,7 @@ def SplitMeasurements(measurements_folder,mode2):
     if missing_files:
         logger.warning(f"Missing Excel Files: {', '.join(missing_files)}")
     
-    logger.info(f"All measurements files have been successfully identify")
+    logger.info("All measurements files have been successfully identify")
     return cb_path, mand_path, max_path,features_path
 
 def SplitOriented(t1_folder):
@@ -2279,8 +2270,6 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
     fully free. Only a separate process guarantees memory release via the OS.
     """
     import subprocess
-    import json
-    import tempfile
     
     input_dir1 = Path(t1_dir)
     input_dir2 = Path(t2_dir)
@@ -2325,7 +2314,7 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
                 pattern_exact = r'\b' + re.escape(list_patient_clean) + r'\b'
                 if re.search(pattern_exact, patient_id_clean, re.IGNORECASE):
                     return True
-            except:
+            except Exception:
                 pass
             if list_patient_clean.isdigit():
                 if patient_id_clean.lower() == f"pat{list_patient_clean}":
@@ -2397,7 +2386,6 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
     
     if 'slicer' in globals() or 'slicer' in dir():
         try:
-            slicer_home = os.path.dirname(slicer.app.slicerHome)
             candidates = [
                 os.path.join(slicer.app.slicerHome, "bin", "PythonSlicer"),
                 os.path.join(slicer.app.slicerHome, "bin", "python-real"),
@@ -2453,7 +2441,7 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
                 "--signed" if signed else "--unsigned",
             ]
             
-            logger.info(f"Launching subprocess...")
+            logger.info("Launching subprocess...")
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -2514,7 +2502,7 @@ def search(path, *args):
     """
     arguments = []
     for arg in args:
-        if type(arg) == list:
+        if type(arg) is list:
             arguments.extend(arg)
         else:
             arguments.append(arg)

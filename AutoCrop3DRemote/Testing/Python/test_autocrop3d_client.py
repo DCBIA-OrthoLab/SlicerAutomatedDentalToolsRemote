@@ -17,7 +17,6 @@ sys.path.insert(0, _CORE)
 sys.path.insert(0, os.path.join(_REPO, "AutoCrop3DRemote"))
 
 import test_hosted_test_files as fixtures  # noqa: F401,E402 - installs the stubs
-from test_hosted_test_files import _util  # noqa: E402
 
 from ServerToolsCoreLib import formgen, slicer_io  # noqa: E402
 

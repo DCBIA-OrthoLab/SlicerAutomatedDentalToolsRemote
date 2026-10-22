@@ -1,8 +1,6 @@
 from AREGRemote_Method.Method import Method
 from AREGRemote_Method.Progress import DisplayAREGIOS, DisplayCrownSeg, DisplayASOIOS
 import slicer
-import webbrowser
-import glob
 import os
 import vtk
 import shutil

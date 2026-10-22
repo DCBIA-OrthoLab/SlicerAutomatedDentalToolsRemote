@@ -1,7 +1,7 @@
 import os
 import sys
-from typing import Annotated, Optional
-from qt import QApplication, QWidget, QTableWidget, QDoubleSpinBox, QTableWidgetItem, QHeaderView,QSpinBox, QVBoxLayout, QLabel, QSizePolicy, QCheckBox, QFileDialog,QMessageBox, QApplication, QProgressDialog
+from typing import Annotated
+from qt import QDoubleSpinBox, QHeaderView,QSpinBox, QCheckBox, QFileDialog,QMessageBox, QApplication, QProgressDialog
 import qt
 from MRI2CBCTRemote_utils.Preprocess_MRI import Process_MRI
 from MRI2CBCTRemote_utils.Preprocess_CBCT_MRI import Preprocess_CBCT_MRI
@@ -16,7 +16,6 @@ import time
 import slicer
 from functools import partial
 from slicer.i18n import tr as _
-from slicer.i18n import translate
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin, pip_install
 from slicer.parameterNodeWrapper import (
@@ -125,8 +124,8 @@ def install_function():
             return False
 
     try:
-        import vtk
-        import itk
+        import vtk  # noqa: F401 - only checks that it imports
+        import itk  # noqa: F401
     except ImportError as e:
         slicer.util.errorDisplay(f"Final import check failed: {e}")
         return False
@@ -1054,7 +1053,7 @@ QSlider::handle:horizontal:hover {
                       font-weight: 500;
                     }
                 """)
-            except:
+            except Exception:
                 pass
         
         # Update QLineEdit
@@ -1072,7 +1071,7 @@ QSlider::handle:horizontal:hover {
                       border: 2px solid #5dade2;
                     }
                 """)
-            except:
+            except Exception:
                 pass
         
         # Update QComboBox
@@ -1099,7 +1098,7 @@ QSlider::handle:horizontal:hover {
                       selection-background-color: #5dade2;
                     }
                 """)
-            except:
+            except Exception:
                 pass
         
         # Recursively update all children
@@ -2108,7 +2107,7 @@ QSlider::handle:horizontal:hover {
         self.ui.progressBar.setFormat("%p%")
 
         self.ui.label_info.setHidden(False)
-        self.ui.label_info.setText(f"Starting process")
+        self.ui.label_info.setText("Starting process")
 
         self.nb_extnesion_did = 0
         self.nb_extension_launch = len(self.list_Processes_Parameters)
@@ -2200,7 +2199,7 @@ QSlider::handle:horizontal:hover {
         
         self.nb_extnesion_did += 1
         self.ui.label_info.setText(
-            f"Process end"
+            "Process end"
         )
         self.ui.progressBar.setValue(0)
 
@@ -2217,8 +2216,6 @@ QSlider::handle:horizontal:hover {
         )
 
         self.RunningUI(False)
-
-        stopTime = time.time()
 
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)

@@ -6,7 +6,9 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 import logging
-import vtk, qt, ctk, slicer
+import qt
+import ctk
+import slicer
 import glob
 import numpy as np
 
@@ -24,7 +26,6 @@ from qt import (
     QGridLayout,
 )
 
-import logging
 import sys
 
 # ===== Logging Configuration =====
@@ -48,17 +49,16 @@ from typing import Union
 try:
     import pandas as pd
 
-except:
+except Exception:
     slicer.util.pip_install("pandas")
     import pandas as pd  # news users will not need to refresh the AQ3DC for the first 
 
 
 try:
     # we need this package for pandas package
-    import openpyxl
-except:
+    import openpyxl  # noqa: F401 - pandas needs it installed, not imported here
+except Exception:
     slicer.util.pip_install("openpyxl")
-    import openpyxl
 
 import importlib.util
 import sys
@@ -79,11 +79,10 @@ try:
         Point,
         Line,
         Group_landmark,
-        MyList,
         MyDict,
     )
     
-except ImportError as e:
+except ImportError:
     spec = importlib.util.spec_from_file_location("Classes.Measure", os.path.join(local_classes_path, "Measure.py"))
     measure_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(measure_module)
@@ -416,14 +415,6 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 patient_compute["Roll Meaning"][i] = "x"
         return patient_compute
 
-    def checkKeepSign(self,list_measure,landmarks,measurement):
-        for measure in list_measure :
-            if measurement in measure["Type of measurement"]:
-                if measure["group"]=="Angle":
-                    land = measure["line1"] + " " + measure["line2"]
-
-
-
     def renameTimepoint(self,patient_compute):
         for i in range(len(patient_compute["Type of measurement"])) :
             measure = patient_compute["Type of measurement"][i]
@@ -517,13 +508,12 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 dic_stats["Time"].append(str(self.ui.lineEditNameT2.text))
 
 
-            type = "skeletal"
             tooth = None
             for t in TOOTHS :
                 if t in patient_compute["Landmarks"][i] :
                     tooth = t
 
-            if tooth != None:
+            if tooth is not None:
                 #Arch : upper=0, lower=1
                 if "U" in tooth :
                     dic_stats["Arch"].append(0)
@@ -1070,7 +1060,7 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             },
             "TabAngle": {
                 False: {"Angle between 2 lines": 3},
-                True: {"Angle between 2 lines": 4, f"Angle line T1 and line T2": 5},
+                True: {"Angle between 2 lines": 4, "Angle line T1 and line T2": 5},
             },
         }
 
@@ -1094,8 +1084,8 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 ["Distance point line", "Distance between 2 points"]
             )
         else:
-            if self.ui.CheckBoxT1T2.isChecked() == True:
-                self.ui.CbListMeasurement.addItem(f"Angle line T1 and line T2")
+            if self.ui.CheckBoxT1T2.isChecked():
+                self.ui.CbListMeasurement.addItem("Angle line T1 and line T2")
             self.ui.CbListMeasurement.addItem("Angle between 2 lines")
         self.manageDisplayComboboxMeasurement()
 
@@ -1312,7 +1302,7 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def selectFolderT2Patients(self):
         """ Open window allow user to choose folder with T1 patients' information.
         """
-        if self.dict_patient_T1 == None:
+        if self.dict_patient_T1 is None:
             self.warningMessage("Missing T1 folder")
         else:
 
@@ -1499,10 +1489,10 @@ class AQ3DCLogic(ScriptedLoadableModuleLogic):
                     good = False
                     if isinstance(position, list):
                         if len(position) == 3:
-                            if not False in [
+                            if False not in [
                                 isinstance(value, (int, float, np.ndarray))
                                 for value in position
-                            ] and not True in np.isnan(position):
+                            ] and True not in np.isnan(position):
                                 good = True
                     if not good:
                         logger.warning(
@@ -1592,7 +1582,7 @@ class AQ3DCLogic(ScriptedLoadableModuleLogic):
         for landmark in list_landmark:
             if landmark[:3].upper() == "Mid".upper():
                 list_midlandmarks.append(landmark)
-            elif not landmark in all_landmarks:
+            elif landmark not in all_landmarks:
                 list_otherlandmarks.append(landmark)
         if "Other" in all_landmarks.keys():
             all_landmarks["Other"] += list_otherlandmarks
@@ -1639,7 +1629,7 @@ class AQ3DCLogic(ScriptedLoadableModuleLogic):
                         midpoint_position = self.computeMidPoint(
                             np.array(P1_pos), np.array(P2_pos)
                         )
-                    except:
+                    except Exception:
                         logger.warning(
                             f"Save Midpoint, Warning this patient : {patient}, landmark : {mid_point}, it s not save. Please verify your folder"
                         )
@@ -2231,7 +2221,7 @@ class AQ3DCLogic(ScriptedLoadableModuleLogic):
 
             try:
                 p = list((np.array(p1) + np.array(p2)) / 2)
-            except:
+            except Exception:
                 logger.warning(
                     f"Warning compute midpoint error, patient : {patient}, landmarks : {landmark1} {landmark2}"
                 )
@@ -2294,7 +2284,9 @@ class AQ3DCTest(ScriptedLoadableModuleTest):
         logger.debug(f'path temp {path}')
 
         temp_path = os.path.join(path ,'temp.zip')
-        import urllib, shutil, zipfile
+        import urllib
+        import shutil
+        import zipfile
         url = 'https://github.com/HUTIN1/Q3DCExtension/releases/download/v1.0.0/Testing.zip'
         # A fixed https URL.
         with urllib.request.urlopen(url) as response, open(temp_path, 'wb') as out_file:  # nosec B310
@@ -2376,7 +2368,7 @@ class AQ3DCTest(ScriptedLoadableModuleTest):
         patient_T2,x = logic.createDictPatient(os.path.join(folder,'T2'))
 
         dif_landmark , dif_patient = logic.compareT1T2(patient_T1,patient_T2)
-        assert dif_landmark == {} and dif_patient == None
+        assert dif_landmark == {} and dif_patient is None
 
         list_landmark_exist, group_landmark = logic.updateGroupLandmark(patient_T1,group_landmark)
         list_landmark_exist, group_landmark = logic.updateGroupLandmark(patient_T2,group_landmark)

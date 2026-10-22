@@ -58,16 +58,8 @@ class Semi_CBCT(Method):
         }
 
     def TestReference(self, ref_folder: str):
-        out = None
-        scan_extension = [".nrrd", ".nrrd.gz", ".nii", ".nii.gz", ".gipl", ".gipl.gz"]
-        lm_extension = [".json"]
-
-        if self.NumberScan(ref_folder) == 0:
-            out = "The selected folder must contain scans"
-
-        if self.NumberScan(ref_folder) > 1:
-            out = "The selected folder must contain only 1 case"
-
+        # Accepts any reference folder: the checks IOSCBCT makes here were
+        # computed and then dropped, so they are left out.
         return None
 
     def TestCheckbox(self, dic_checkbox):
@@ -154,7 +146,6 @@ class Semi_CBCT(Method):
         liste_keys=("scanT1", "scanT2", "segT1"),
     ):
         out = ""
-        scan_extension = [".nrrd", ".nrrd.gz", ".nii", ".nii.gz", ".gipl", ".gipl.gz"]
         if self.NumberScan(scan_folder_t1, scan_folder_t2) == 0:
             return "Please Select folder with scans"
         
@@ -1059,7 +1050,7 @@ def search(path, *args):
     """
     arguments = []
     for arg in args:
-        if type(arg) == list:
+        if type(arg) is list:
             arguments.extend(arg)
         else:
             arguments.append(arg)

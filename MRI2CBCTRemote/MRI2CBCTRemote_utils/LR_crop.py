@@ -1,18 +1,11 @@
 from .Method import Method
-from .utils_CBCT import GetDictPatients, GetPatients
-import os, sys
-
-import SimpleITK as sitk
-import numpy as np
-
-from glob import iglob
-import slicer
-import time
-import qt
-import platform
-import re
-
+from .utils_CBCT import GetDictPatients
 import sys
+
+
+import slicer
+import platform
+
 import logging
 
 # ===== Logging Configuration =====
@@ -31,8 +24,6 @@ logger.addHandler(console_handler)
 class LR_CROP_MRI2CBCT(Method):
     def __init__(self, widget):
         super().__init__(widget)
-        documentsLocation = qt.QStandardPaths.DocumentsLocation
-        documents = qt.QStandardPaths.writableLocation(documentsLocation)
 
     def getGPUUsage(self):
         if platform.system() == "Darwin":

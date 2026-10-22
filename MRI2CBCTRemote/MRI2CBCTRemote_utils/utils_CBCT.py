@@ -159,7 +159,7 @@ def search(path, *args):
     """
     arguments = []
     for arg in args:
-        if type(arg) == list:
+        if type(arg) is list:
             arguments.extend(arg)
         else:
             arguments.append(arg)
