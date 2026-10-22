@@ -8,3 +8,6 @@ BATCHDENTALSEG/Resources/ML/**/*.pth
 VFACE/Resources/ML/**/*.pth
 ASO_IOS/ASO_IOS_utils/cache/
 *.log
+
+# Editor settings are personal.
+.vscode/
