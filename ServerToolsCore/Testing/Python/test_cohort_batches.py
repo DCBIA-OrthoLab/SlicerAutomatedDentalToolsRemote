@@ -208,8 +208,8 @@ class ZipSubsetTest(unittest.TestCase):
 
         self.assertEqual(
             self._members(out),
-            ["a.nii.gz", os.path.join("patient1", "000.dcm"),
-             os.path.join("patient1", "001.dcm")],
+            # Forward slashes on every system: that is how a zip names members.
+            ["a.nii.gz", "patient1/000.dcm", "patient1/001.dcm"],
         )
 
     def test_nothing_outside_the_batch_is_packed(self):

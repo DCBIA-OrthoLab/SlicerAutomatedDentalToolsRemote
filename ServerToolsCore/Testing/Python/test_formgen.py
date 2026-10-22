@@ -2571,7 +2571,12 @@ class DropdownArrowTest(unittest.TestCase):
         design._ICON_FILES.clear()
         self.addCleanup(design._ICON_FILES.clear)
         original = design._icon_dir
-        design._icon_dir = lambda: "/proc/nowhere/sadt"
+        # A folder inside a regular file: uncreatable on every system, where
+        # /proc/nowhere is only uncreatable on Linux.
+        handle, blocker = tempfile.mkstemp()
+        os.close(handle)
+        self.addCleanup(os.remove, blocker)
+        design._icon_dir = lambda: os.path.join(blocker, "sadt")
         self.addCleanup(setattr, design, "_icon_dir", original)
 
         self.assertEqual(design._image_rule("<svg/>"), "")
