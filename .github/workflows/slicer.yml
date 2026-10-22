@@ -1,0 +1,78 @@
+name: slicer
+
+# The extension inside a real Slicer, Stable and Preview, on the three systems
+# clinicians use. tests.yml stubs Slicer and Qt; this is what it cannot see:
+# a module Slicer fails to load, a panel that throws while building, and the
+# client's transfer and TLS code in Slicer's own Python. No server is needed.
+# See ServerToolsCore/Testing/Slicer/smoke.py.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Nightly, since Preview changes under the extension without any commit here.
+  schedule:
+    - cron: "23 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: ${{ matrix.os }} / ${{ matrix.slicer }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        slicer: [release, nightly]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Only to run the installer script; Slicer brings its own Python.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # A virtual display, and the X and GL libraries Slicer links against
+      # that a bare runner image lacks.
+      - name: Linux display and libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends xvfb \
+            libglu1-mesa libopengl0 libegl1 libnss3 libpulse0 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-xkb1 libxcb-shape0 libxcb-cursor0 \
+            libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxi6 libsm6 libice6
+
+      - name: Install Slicer ${{ matrix.slicer }}
+        id: slicer
+        shell: bash
+        env:
+          STABILITY: ${{ matrix.slicer }}
+        run: |
+          exe=$(python ServerToolsCore/Testing/Slicer/install_slicer.py \
+            --stability "$STABILITY" --dest "$RUNNER_TEMP/slicer")
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        shell: bash
+        env:
+          SLICER: ${{ steps.slicer.outputs.exe }}
+        run: |
+          # A read loop rather than mapfile: macOS ships bash 3.2.
+          paths=()
+          while IFS= read -r line; do paths+=("${line%$'\r'}"); done \
+            < <(python ServerToolsCore/Testing/Slicer/smoke.py --list-module-paths)
+          run=()
+          if [ "$RUNNER_OS" = Linux ]; then run=(xvfb-run -a); fi
+          "${run[@]}" "$SLICER" --no-splash --no-main-window --testing --disable-settings \
+            --additional-module-paths "${paths[@]}" \
+            --python-script ServerToolsCore/Testing/Slicer/smoke.py
