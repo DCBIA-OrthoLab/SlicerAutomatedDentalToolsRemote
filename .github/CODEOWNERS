@@ -1,0 +1,3 @@
+# Who is asked to review a pull request. Add a line per path as others
+# take ownership of a module; the last matching line wins.
+*  @Jules-GP
