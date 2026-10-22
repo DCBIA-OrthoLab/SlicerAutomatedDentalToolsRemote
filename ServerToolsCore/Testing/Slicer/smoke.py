@@ -168,9 +168,7 @@ def main(argv):
     args = parser.parse_args(argv)
     modules = _declared_modules()
     if args.list_module_paths:
-        # Forward slashes: Slicer's Windows launcher drops a module path
-        # written with backslashes, and every module is then missing.
-        print("\n".join(path.replace("\\", "/") for path in modules.values()))
+        print("\n".join(modules.values()))
         return 0
 
     import slicer

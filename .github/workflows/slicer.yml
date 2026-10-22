@@ -82,10 +82,11 @@ jobs:
         env:
           SLICER: ${{ steps.slicer.outputs.exe }}
         run: |
-          # A read loop rather than mapfile: macOS ships bash 3.2.
+          # A read loop rather than mapfile: macOS ships bash 3.2. tr drops the
+          # carriage return Windows' Python ends each line with.
           paths=()
-          while IFS= read -r line; do paths+=("${line%$'\r'}"); done \
-            < <(python ServerToolsCore/Testing/Slicer/smoke.py --list-module-paths)
+          while IFS= read -r line; do paths+=("$line"); done \
+            < <(python ServerToolsCore/Testing/Slicer/smoke.py --list-module-paths | tr -d '\r')
           run=()
           if [ "$RUNNER_OS" = Linux ]; then run=(xvfb-run -a); fi
           "${run[@]}" "$SLICER" --no-splash --no-main-window --testing --disable-settings \
