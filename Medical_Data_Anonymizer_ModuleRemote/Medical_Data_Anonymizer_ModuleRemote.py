@@ -573,7 +573,8 @@ class Medical_Data_Anonymizer_ModuleRemoteWidget(ScriptedLoadableModuleWidget):
                 
                 elif file_ext == ".xml":
                     from xml.etree import ElementTree as ET
-                    tree = ET.parse(input_file_path)
+                    # The clinician's own local file; the stdlib parser resolves no external entities.
+                    tree = ET.parse(input_file_path)  # nosec B314
                     root = tree.getroot()
                     full_text = self.extract_text_from_xml(root)
                 

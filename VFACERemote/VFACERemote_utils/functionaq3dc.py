@@ -2296,7 +2296,8 @@ class AQ3DCTest(ScriptedLoadableModuleTest):
         temp_path = os.path.join(path ,'temp.zip')
         import urllib, shutil, zipfile
         url = 'https://github.com/HUTIN1/Q3DCExtension/releases/download/v1.0.0/Testing.zip'
-        with urllib.request.urlopen(url) as response, open(temp_path, 'wb') as out_file:
+        # A fixed https URL.
+        with urllib.request.urlopen(url) as response, open(temp_path, 'wb') as out_file:  # nosec B310
             length = response.info().get("Content-Length")
             if length:
                 length = int(length)
