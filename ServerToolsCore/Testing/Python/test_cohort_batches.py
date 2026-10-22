@@ -15,6 +15,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import types
 import zipfile
 
 _HERE = os.path.abspath(os.path.dirname(__file__))
@@ -297,6 +298,9 @@ class ApplyQueuesOneRunPerBatchTest(unittest.TestCase):
         panel._outputFolderWidget = _Widget(self.output)
         panel.collectArgs = lambda: {"suffix": "_seg"}
         panel._pumpRuns = lambda: None
+        # A server that predates the batch policy endpoint: the panel keeps
+        # its own concurrency.
+        panel.client = types.SimpleNamespace(batch_policy=lambda: None)
         self.panel = panel
         # The workspaces outlive onApplyButton -- a run holds one until it ends.
         self.addCleanup(self._cleanWorkspaces)
