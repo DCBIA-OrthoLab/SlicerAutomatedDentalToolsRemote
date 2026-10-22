@@ -35,7 +35,7 @@ def MaskedImage(fixed_image_path, fixed_seg_path, folder_output, suffix, SegLabe
 
     fixed_image_masked = applyMask(fixed_image_sitk, fixed_seg_sitk, label=SegLabel)
     if fixed_image_masked=="failed":
-        logger.warning("failed process on : ",fixed_image_sitk)
+        logger.warning("failed process on : %s", fixed_image_path)
         return 
     
     base_name, ext = os.path.splitext(fixed_image_path)
