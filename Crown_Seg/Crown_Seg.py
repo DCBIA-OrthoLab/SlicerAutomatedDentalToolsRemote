@@ -38,7 +38,7 @@ class Crown_Seg(ScriptedLoadableModule):
         AREG and FlexReg read.
         See more information in <a href="https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools">documentation</a>.
         """)
-        self.parent.acknowledgementText = ""
+        self.parent.acknowledgementText = _("This module was supported by NIDCR R01 024450.")
 
 
 class Crown_SegWidget(ServerToolWidgetBase):

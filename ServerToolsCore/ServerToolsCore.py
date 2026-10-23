@@ -20,7 +20,7 @@ class ServerToolsCore(ScriptedLoadableModule):
             "execution, schema-driven GUI generation and shared styling. Not user-facing "
             " - see ARCHITECTURE.md at the repository root."
         )
-        self.parent.acknowledgementText = ""
+        self.parent.acknowledgementText = _("This module was supported by NIDCR R01 024450.")
 
         # Runs once, when Slicer discovers this module at startup - before any
         # tool module is opened. Applies any server URL/API key/etc. the user
