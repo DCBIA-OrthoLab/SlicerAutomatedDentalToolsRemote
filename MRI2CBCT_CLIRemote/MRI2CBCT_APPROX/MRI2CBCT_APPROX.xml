@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <executable>
-  <category>Automated Dental Tools.Advanced</category>
+  <category>Automated Dental Tools Remote.Advanced</category>
   <index>3</index>
   <title>MRI2CBCT_APPROX</title>
   <description><![CDATA[This is a CLI module that can be bundled in an extension]]></description>
