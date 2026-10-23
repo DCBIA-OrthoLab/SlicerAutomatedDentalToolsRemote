@@ -23,7 +23,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -718,6 +718,13 @@ def checked_server_url(server_url: str) -> str:
     return tls.require_https(server_url)
 
 
+def _never_resolves(server_url: str) -> bool:
+    """True for a host under `.invalid`, which RFC 6761 reserves so that it
+    never resolves: the placeholder a client has until a server is set."""
+    host = (urlsplit(server_url).hostname or "").rstrip(".").lower()
+    return host == "invalid" or host.endswith(".invalid")
+
+
 class ToolServerClient:
     def __init__(
         self,
@@ -787,6 +794,13 @@ class ToolServerClient:
     # ------------------------------------------------------------------
 
     def health(self) -> bool:
+        # The placeholder URL (config.SERVER_URL) names a host that can never
+        # resolve, so asking is pointless -- and harmful: the check runs on a
+        # daemon thread, and one still waiting on the resolver when Slicer
+        # quits logs its failure into Slicer's log handler while the
+        # application is being destroyed, which crashes Slicer on exit.
+        if _never_resolves(self._server_url):
+            return False
         try:
             response = self._session.get(
                 f"{self._server_url}/health", timeout=_HEALTH_CHECK_TIMEOUT, verify=tls.ca_bundle()

@@ -176,7 +176,7 @@ class VISU(ScriptedLoadableModule):
         only one of them is right. The panel names the scan it used and whether it found it
         beside the points or had to assume.
         """)
-        self.parent.acknowledgementText = ""
+        self.parent.acknowledgementText = _("This module was supported by NIDCR R01 024450.")
 
 
 class SceneLoader:

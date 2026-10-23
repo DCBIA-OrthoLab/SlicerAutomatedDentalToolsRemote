@@ -37,7 +37,7 @@ class ServerToolsSettings(ScriptedLoadableModule):
             "and its certificate is always verified against the public authorities: "
             "that is not a setting."
         )
-        self.parent.acknowledgementText = ""
+        self.parent.acknowledgementText = _("This module was supported by NIDCR R01 024450.")
 
 
 class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
