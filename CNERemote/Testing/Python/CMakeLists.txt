@@ -1,2 +1,14 @@
+#-----------------------------------------------------------------------------
+# test_cne_client.py drives ServerToolsCoreLib with CNE's own GET /tools schema
+# as a fixture, against the qt/ctk/slicer stand-ins in
+# ServerToolsCore/Testing/Python/qt_stubs.py. Pure Python once the widgets are
+# stubbed, so it is registered as a plain Python3 ctest rather than through
+# slicer_add_python_unittest - no Slicer interpreter launch needed. Same
+# rationale as ALIRemote/Testing/Python/CMakeLists.txt.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
-#slicer_add_python_unittest(SCRIPT ${MODULE_NAME}ModuleTest.py)
+add_test(
+  NAME CNE_test_cne_client
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_cne_client
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )

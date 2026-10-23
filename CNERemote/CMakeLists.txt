@@ -2,13 +2,16 @@
 set(MODULE_NAME CNERemote)
 
 #-----------------------------------------------------------------------------
+# Resources/UI/CNE.ui and Resources/testfiles/ belonged to the former local
+# module, which drove CNE_CLIRemote from inside Slicer. The module is now a thin
+# client of the server's "CNE" tool and builds its panel from GET /tools, so
+# both have been deleted, with the CLI.
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
-  Resources/UI/CNE.ui
   )
 
 #-----------------------------------------------------------------------------
