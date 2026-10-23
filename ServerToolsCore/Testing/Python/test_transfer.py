@@ -83,9 +83,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- routes -------------------------------------------------------
 
+    def _not_found(self):
+        # Drain the request body before answering. Closing a socket that still
+        # holds unread bytes makes Windows reset the connection, and the client
+        # then sees "connection aborted" instead of this 404.
+        self._body()
+        return self._json({"detail": "not found"}, status=404)
+
     def do_POST(self):
         if self.state.no_chunked_endpoints:
-            return self._json({"detail": "not found"}, status=404)
+            return self._not_found()
         if self.path == "/uploads":
             spec = json.loads(self._body())
             chunk_size = min(spec.get("chunk_size") or 8 << 20, 64 << 20)
@@ -101,7 +108,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if self.state.no_chunked_endpoints:
-            return self._json({"detail": "not found"}, status=404)
+            return self._not_found()
         upload_id, _, index = self.path[len("/uploads/"):].partition("/parts/")
         index = int(index)
         data = self._body()
