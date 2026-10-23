@@ -44,8 +44,8 @@ _UNIT_SUITES = ("test_transfer", "test_tls")
 def _declared_modules(folder=_REPO):
     """Every module folder the build would package, as {name: folder}.
 
-    A folder holding `<name>.py` is a module; one that only groups others (the
-    MRI2CBCT CLIs) is walked into, the way CMake walks its add_subdirectory.
+    A folder holding `<name>.py` is a module; one that only groups others (a
+    folder of CLIs) is walked into, the way CMake walks its add_subdirectory.
     """
     with open(os.path.join(folder, "CMakeLists.txt"), encoding="utf-8") as handle:
         children = re.findall(r"^add_subdirectory\((\w+)\)", handle.read(), re.MULTILINE)
