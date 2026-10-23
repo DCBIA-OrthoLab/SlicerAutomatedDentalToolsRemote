@@ -5,8 +5,8 @@ landmark identification, orientation, registration and classification of CBCT
 scans, intraoral surface scans and MRI. Every computation runs on a remote tool
 server, so a laptop that cannot run a segmentation can still ask for one: a
 ported module installs nothing into Slicer's interpreter and downloads no model.
-`MRI2CBCT` is not yet ported and still installs its own dependencies and
-downloads its own models.
+`MRI2CBCT` is **temporarily unavailable**: it is not shipped until it is ported
+to the server.
 
 <p align="center">
     <img src="SlicerAutomaticTools.png" alt="Automated Dental Tools Remote logo" width="200"/>
@@ -17,7 +17,7 @@ downloads its own models.
 </p>
 
 **Compatible with the stable and nightly versions of 3D Slicer.** Modules appear
-under the `Automated Dental Tools` category.
+under the `Automated Dental Tools Remote` category.
 
 ---
 
@@ -26,8 +26,8 @@ under the `Automated Dental Tools` category.
 This extension is a **client**. The modules listed as server-backed below upload
 the files you select to a tool server over the network, where the computation
 happens, and download the result back into the scene. The remaining modules —
-`MRI2CBCT`, `Medical Data Anonymizer`, `VISU` and `Agent` — run on this
-machine and send nothing.
+`Medical Data Anonymizer`, `VISU` and `Agent` — run on this machine and send
+nothing.
 
 **There is no de-identification in the current client.** Files are streamed to
 the server as they are on disk, with their names, their DICOM headers and
@@ -52,8 +52,7 @@ Consequences you must accept before using this extension on patient data:
 - Check that the arrangement between your institution and whoever operates the
   server covers the data you are about to send.
 
-`MRI2CBCT` is the one imaging module not yet ported to the server: it installs
-nnU-Net into Slicer's Python environment and downloads its model on first use.
+`MRI2CBCT` is temporarily unavailable until it is ported to the server.
 
 ---
 
@@ -212,7 +211,6 @@ Panels that do not send work to the server:
 
 | Name | Description |
 |------|-------------|
-| [MRI2CBCT](#mri2cbct-module) | Registers MRI onto CBCT of the temporomandibular joint. **The one imaging module not yet ported to the server**: it installs nnU-Net into Slicer's interpreter and downloads its model on first use. |
 | [VISU](VISU) | Opens a folder a tool has already produced and pairs scan, mask and landmarks for review, one case at a time, with the arrow keys to step through a cohort. Computes nothing. |
 | [Medical Data Anonymizer](#medical-data-anonymizer-module) | Anonymizes identifiers in medical documents (DOCX, PDF, TXT, CSV, XML, ODT) on this machine. |
 | [Agent](#agent-module) | Runs the other modules from a request in plain language, using a local LLM. |
@@ -220,7 +218,7 @@ Panels that do not send work to the server:
 | [Server Tools Settings](ServerToolsSettings) | Sets the server address and credentials every other module uses, and tests the connection. |
 
 Two modules carry no panel of their own and sit in the
-`Automated Dental Tools.Advanced` category:
+`Automated Dental Tools Remote.Advanced` category:
 
 | Name | Description |
 |------|-------------|
@@ -231,12 +229,11 @@ Two modules carry no panel of their own and sit in the
 
 These two directories are CLI modules of the former local extension that the
 panels above still drive. They are built, so they appear under
-`Automated Dental Tools.Advanced`.
+`Automated Dental Tools Remote.Advanced`.
 
 | Name | Description | Driven by |
 |------|-------------|-----------|
 | [Agent_CLI](Agent_CLI) | Routes a request in plain language to the right tool, extracts its parameters and builds the command to run. | `Agent` |
-| [MRI2CBCT_CLI](MRI2CBCT_CLI) | Orientation, resampling, approximation, left/right and TMJ cropping, and registration steps of the MRI-to-CBCT chain. | `MRI2CBCT` |
 
 The CLI modules of the other tools — landmark identification, orientation,
 registration, the asymmetry classification and clinical-note extraction — are gone: the sequencing they
@@ -263,9 +260,7 @@ the output file names.
   [Connecting this client to a server](#connecting-this-client-to-a-server). Without
   it, every server-backed module is inert.
 * No GPU, no conda environment and no model download are needed for the
-  server-backed modules — that is the point of this client. The exception is
-  `MRI2CBCT`, which installs its own dependencies and downloads its own models;
-  for it, roughly 12 GB of memory is recommended.
+  server-backed modules — that is the point of this client.
 
 ## Citing
 
@@ -698,7 +693,12 @@ The **Medical Data Anonymizer** module provides automated anonymization of sensi
 
 ## MRI2CBCT Module
 
-<img src="MRI2CBCT/Resources/Icons/MRI2CBCT.png" alt="Extension Logo" width="70"/>
+> **Temporarily unavailable.** MRI2CBCT is not shipped with this extension until
+> it is ported to the tool server. Its source stays in `MRI2CBCTRemote/` and
+> `MRI2CBCT_CLIRemote/`; the description below documents the module as it will
+> return.
+
+<img src="MRI2CBCTRemote/Resources/Icons/MRI2CBCTRemote.png" alt="Extension Logo" width="70"/>
 
 The MRI2CBCT module provides a user interface to perform the registration between MRI and CBCT scans.
 
