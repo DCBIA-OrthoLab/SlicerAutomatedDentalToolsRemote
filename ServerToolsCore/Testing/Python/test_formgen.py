@@ -1787,6 +1787,13 @@ class SliderWidgetTest(unittest.TestCase):
         widget = self._one(_numeric("float", ui="slider", min=0, max=1, step=0.05, decimals=4))
         self.assertEqual(widget.decimals, 4)
 
+    def test_a_float_spin_box_without_decimals_shows_two_places(self):
+        # A flat 6 drew a temperature of 0 as `0.000000`.
+        self.assertEqual(self._one(_numeric("float", initial=0.0)).decimals, 2)
+
+    def test_a_float_spin_box_keeps_the_places_its_initial_value_needs(self):
+        self.assertEqual(self._one(_numeric("float", initial=0.001)).decimals, 3)
+
     def test_a_slider_without_bounds_falls_back_to_a_spin_box(self):
         # An unbounded slider has no geometry; the panel must render anyway.
         self.assertIsInstance(self._one(_numeric("float", ui="slider")), qt.QDoubleSpinBox)

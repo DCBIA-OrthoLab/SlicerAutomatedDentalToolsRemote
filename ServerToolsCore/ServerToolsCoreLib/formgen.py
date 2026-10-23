@@ -1146,6 +1146,18 @@ def _vec2_initial(initial, x_range, y_range):
             (float(y_range[0]) + float(y_range[1])) / 2.0)
 
 
+def _decimals_for_value(initial, step, maximum=6) -> int:
+    """Decimal places for a float spin box the schema gave none for: enough
+    for its initial value and its step, and never fewer than 2. A flat 6 drew
+    a temperature of 0 as `0.000000`, which reads as a measured quantity."""
+    places = _decimals_for_step(step, maximum)
+    try:
+        places = max(places, _decimals_for_step(initial, maximum))
+    except (TypeError, ValueError):
+        pass
+    return max(2, places)
+
+
 def _decimals_for_step(step, maximum=6) -> int:
     """Decimal places that make `step` representable (0.05 needs 2), with 2
     (the ctk default) when no step is declared."""
@@ -1304,12 +1316,22 @@ class FileOrFolderInput:
             else:
                 text = describe_file(path, name_only=not whole)
                 text = text if whole else "File: {}".format(text)
+            if whole:
+                # A destination is shown whole, so the home directory is the
+                # part to fold: `~/Documents/...` fits the box where
+                # `/home/<user>/Documents/...` was cut on its left.
+                home = os.path.expanduser("~")
+                if home and home != os.sep and text.startswith(home + os.sep):
+                    text = "~" + text[len(home):]
             # An input shows the NAME. The box is half a row wide, and a full
             # path elided into it is the one part of itself that means nothing
             # -- `/tmp/tmpgt7qr_f5/pati...` where a reader is looking for
             # `patient1.nii.gz`. The whole path is on the row's tooltip.
             self.container.setToolTip(path)
         self.caption.setText(text)
+        # setText leaves the cursor at the end, which scrolls the box to the
+        # tail; `value_field` shows the start, and so must every later text.
+        self.caption.setCursorPosition(0)
         # The card and the line inside it are one statement, so they are
         # painted together and can never disagree about whether the row is
         # satisfied. A wrapper's own words are never NOTHING_CHOSEN unless
@@ -2489,7 +2511,8 @@ def _make_numeric_widget(name: str, spec: dict, integer: bool, initial):
         1e12 if spec.get("max") is None else float(spec["max"]),
     )
     declared = spec.get("decimals")
-    widget.setDecimals(int(declared) if declared is not None else 6)
+    widget.setDecimals(int(declared) if declared is not None
+                       else _decimals_for_value(initial, spec.get("step")))
     if spec.get("step") is not None:
         widget.setSingleStep(float(spec["step"]))
     if initial is not None:

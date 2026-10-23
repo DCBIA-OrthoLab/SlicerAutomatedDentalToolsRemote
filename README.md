@@ -5,8 +5,8 @@ landmark identification, orientation, registration and classification of CBCT
 scans, intraoral surface scans and MRI. Every computation runs on a remote tool
 server, so a laptop that cannot run a segmentation can still ask for one: a
 ported module installs nothing into Slicer's interpreter and downloads no model.
-`CNE` and `MRI2CBCT` are not yet ported and still install their own dependencies
-and download their own models.
+`MRI2CBCT` is not yet ported and still installs its own dependencies and
+downloads its own models.
 
 <p align="center">
     <img src="SlicerAutomaticTools.png" alt="Automated Dental Tools Remote logo" width="200"/>
@@ -26,7 +26,7 @@ under the `Automated Dental Tools` category.
 This extension is a **client**. The modules listed as server-backed below upload
 the files you select to a tool server over the network, where the computation
 happens, and download the result back into the scene. The remaining modules —
-`MRI2CBCT`, `CNE`, `Medical Data Anonymizer`, `VISU` and `Agent` — run on this
+`MRI2CBCT`, `Medical Data Anonymizer`, `VISU` and `Agent` — run on this
 machine and send nothing.
 
 **There is no de-identification in the current client.** Files are streamed to
@@ -54,7 +54,6 @@ Consequences you must accept before using this extension on patient data:
 
 `MRI2CBCT` is the one imaging module not yet ported to the server: it installs
 nnU-Net into Slicer's Python environment and downloads its model on first use.
-`CNE` likewise installs `llama-cpp-python` and downloads a language model.
 
 ---
 
@@ -207,12 +206,12 @@ Panels that send work to the server:
 | [DOCShapeAXI](#docshapeaxi-module) | Grades a 3D surface and returns the GradCAM surface that explains the grade. Acronym for Dental Oral and Craniofacial Shape Analysis eXplainability and Interpretability. |
 | [VFACE](#vface-module) | Measures facial asymmetry and longitudinal change, then classifies it. Acronym for Visual Facial Asymmetry Classification Engine. |
 | [SurgMovPred](SurgMovPred) | Predicts the soft-tissue outcome of a planned surgical movement. |
+| [CNE](#cne-module) | Extracts structured findings from free-text clinical notes with a language model hosted on the server. Successor of the former `MedX` module. |
 
 Panels that do not send work to the server:
 
 | Name | Description |
 |------|-------------|
-| [CNE](#cne-module) | Summarizes clinical notes with a local language model and builds a comorbidity dashboard from them. Successor of the former `MedX` module. **Not yet ported to the server**: it installs `llama-cpp-python` into Slicer's interpreter and downloads a language model of roughly 4.5 GB on first use. |
 | [MRI2CBCT](#mri2cbct-module) | Registers MRI onto CBCT of the temporomandibular joint. **The one imaging module not yet ported to the server**: it installs nnU-Net into Slicer's interpreter and downloads its model on first use. |
 | [VISU](VISU) | Opens a folder a tool has already produced and pairs scan, mask and landmarks for review, one case at a time, with the arrow keys to step through a cohort. Computes nothing. |
 | [Medical Data Anonymizer](#medical-data-anonymizer-module) | Anonymizes identifiers in medical documents (DOCX, PDF, TXT, CSV, XML, ODT) on this machine. |
@@ -230,18 +229,17 @@ Two modules carry no panel of their own and sit in the
 
 ### Legacy command-line modules
 
-These three directories are CLI modules of the former local extension that the
+These two directories are CLI modules of the former local extension that the
 panels above still drive. They are built, so they appear under
 `Automated Dental Tools.Advanced`.
 
 | Name | Description | Driven by |
 |------|-------------|-----------|
 | [Agent_CLI](Agent_CLI) | Routes a request in plain language to the right tool, extracts its parameters and builds the command to run. | `Agent` |
-| [CNE_CLI](CNE_CLI) | Runs the clinical-note summarization and builds the dashboard. | `CNE` |
 | [MRI2CBCT_CLI](MRI2CBCT_CLI) | Orientation, resampling, approximation, left/right and TMJ cropping, and registration steps of the MRI-to-CBCT chain. | `MRI2CBCT` |
 
 The CLI modules of the other tools — landmark identification, orientation,
-registration and the asymmetry classification — are gone: the sequencing they
+registration, the asymmetry classification and clinical-note extraction — are gone: the sequencing they
 existed for is the server's now, and they had already been dropped from the
 build, so nothing shipped them and nothing imported them.
 
@@ -265,9 +263,9 @@ the output file names.
   [Connecting this client to a server](#connecting-this-client-to-a-server). Without
   it, every server-backed module is inert.
 * No GPU, no conda environment and no model download are needed for the
-  server-backed modules — that is the point of this client. The exceptions are
-  `MRI2CBCT` and `CNE`, which install their own dependencies and download their
-  own models; for those, roughly 12 GB of memory is recommended.
+  server-backed modules — that is the point of this client. The exception is
+  `MRI2CBCT`, which installs its own dependencies and downloads its own models;
+  for it, roughly 12 GB of memory is recommended.
 
 ## Citing
 
@@ -602,30 +600,25 @@ There is button "Mirror" that will automatically download the matrix mirror and 
 | **Landmark** | .mrk.json | .tfm .npy .h5 .mat .txt|
 
 ## CNE Module
-<img src="CNE/Resources/Icons/CNE.png" alt="CNE icon" width="70"/>
+<img src="CNERemote/Resources/Icons/CNERemote.png" alt="CNE icon" width="70"/>
 
-The **CNE** module extracts clinical insight from raw notes and visualizes
-patient-level comorbidities. It is the successor of the former `MedX` module.
+The **CNE** module extracts structured findings from free-text clinical notes.
+It is the successor of the former `MedX` module.
 
-Unlike the server-backed modules, CNE runs on this machine: it installs
-`llama-cpp-python` into Slicer's interpreter and downloads a quantized language
-model on first use.
+The language model runs on the server: nothing is installed into Slicer and no
+model is downloaded to this machine.
 
 ### Features
 
-1. **Summarization:**
-   - **Input:** Folder of clinical notes (`.pdf`, `.docx`, or `.txt`).
-   - **Model Selection:**
-     - Click Download to fetch the pre-trained model.
-     - Or set a custom model path manually.
-   - **Output:** Folder where `.txt` summaries will be saved.
-
-2. **Dashboard:**
-   - **Input:** Folder with `.txt` summaries.
-   - **Optional:** Enable *"Load in 3D Slicer"* to preview the dashboard image in the slice viewer.
-   - **Output:**
-     - `dashboard.png`: Composite image summarizing comorbidities.
-     - `patient_data.csv`: Tabular summary of extracted conditions.
+- **Input:** one clinical note or a folder of them (`.txt`, `.pdf` or `.docx`),
+  searched recursively. A scanned, image-only PDF has no text and is skipped
+  rather than answered from nothing.
+- **Note type:** `TMJ` or `Ortho`. It selects the fine-tuned model, its prompt
+  and its context window; leave **Model** on automatic and the server uses the
+  model fine-tuned for that note type.
+- **Output:** per note, `Extraction_<note>.json` and a readable
+  `Extraction_<note>.txt`, plus `CNE_report.json`, which says how many notes
+  were extracted and why any were not.
 
 ## Medical Data Anonymizer Module
 
