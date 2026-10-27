@@ -97,16 +97,22 @@ class AREGRemoteWidget(ServerToolWidgetBase):
     """
 
     TOOL_NAME = "AREG"
-    # No FILE_INPUTS: the schema types `t1`, `t2` and `t1_masks` as
-    # ["folder", "zip_file"], so "auto" already gives each one a picker that
-    # takes a folder and zips it before upload. `t1`/`t2` are also flagged
-    # server_selectable, which puts the hosted test cohorts above that picker.
-    # Nothing here names a type, an extension, or a mode.
+    # FILE_INPUTS names `patients` only (below): the schema types `t1`, `t2`
+    # and `t1_masks` as ["folder", "zip_file"], so "auto" already gives each
+    # one a picker that takes a folder and zips it before upload. `t1`/`t2`
+    # are also flagged server_selectable, which puts the hosted test cohorts
+    # above that picker. Nothing else here names a type, an extension, or a
+    # mode.
     #
     # No RESULT_KIND either: output_kind "files" is one registered scan and its
     # transform per case and per region, plus AREG_report.json, bundled into one
     # .zip and unpacked into the output folder the user picks.
     AUTO_UI = True
+    # The one input the schema cannot describe precisely: `patients` is a
+    # FOLDER of patient folders, never one file, and a packaged tool's path
+    # takes either. Forced to the folder picker so the panel does not offer
+    # a choice that can only fail.
+    FILE_INPUTS = {"patients": "folder_zip"}
 
     # Loading is a courtesy for the single-pair run: a cohort registered on
     # three regions legitimately returns hundreds of files, and loading them all

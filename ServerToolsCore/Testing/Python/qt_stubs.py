@@ -323,6 +323,10 @@ class QFormLayout(QLayout):
         self.rows.append((label, widget))
         self.widgets.append(widget)
 
+    def insertRow(self, row, label, widget):
+        self.rows.insert(row, (label, widget))
+        self.widgets.insert(row, widget)
+
 
 class QLabel(QObject):
     def __init__(self, text=""):

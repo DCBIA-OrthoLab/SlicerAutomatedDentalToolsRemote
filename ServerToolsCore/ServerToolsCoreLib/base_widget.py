@@ -973,7 +973,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         target = self._sectionLayouts.get(section, layout)
         labelWidget = (
             design.required_label(label)
-            if spec.get("required")
+            if formgen.may_be_required(spec)
             else design.optional_label(label)
         )
 
@@ -1767,6 +1767,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _inputReady(self) -> bool:
         arguments = (self._schema or {}).get("arguments", {})
+        # What a `required_when` is read against: the same controlling values
+        # the visibility pass reads.
+        controlling = formgen.controlling_arguments(arguments)
+        values = formgen.collect(
+            {name: self._argWidgets[name] for name in controlling if name in self._argWidgets}
+        )
         for arg_name, mode in self._inputModes.items():
             # A file input hidden by its `visible_when` is not uploaded either
             # (see _prepareOneInputFile), so it cannot be what Apply waits for.
@@ -1780,7 +1786,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # its `mgl_landmarks` exists only to REUSE landmarks you already
             # have, since the server predicts them otherwise, and requiring it
             # made the ordinary run the one you could not launch.
-            if not arguments.get(arg_name, {}).get("required", True):
+            spec = arguments.get(arg_name)
+            if spec is not None and not formgen.is_required(spec, values):
                 continue
             widget = self._inputWidgets.get(arg_name)
             if mode == "volume_node":

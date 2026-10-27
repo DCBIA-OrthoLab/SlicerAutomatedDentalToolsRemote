@@ -485,7 +485,10 @@ class DeclarationTest(unittest.TestCase):
         written against a remembered schema is the one thing that can drift out
         of sync with it."""
         self.assertEqual(AREGRemoteWidget.TOOL_NAME, "AREG")
-        self.assertEqual(AREGRemoteWidget.FILE_INPUTS, ServerToolWidgetBase.FILE_INPUTS)
+        # The one exception, and not a repetition: a packaged tool's path takes
+        # a file or a folder, and nothing in the schema can say that the folder
+        # of patient folders is only ever a folder.
+        self.assertEqual(AREGRemoteWidget.FILE_INPUTS, {"patients": "folder_zip"})
         self.assertIsNone(AREGRemoteWidget.RESULT_KIND)
         self.assertTrue(AREGRemoteWidget.AUTO_UI)
 

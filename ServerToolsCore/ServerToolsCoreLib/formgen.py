@@ -35,7 +35,7 @@ import ctk
 import qt
 
 from . import accepts_folder, argument_types, design, file_extensions_for, is_file_type
-from .errors import plain_text
+from .errors import plain_text, preformatted_text
 from .joystick import JoystickPad
 
 logger = logging.getLogger("ServerToolsCore.formgen")
@@ -488,6 +488,11 @@ def accepts_volume(spec: dict, name: str = "") -> bool:
 # able to break an older client's panel.
 SLIDER_UI = "slider"
 JOYSTICK_UI = "joystick"
+# A `"choice"` drawn as a row of segments rather than a drop-down: for a
+# two- or three-way decision that changes what the rest of the section asks
+# for, where every option should be visible at once. Such a field also heads
+# its section (see `build`), since what follows it depends on it.
+SEGMENTED_UI = "segmented"
 
 
 class MultiChoiceGroup:
@@ -2277,7 +2282,15 @@ def is_visible(spec: dict, values: dict) -> bool:
     if spec.get("hidden"):
         return False
 
-    conditions = spec.get("visible_when")
+    return conditions_hold(spec.get("visible_when"), values)
+
+
+def conditions_hold(conditions, values: dict) -> bool:
+    """Whether every `{argument: value(s)}` entry matches the panel's values.
+
+    No conditions hold trivially. Shared by `visible_when` and `required_when`,
+    which are written the same way.
+    """
     if not conditions:
         return True
     for other_name, expected in conditions.items():
@@ -2287,6 +2300,28 @@ def is_visible(spec: dict, values: dict) -> bool:
         if values[other_name] not in wanted:
             return False
     return True
+
+
+def is_required(spec: dict, values: dict) -> bool:
+    """Whether this argument must be filled, given what the panel holds.
+
+    `required` is one answer for every request. `required_when` is the answer
+    for an input needed in one shape of the request and absent from another --
+    AREG's T1 and T2 with one folder per type, its folder of patients with one
+    per patient -- where the schema has to say `required: false`, since either
+    may be the one not sent.
+    """
+    if spec.get("required"):
+        return True
+    conditions = spec.get("required_when")
+    return bool(conditions) and conditions_hold(conditions, values)
+
+
+def may_be_required(spec: dict) -> bool:
+    """Whether the field is ever required: what its label says. A
+    `required_when` input is shown only where its condition holds, so it reads
+    as required wherever a reader sees it."""
+    return bool(spec.get("required") or spec.get("required_when"))
 
 
 def allowed_groups(spec: dict, values: dict):
@@ -2342,7 +2377,7 @@ def controlling_arguments(arguments_schema: dict) -> set:
     return {
         other_name
         for spec in arguments_schema.values()
-        for key in ("visible_when", "options_when")
+        for key in ("visible_when", "options_when", "required_when")
         for other_name in (spec.get(key) or {})
     }
 
@@ -2367,6 +2402,8 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
     # {(layout, cell name): the QWidget holding that cell}, so several arguments
     # naming one cell stack inside it instead of taking a cell each.
     grid_cells = {}
+    # {id(layout): how many segmented choices already head it}.
+    heads = {}
     for name, spec in arguments_schema.items():
         if is_file_type(spec.get("type", "")):
             continue
@@ -2391,7 +2428,15 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
             label.setToolTip(plain_text(description))
         target = (sections or {}).get(section_of(spec), layout)
         field = row_widget(widget)
-        if hasattr(target, "addRow"):
+        if isinstance(widget, SegmentedChoice) and hasattr(target, "insertRow"):
+            # Above the section's other rows, the file inputs included, which a
+            # panel adds before any scalar: a segmented choice decides what the
+            # rows under it ask for, so it is read first. In declaration order
+            # among themselves.
+            position = heads.get(id(target), 0)
+            target.insertRow(position, label, field)
+            heads[id(target)] = position + 1
+        elif hasattr(target, "addRow"):
             target.addRow(label, field)
         else:
             # A grid section: the caller handed a QGridLayout instead, and the
@@ -2591,11 +2636,90 @@ def _axis_labels(declared):
     return None
 
 
+class SegmentedChoice:
+    """A `"choice"` drawn as segments: every option on screen, one pressed.
+
+    The same pills a file input uses to say where its data comes from
+    (`design.segment_button`), for the same kind of decision: one of a few,
+    exactly one at a time, and the rest of the row depends on it. A drop-down
+    hides the alternative until it is opened, which is the wrong shape for a
+    choice whose whole point is that there IS one.
+
+    Read like a combo box by the rest of the form: `currentText` is the pressed
+    option, and `onChanged` is told the new one.
+    """
+
+    def __init__(self, options, selected, help_texts=None):
+        self.container = qt.QWidget()
+        row = qt.QHBoxLayout(self.container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(design.SPACING_XS)
+        self.buttons = {}
+        self._callbacks = []
+        self._selected = selected
+        for option in options:
+            button = design.segment_button(option)
+            # Each segment says what IT means -- AREG shows the folder tree
+            # each layout expects -- rather than the row repeating one text.
+            # Preformatted: a tree is its indentation, which a plain tooltip
+            # collapses.
+            explained = _help_for(help_texts, option)
+            if explained:
+                button.setToolTip(preformatted_text(explained))
+            button.connect("clicked()", self._picker(option))
+            self.buttons[option] = button
+            # Equal stretch: options of equal standing, across the whole row.
+            row.addWidget(button, 1)
+        self._show()
+
+    @property
+    def currentText(self) -> str:
+        return self._selected
+
+    def onChanged(self, callback) -> None:
+        self._callbacks.append(callback)
+
+    def _picker(self, option):
+        """A closure rather than `functools.partial`: see
+        FileOrFolderInput._sourcePicker."""
+        def picked():
+            self._choose(option)
+        return picked
+
+    def _choose(self, option) -> None:
+        changed = option != self._selected
+        self._selected = option
+        # Re-pressed even when unchanged: a click on the pressed segment
+        # un-checks a checkable button, and one option is always chosen.
+        self._show()
+        if changed:
+            for callback in list(self._callbacks):
+                callback(option)
+
+    def _show(self) -> None:
+        for option, button in self.buttons.items():
+            button.setChecked(option == self._selected)
+
+    # -- the slice of the QWidget API build()/base_widget use on a field ----
+
+    def setProperty(self, name, value) -> None:
+        self.container.setProperty(name, value)
+
+    def setToolTip(self, _text) -> None:
+        """Deliberately nothing, as for MultiChoiceGroup: Qt hands a container's
+        tooltip to every child without one, and each segment carries its own.
+        The description goes on the row's label (see `build`)."""
+
+
 def _make_choice_widget(name: str, spec: dict):
     """A `"choice"` argument: one option among `choices`, whose single true
     entry is the server's declared default."""
     choices = _choices(name, spec)
     options = list(choices)
+    if spec.get("ui") == SEGMENTED_UI and len(options) > 1:
+        selected = [option for option, on in choices.items() if on]
+        return SegmentedChoice(options, selected[0] if selected else options[0],
+                               help_texts=spec.get("option_help"))
 
     widget = qt.QComboBox()
     widget.addItems(options)
@@ -2789,6 +2913,8 @@ def _read_widget(widget):
         return int(round(value)) if widget.decimals == 0 else value
     if isinstance(widget, qt.QCheckBox):
         return widget.isChecked()
+    if isinstance(widget, SegmentedChoice):
+        return widget.currentText
     if isinstance(widget, qt.QComboBox):
         # The selected option's name for a "choice" argument, sent in clear.
         # "" while a server-side list hasn't been loaded (or is empty) — which
@@ -2890,6 +3016,8 @@ def connect_changed(widget, callback) -> None:
         widget.valueChanged.connect(callback)
     elif isinstance(widget, qt.QCheckBox):
         widget.toggled.connect(callback)
+    elif isinstance(widget, SegmentedChoice):
+        widget.onChanged(callback)
     elif isinstance(widget, qt.QComboBox):
         widget.currentTextChanged.connect(callback)
     elif isinstance(widget, (qt.QSpinBox, qt.QDoubleSpinBox)):
