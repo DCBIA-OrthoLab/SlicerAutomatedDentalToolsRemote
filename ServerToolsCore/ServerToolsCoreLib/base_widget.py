@@ -1715,6 +1715,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         The directory name is the server's (`runner.INTERMEDIATE_DIRNAME`), and
         this side cannot import it: written down, and pinned by a test naming
         the same string.
+
+        Any FOLDER of the path counts, not only the first: a tool that sorts
+        its chain's outputs by patient returns them under
+        `<patient>/intermediate/<NN>_<tool>/`. The file's own name never does,
+        so a scan merely called `intermediate_scan` is still a result.
         """
         if not self._producedRoot:
             return False
@@ -1722,8 +1727,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             relative = os.path.relpath(path, self._producedRoot)
         except ValueError:  # different drive on Windows; not ours then
             return False
-        first = relative.replace("\\", "/").split("/")[0]
-        return first == _INTERMEDIATE_DIRNAME
+        folders = relative.replace("\\", "/").split("/")[:-1]
+        if folders[:1] == [".."]:
+            return False  # outside the output folder: not the server's layout
+        return _INTERMEDIATE_DIRNAME in folders
 
     def _suggestOutputFolder(self) -> None:
         """Fill the output folder in, so Apply works on a panel nobody set up.
