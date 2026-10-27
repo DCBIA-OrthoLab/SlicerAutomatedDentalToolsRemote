@@ -136,9 +136,20 @@ class IntermediateResultsTest(unittest.TestCase):
 
         self.assertEqual(_util.loaded, [("markups", "/out/Pat_0002_lm_Or.mrk.json")])
 
-    def test_a_directory_merely_named_like_a_result_is_not_confused_for_one(self):
-        """Only the first component under the output folder counts, so a
-        patient folder deeper down is still loaded."""
+    def test_what_the_chain_produced_for_one_patient_is_left_on_disk(self):
+        """A tool that sorts its chain's outputs by patient files them one
+        level down, under the patient's own folder."""
+        self.panel._producedFiles = [
+            "/out/Pat_0002/Pat_0002_lm_Or.mrk.json",
+            "/out/Pat_0002/intermediate/01_ALI_CBCT/Pat_0002_lm_Pred.mrk.json",
+        ]
+        self.panel._loadResults()
+
+        self.assertEqual(_util.loaded, [("markups", "/out/Pat_0002/Pat_0002_lm_Or.mrk.json")])
+
+    def test_a_file_merely_named_like_the_folder_is_not_confused_for_one(self):
+        """Only folders count, so a result whose own name starts with the
+        word is still loaded."""
         self.panel._producedFiles = ["/out/patient/intermediate_scan.mrk.json"]
         self.panel._loadResults()
 
