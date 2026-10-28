@@ -193,15 +193,15 @@ class RealShapesTest(unittest.TestCase):
 
     def test_role_folders_do_not_make_two_files_look_co_located(self):
         # Stripping `CBCT/` and `Landmarks/` from the KEY must not also claim
-        # the points were written beside the scan. They were not, and whether
-        # they share its frame is unknown.
+        # the points were written beside the scan. They were not: they are
+        # NAMED after it, which is what the view says.
         with tempfile.TemporaryDirectory() as root:
             tree(root, ["d/CBCT/p1_scan.nii.gz", "d/Landmarks/p1_scan_lm_Pred.mrk.json"])
             case = index.build([("folder", os.path.join(root, "d"))])[0]
             views = [v for v in case.views(acquisition="folder") if v.overlays]
             self.assertEqual(len(views), 1)
             self.assertEqual(views[0].anchor.name, "p1_scan.nii.gz")
-            self.assertEqual(views[0].basis, index.BASIS_ACQUISITION)
+            self.assertEqual(views[0].basis, index.BASIS_NAMED)
 
     def test_a_role_folder_of_several_words_is_still_one(self):
         # The hosted AREG fixture files one subject under `CBCT Landmarks/`,
@@ -308,7 +308,8 @@ class ViewTest(unittest.TestCase):
 
     def test_ali_landmarks_fall_back_to_the_acquisition_and_say_so(self):
         # ALI writes no scan at all, so its points can only be drawn on the
-        # input -- where they are right, measured at 0.000 mm against ITK.
+        # input -- where they are right, measured at 0.000 mm against ITK. The
+        # file is named after that input, which is the ground the view gives.
         with tempfile.TemporaryDirectory() as root:
             case = self._case(
                 root,
@@ -319,7 +320,17 @@ class ViewTest(unittest.TestCase):
             with_points = [view for view in views if view.overlays]
             self.assertEqual(len(with_points), 1)
             self.assertEqual(with_points[0].anchor.name, "P1_scan.nii.gz")
-            self.assertEqual(with_points[0].basis, index.BASIS_ACQUISITION)
+            self.assertEqual(with_points[0].basis, index.BASIS_NAMED)
+
+    def test_landmarks_named_after_no_scan_still_fall_back_to_the_acquisition(self):
+        with tempfile.TemporaryDirectory() as root:
+            case = self._case(
+                root,
+                ["scans/P1_scan.nii.gz", "out/P1_lm_Pred.mrk.json"],
+                [("Scans", "scans"), ("Results", "out")],
+            )
+            with_points = [view for view in case.views(acquisition="Scans") if view.overlays]
+            self.assertEqual([view.basis for view in with_points], [index.BASIS_ACQUISITION])
 
     def test_landmarks_with_no_scan_anywhere_are_offered_without_one(self):
         with tempfile.TemporaryDirectory() as root:
@@ -331,6 +342,108 @@ class ViewTest(unittest.TestCase):
             self.assertIsNone(views[0].anchor)
             self.assertEqual(views[0].basis, index.BASIS_NONE)
 
+
+
+class PauseTest(unittest.TestCase):
+    """What a stopped AREG IOS-to-CBCT run hands back, tree for tree: each step
+    under `intermediate/<NN>_<Tool>/` holds only what it wrote, so a patient's
+    mesh and the landmarks placed on it are two steps apart."""
+
+    ALI_IOS = [
+        "intermediate/02_Crown_Seg/ios_case_T2_L_Seg.vtk",
+        "intermediate/02_Crown_Seg/ios_case_T2_U_Seg.vtk",
+        "intermediate/02_Crown_Seg/run_report.json",
+        "intermediate/03_ALI_IOS/ios_case_T2_L_Seg_lm_Pred.mrk.json",
+        "intermediate/03_ALI_IOS/ios_case_T2_U_Seg_lm_Pred.mrk.json",
+        "intermediate/03_ALI_IOS/run_report.json",
+    ]
+    ALI_CBCT = [
+        "intermediate/01_ASO/cbct_case_T2_Or.nii.gz",
+        "intermediate/01_ASO/cbct_case_T2_lm_Or.mrk.json",
+        "intermediate/01_ASO/cbct_case_T2_Or_transform.tfm",
+        "intermediate/01_ASO/intermediate/01_ALI_CBCT/cbct_case_T2_lm_Pred.mrk.json",
+        "intermediate/04_ALI_CBCT/cbct_case_T2_Or_lm_Pred.mrk.json",
+    ]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _views(self, case):
+        return {(view.anchor.name if view.anchor else None): (
+            sorted(a.name for a in view.overlays), view.basis)
+            for view in case.views(acquisition="Results") if view.overlays}
+
+    def test_each_arch_is_one_case_with_its_landmarks_on_its_mesh(self):
+        tree(self.root, self.ALI_IOS)
+        cases = index.build([("Results", self.root)])
+        self.assertEqual([case.key for case in cases], ["ios_case_T2_L", "ios_case_T2_U"])
+        self.assertEqual(self._views(cases[1]), {
+            "ios_case_T2_U_Seg.vtk": (["ios_case_T2_U_Seg_lm_Pred.mrk.json"], index.BASIS_NAMED)})
+        # One view, not an empty one with the points behind a second.
+        self.assertEqual(len(cases[1].views(acquisition="Results")), 1)
+
+    def test_each_landmark_file_lands_on_the_scan_it_was_placed_on(self):
+        """ALI_CBCT inside ASO placed its points on the CBCT the caller sent;
+        the later ALI_CBCT on ASO's oriented one. Drawing either on the other
+        is wrong by a rotation, and the names are what tell them apart."""
+        tree(self.root, self.ALI_CBCT)
+        scans = os.path.join(self.root, "inputs")
+        tree(scans, ["T2/cbct_case_T2.nii.gz"])
+        cases = index.build([("Results", os.path.join(self.root, "intermediate"))],
+                            supports=[scans])
+        (case,) = cases
+        self.assertEqual(self._views(case), {
+            "cbct_case_T2_Or.nii.gz": (
+                ["cbct_case_T2_Or_lm_Pred.mrk.json", "cbct_case_T2_lm_Or.mrk.json"],
+                index.BASIS_COLOCATED_AND_NAMED),
+            "cbct_case_T2.nii.gz": (["cbct_case_T2_lm_Pred.mrk.json"], index.BASIS_NAMED),
+        })
+        # ALI_CBCT's points and ASO's are in ONE view of the oriented scan.
+        self.assertEqual(len(case.views(acquisition="Results")), 2)
+
+    def test_the_first_cbct_pause_has_its_points_on_the_input(self):
+        """At `ASO/ALI_CBCT` only the landmarks exist: their scan is the input,
+        which only the module that sent it has."""
+        tree(self.root, ["out/intermediate/01_ASO/intermediate/01_ALI_CBCT/cbct_case_T2_lm_Pred.mrk.json"])
+        tree(self.root, ["inputs/cbct_case_T2.nii.gz"])
+        (case,) = index.build([("Results", os.path.join(self.root, "out"))],
+                              supports=[os.path.join(self.root, "inputs", "cbct_case_T2.nii.gz")])
+        self.assertEqual(self._views(case), {
+            "cbct_case_T2.nii.gz": (["cbct_case_T2_lm_Pred.mrk.json"], index.BASIS_NAMED)})
+
+    def test_inputs_never_make_a_case_or_an_empty_view(self):
+        tree(self.root, self.ALI_IOS)
+        tree(self.root, ["inputs/ios_case_T2_U.vtk", "inputs/P009_T2_U.vtk"])
+        cases = index.build([("Results", self.root + "/intermediate")],
+                            supports=[os.path.join(self.root, "inputs")])
+        self.assertEqual([case.key for case in cases], ["ios_case_T2_L", "ios_case_T2_U"])
+        anchors = [view.anchor.name for view in cases[1].views(acquisition="Results")]
+        self.assertNotIn("ios_case_T2_U.vtk", anchors)
+
+    def test_a_stop_shows_what_its_last_step_wrote(self):
+        """At ALI_CBCT, the oriented CBCT carries ALI_CBCT's points only: ASO's
+        own, and the arches of the steps before, are earlier steps' work."""
+        tree(self.root, self.ALI_IOS + self.ALI_CBCT)
+        (case,) = index.build([("Results", self.root)],
+                              focus=os.path.join(self.root, "intermediate", "04_ALI_CBCT"))
+        self.assertEqual(self._views(case), {
+            "cbct_case_T2_Or.nii.gz": (["cbct_case_T2_Or_lm_Pred.mrk.json"], index.BASIS_NAMED)})
+
+    def test_a_step_that_wrote_meshes_shows_the_meshes_alone(self):
+        tree(self.root, self.ALI_IOS + self.ALI_CBCT)
+        cases = index.build([("Results", self.root)],
+                            focus=os.path.join(self.root, "intermediate", "02_Crown_Seg"))
+        self.assertEqual([case.key for case in cases], ["ios_case_T2_L", "ios_case_T2_U"])
+        self.assertEqual(self._views(cases[1]), {})
+
+    def test_a_numbered_patient_folder_outside_intermediate_stays_a_patient(self):
+        tree(self.root, ["01_P1/scan.nii.gz", "02_P2/scan.nii.gz"])
+        keys = [case.key for case in index.build([("Results", self.root)])]
+        self.assertEqual(len(keys), 2)
 
 if __name__ == "__main__":
     unittest.main()

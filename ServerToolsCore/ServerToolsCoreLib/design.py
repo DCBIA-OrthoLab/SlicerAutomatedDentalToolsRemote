@@ -837,6 +837,36 @@ def table_frame():
     return frame
 
 
+def review_banner():
+    """The band at the top of a viewer a paused run opened: `(frame, title, detail)`.
+
+    A tinted block with the primary colour down its edge, because it states
+    the one thing a reader must not miss -- a run is stopped and waits on
+    them -- and a muted hint line saying it was read past. The title names the
+    tool and the step; the detail says what to do.
+    """
+    t = tokens()
+    frame = qt.QFrame()
+    frame.setObjectName("reviewBanner")
+    frame.setStyleSheet(
+        f"#reviewBanner {{ background-color: {t['ACCENT_SOFT']};"
+        f" border-left: 4px solid {t['PRIMARY']}; border-radius: {RADIUS_LG}px;"
+        f" padding: {SPACING_SM}px; }}"
+    )
+    column = qt.QVBoxLayout(frame)
+    column.setContentsMargins(SPACING_SM, SPACING_SM, SPACING_SM, SPACING_SM)
+    column.setSpacing(SPACING_XS)
+    title = _plain_label("")
+    title.setWordWrap(True)
+    title.setStyleSheet(f"color: {t['TEXT']}; font-weight: 700;")
+    detail = _plain_label("")
+    detail.setWordWrap(True)
+    detail.setStyleSheet(f"color: {t['TEXT']};")
+    column.addWidget(title)
+    column.addWidget(detail)
+    return frame, title, detail
+
+
 def hint_label(text: str) -> qt.QLabel:
     """A wrapped, muted, smaller label for explanatory text a module writes
     itself -- VISU's origin line, Slicer Cloud's per-tool summary.

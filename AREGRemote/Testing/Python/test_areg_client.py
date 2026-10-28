@@ -706,6 +706,19 @@ class ResultDiscoveryTest(unittest.TestCase):
             {"P1_CB_Reg.nii.gz": "volume", "P1_T2_Upper_Reg.vtk": "model"},
         )
 
+    def test_landmarks_are_markups(self):
+        """An IOS-to-CBCT run with "Moved landmarks" ticked hands back each
+        mesh's moved points and the CBCT's; both belong in the scene beside
+        the meshes, or there is nothing to judge the fit by."""
+        self._write("P1/P1_L_Reg_lm.mrk.json")
+        self._write("P1/P1_CBCT_lm_Pred.mrk.json")
+        self._write("P1/P1_U_Reg_lm.json")
+        self.assertEqual(
+            self._found(),
+            {"P1_L_Reg_lm.mrk.json": "markups", "P1_CBCT_lm_Pred.mrk.json": "markups",
+             "P1_U_Reg_lm.json": "markups"},
+        )
+
     def test_transforms_and_the_report_are_not_loaded(self):
         """Loading a .tfm into the scene applies nothing and explains nothing;
         AREG_report.json is not a scene object either. Both must stay out, or
