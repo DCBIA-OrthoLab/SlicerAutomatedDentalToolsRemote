@@ -1199,6 +1199,32 @@ class HandingBackTest(unittest.TestCase):
         self.assertEqual(len(self.widget.cases), 1)
         self.assertEqual(len(SCENE), 1, "the caller's folder was indexed but not shown")
 
+    def test_continue_ends_the_review(self):
+        """The banner said which run was paused, and where, after that run
+        had resumed and finished."""
+        folder = self.folder(["results/p1_scan.nii.gz"])
+        self.widget.openForReview(folder, self.handed.append,
+                                  origin={"tool": "AREG", "step": "ALI_CBCT", "run": 1},
+                                  focus=folder)
+        self.assertTrue(self.widget.originBanner.isVisible())
+
+        self.widget.onContinue()
+
+        self.assertEqual(len(self.handed), 1)
+        self.assertFalse(self.widget.originBanner.isVisible())
+        self.assertFalse(self.widget.earlierStepsCheck.isVisible())
+        self.assertFalse(self.widget.continueButton.isVisible())
+        self.assertTrue(self.widget.folderBox.isVisible())
+
+    def test_ending_another_folder_s_review_leaves_this_one(self):
+        folder = self.folder(["results/p1_scan.nii.gz"])
+        self.widget.openForReview(folder, self.handed.append,
+                                  origin={"tool": "AREG", "step": "ALI_CBCT", "run": 1})
+        self.assertFalse(self.widget.endReview(os.path.join(folder, "elsewhere")))
+        self.assertTrue(self.widget.originBanner.isVisible())
+        self.assertTrue(self.widget.endReview(folder))
+        self.assertFalse(self.widget.originBanner.isVisible())
+
     def test_continue_reports_what_the_reader_flagged(self):
         folder = self.folder([f"results/p{n}_scan.nii.gz" for n in (1, 2)])
         self.widget.openForReview(folder, self.handed.append)

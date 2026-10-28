@@ -836,6 +836,22 @@ class PanelTest(unittest.TestCase):
         self.assertIn("paused after ALI_CBCT", reason)
         self.assertIn("VISU", reason)
 
+    def test_cancelling_a_paused_run_takes_its_review_down(self):
+        """The banner kept saying the run was paused after it was withdrawn,
+        with a Continue that would have resumed nothing."""
+        closed = []
+        self.panel._closeReviewer = closed.append
+        run, _job = self._stopped()
+        self.panel._cancelRun(run)
+        self.assertEqual(closed, [self.reviewer.opened[-1]])
+
+    def test_cancelling_a_run_that_never_paused_leaves_the_reviewer_alone(self):
+        closed = []
+        self.panel._closeReviewer = closed.append
+        self._apply()
+        self.panel._cancelRun(self.panel._runs[0])
+        self.assertEqual(closed, [])
+
     def test_a_running_run_refuses_a_second_apply_too(self):
         self._apply()
         self.assertIn("still in progress", self.panel._busyReason())

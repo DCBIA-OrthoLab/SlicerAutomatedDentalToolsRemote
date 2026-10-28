@@ -279,6 +279,9 @@ class _Run:
         # and `running` answers True for it so the admission pump never starts
         # a second copy of a run that is merely waiting on a person.
         self.paused = None
+        # The folder the reviewer was opened on at the last stop, so
+        # withdrawing a paused run can take its review down with it.
+        self.review_folder = None
         # What the checkpoint folder held the moment it was unpacked, as
         # {relative path: digest}. It is what "the reader changed this file"
         # is measured against -- see `_corrections` -- and it is replaced on
@@ -2129,11 +2132,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         unplugged or gone.
         """
         server_ids = [run.run_id for run in runs if run.started_at is not None]
+        reviews = [run.review_folder for run in runs
+                   if run.paused is not None and getattr(run, "review_folder", None)]
         for run in runs:
             run.cancel()
             if run in self._runs:
                 self._runs.remove(run)
         self._requestServerCancel(server_ids)
+        for folder in reviews:
+            self._closeReviewer(folder)
         if not self._runs:
             self._stopElapsedTimer()
         # Admission frees up as these leave, exactly as when one finishes: a
@@ -2369,6 +2376,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._syncRunControls()
 
         folder = self._unpackCheckpoint(run, checkpoint)
+        run.review_folder = folder
         opened = folder is not None and self._openReviewer(
             folder, lambda reviewed, run=run: self._onReviewed(run, reviewed),
             rewind=self._previousCorrectableStep(run),
@@ -2461,6 +2469,21 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except Exception as exc:  # noqa: BLE001 - reported, never raised
             logger.warning("Could not open '%s' on %s: %s",
                            self.REVIEW_MODULE, folder, exc)
+            return False
+
+    def _closeReviewer(self, folder: str) -> bool:
+        """End the review of `folder` in the review module, when it has one.
+
+        A run withdrawn while it waited left the reviewer saying it was
+        paused, with a Continue that would resume nothing.
+        """
+        try:
+            module = importlib.import_module(self.REVIEW_MODULE)
+            end = getattr(module, "end_review", None)
+            return bool(end(folder)) if end is not None else False
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            logger.warning("Could not end the review of %s in '%s': %s",
+                           folder, self.REVIEW_MODULE, exc)
             return False
 
     def _focusFolder(self, folder: str, checkpoint):

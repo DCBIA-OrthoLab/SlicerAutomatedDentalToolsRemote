@@ -514,6 +514,21 @@ def open_for_review(folder: str, on_continue, rewind=None, origin=None, inputs=(
     return True
 
 
+def end_review(folder: str) -> bool:
+    """Take the pause banner down if VISU is still showing `folder`'s review.
+
+    For a run withdrawn while it waited: its Continue would resume nothing,
+    and the banner went on saying a run was paused after the run was gone.
+    False when the panel cannot be reached or shows another review.
+    """
+    try:
+        widget = slicer.modules.visu.widgetRepresentation().self()
+    except Exception as exc:  # noqa: BLE001 - a banner is never worth a failure
+        logger.warning("Could not reach VISU to end the review of %s: %s", folder, exc)
+        return False
+    return widget.endReview(folder)
+
+
 class VISUWidget(ScriptedLoadableModuleWidget):
 
     def __init__(self, parent=None):
@@ -1688,6 +1703,27 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             # files the first resume produced on screen.
             self.onIndex()
 
+    def endReview(self, folder=None) -> bool:
+        """Leave review mode: no banner, no Continue, the folder picker back.
+
+        Called when the reader hands the review back and when the run is
+        withdrawn. Without it the banner kept saying which run was paused and
+        where after that run had resumed and finished. `folder` limits it to
+        that review, so withdrawing one run never ends another's.
+        """
+        reviewing = self._supports[0] if getattr(self, "_supports", None) else None
+        if folder is not None and folder != reviewing:
+            return False
+        self._continue = None
+        self._rewind = None
+        self._supports = (None, ())
+        self._focus = (None, None)
+        self._showOrigin(None)
+        self.earlierStepsCheck.setVisible(False)
+        self.continueButton.setVisible(False)
+        self._syncHandBack()
+        return True
+
     def reviewed(self, rewind_to=None) -> dict:
         """What this pass produced, for whoever asked for it.
 
@@ -1733,8 +1769,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # Read BEFORE the button is hidden and while the flags are still
         # standing: this is the one place the two destinations part company.
         backwards = self._rewind.get("slot") if self._goingBack() else None
-        self.continueButton.setVisible(False)
-        handler(self.reviewed(rewind_to=backwards))
+        reviewed = self.reviewed(rewind_to=backwards)
+        # Before the handler: a run that stops again reopens the review from
+        # inside it, and that new review must not be ended behind it.
+        self.endReview()
+        handler(reviewed)
 
     # -- leaving -----------------------------------------------------------
 
