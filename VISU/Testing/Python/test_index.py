@@ -373,3 +373,106 @@ class FolderTest(unittest.TestCase):
     def test_a_folder_with_no_levels_offers_one_entry(self):
         cases = self._cases(["d/p1_scan.nii.gz", "d/p2_scan.nii.gz"])
         self.assertEqual(index.folders_in(cases), [index.AT_THE_TOP])
+
+
+def write_scene(path, files, space="the CBCT"):
+    import json
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"version": 1, "space": space, "files": [
+            {"path": name, "kind": kind, "role": "r"} for name, kind in files]}, handle)
+
+
+class SceneTest(unittest.TestCase):
+    """A tool that says which files make one scene is believed, not guessed."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+
+    def test_an_ios_cbct_patient_is_one_case_and_one_view(self):
+        """AREG IOS to CBCT: the meshes, their moved landmarks and the CBCT
+        share no stem, and were split across cases by the name rules."""
+        tree(self.root, [
+            "case_042/scan_T2.nii.gz", "case_042/scan_T2_lm_Pred.mrk.json",
+            "case_042/case_042_U_Reg.vtk", "case_042/case_042_U_Reg_lm.mrk.json",
+            "case_042/case_042_L_Reg.vtk", "case_042/case_042_U_Reg_transform.tfm",
+        ])
+        write_scene(os.path.join(self.root, "case_042", "scene.json"), [
+            ("scan_T2.nii.gz", "volume"), ("scan_T2_lm_Pred.mrk.json", "markups"),
+            ("case_042_U_Reg.vtk", "model"), ("case_042_U_Reg_lm.mrk.json", "markups"),
+            ("case_042_L_Reg.vtk", "model"), ("case_042_U_Reg_transform.tfm", "transform"),
+        ])
+        cases = index.build([("Results", self.root)])
+        self.assertEqual([case.key for case in cases], ["case_042"])
+        views = cases[0].views()
+        self.assertEqual(len(views), 1)
+        self.assertEqual(views[0].anchor.name, "scan_T2.nii.gz")
+        self.assertEqual(views[0].basis, index.BASIS_SCENE)
+        self.assertEqual(sorted(a.name for a in views[0].overlays), [
+            "case_042_L_Reg.vtk", "case_042_U_Reg.vtk", "case_042_U_Reg_lm.mrk.json",
+            "scan_T2_lm_Pred.mrk.json"])
+
+    def test_a_scene_without_a_scan_anchors_on_its_first_surface(self):
+        tree(self.root, ["P1_T1_Upper_Reg.vtk", "P1_T2_Upper_Reg.vtk"])
+        write_scene(os.path.join(self.root, "P1_Reg_scene.json"), [
+            ("P1_T1_Upper_Reg.vtk", "model"), ("P1_T2_Upper_Reg.vtk", "model")])
+        cases = index.build([("Results", self.root)])
+        self.assertEqual([case.key for case in cases], ["P1_Reg"])
+        (view,) = cases[0].views()
+        self.assertEqual(view.anchor.name, "P1_T1_Upper_Reg.vtk")
+        self.assertEqual([a.name for a in view.overlays], ["P1_T2_Upper_Reg.vtk"])
+
+    def test_two_scenes_in_one_folder_are_two_cases(self):
+        tree(self.root, ["CB/P1_CB_Reg.nii.gz", "CB/P2_CB_Reg.nii.gz"])
+        for patient in ("P1", "P2"):
+            write_scene(os.path.join(self.root, "CB", f"{patient}_CB_Reg_scene.json"),
+                        [(f"{patient}_CB_Reg.nii.gz", "volume")])
+        cases = index.build([("Results", self.root)])
+        self.assertEqual([case.key for case in cases],
+                         [os.path.join("CB", "P1_CB_Reg"), os.path.join("CB", "P2_CB_Reg")])
+
+    def test_files_no_scene_names_are_still_indexed_the_old_way(self):
+        tree(self.root, ["P1/scan.nii.gz", "P1/other_lm_Pred.mrk.json"])
+        write_scene(os.path.join(self.root, "P1", "scene.json"), [("scan.nii.gz", "volume")])
+        keys = [case.key for case in index.build([("Results", self.root)])]
+        self.assertIn("P1", keys)
+        self.assertTrue(any(key.endswith("other") for key in keys), keys)
+
+    def test_an_unreadable_scene_falls_back_to_the_name_rules(self):
+        tree(self.root, ["P1_scan.nii.gz", "P1_scan_lm_Pred.mrk.json"])
+        with open(os.path.join(self.root, "scene.json"), "w") as handle:
+            handle.write("{not json")
+        cases = index.build([("Results", self.root)])
+        self.assertEqual([case.key for case in cases], ["P1"])
+        self.assertFalse(cases[0].scene)
+
+    def test_a_scene_cannot_reach_outside_the_folder_opened(self):
+        results = os.path.join(self.root, "results")
+        tree(self.root, ["results/inside/scan.nii.gz", "secret.nii.gz"])
+        write_scene(os.path.join(results, "inside", "scene.json"), [
+            ("scan.nii.gz", "volume"), ("../../secret.nii.gz", "volume")])
+        case = [c for c in index.build([("Results", results)]) if c.scene][0]
+        self.assertEqual([a.name for a in case.artifacts], ["scan.nii.gz"])
+
+    def test_a_scene_may_point_at_a_file_its_result_shares(self):
+        """AREG CBCT lists the oriented T1 every region was registered onto,
+        kept once under T1_Oriented/ rather than copied into each region."""
+        tree(self.root, ["T1_Oriented/P1_T1_Or.nii.gz", "T1_Oriented/P1_T1_lm_Or.mrk.json",
+                         "CB/P1_CB_Reg.nii.gz"])
+        write_scene(os.path.join(self.root, "CB", "P1_CB_Reg_scene.json"), [
+            ("../T1_Oriented/P1_T1_Or.nii.gz", "volume"),
+            ("../T1_Oriented/P1_T1_lm_Or.mrk.json", "markups"),
+            ("P1_CB_Reg.nii.gz", "volume")])
+        case = [c for c in index.build([("Results", self.root)]) if c.scene][0]
+        (view,) = case.views()
+        self.assertEqual(view.anchor.name, "P1_T1_Or.nii.gz")
+        self.assertEqual(sorted(a.name for a in view.overlays),
+                         ["P1_CB_Reg.nii.gz", "P1_T1_lm_Or.mrk.json"])
+
+    def test_a_listed_file_that_is_missing_is_skipped(self):
+        tree(self.root, ["P1/scan.nii.gz"])
+        write_scene(os.path.join(self.root, "P1", "scene.json"), [
+            ("scan.nii.gz", "volume"), ("gone.vtk", "model")])
+        (case,) = index.build([("Results", self.root)])
+        self.assertEqual([a.name for a in case.artifacts], ["scan.nii.gz"])

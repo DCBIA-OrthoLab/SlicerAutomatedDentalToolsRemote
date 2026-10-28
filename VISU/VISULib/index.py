@@ -32,6 +32,7 @@ publishes a manifest naming its own outputs, which is the only source that can
 be right by construction rather than by guessing at names.
 """
 
+import json
 import os
 import re
 
@@ -353,16 +354,30 @@ class View:
 BASIS_COLOCATED = "written beside this scan"
 BASIS_ACQUISITION = "assumed: the acquisition"
 BASIS_NONE = "no scan found"
+BASIS_SCENE = "declared by the tool: one space"
+
+# The file a tool writes to say which of its outputs make one scene, in one
+# space (SADT-VISOR, `sadt_areg_common/scene.py`). `scene.json` when a folder
+# holds one scene, `<prefix>_scene.json` when several patients share it.
+SCENE_SUFFIX = "scene.json"
+# What a scene's `kind` may be, in this module's vocabulary. A transform is
+# claimed by its scene like the rest, but is not something to draw.
+_SCENE_KINDS = {"volume": VOLUME, "labelmap": LABELMAP, "model": MODEL,
+                "markups": MARKUPS, "transform": TRANSFORM}
 
 
 class Case:
     """Everything one patient has, across every folder that was indexed."""
 
-    __slots__ = ("key", "artifacts")
+    __slots__ = ("key", "artifacts", "scene")
 
-    def __init__(self, key: str):
+    def __init__(self, key: str, scene: bool = False):
         self.key = key
         self.artifacts = []
+        # True when a tool's `scene.json` named these files: they share one
+        # space by the tool's own word, so the case is ONE view and nothing
+        # is guessed from names or folders.
+        self.scene = scene
 
     @property
     def patient(self) -> str:
@@ -392,6 +407,8 @@ class Case:
         say so -- that is `ALI`, whose landmark file is alone in its directory
         and belongs to the scan the caller sent.
         """
+        if self.scene:
+            return [self._scene_view()]
         anchors = self.of_kind(*ANCHOR_KINDS)
         overlays = self.of_kind(*OVERLAY_KINDS)
         # A labelmap and a surface are both: they anchor a view of their own and
@@ -435,6 +452,76 @@ class Case:
             # so they do not share a view.
             views.append(View(fallback.anchor, homeless, BASIS_ACQUISITION))
         return views
+
+
+    def _scene_view(self):
+        """Everything on one anchor: the scan when there is one, else the
+        first surface. The tool said they share a space, so they share a view."""
+        volumes = self.of_kind(VOLUME)
+        anchors = volumes or self.of_kind(*ANCHOR_KINDS)
+        anchor = anchors[0] if anchors else None
+        overlays = [artifact for artifact in self.artifacts if artifact is not anchor]
+        return View(anchor, overlays, BASIS_SCENE if anchor else BASIS_NONE)
+
+
+def is_scene(filename: str) -> bool:
+    return filename == SCENE_SUFFIX or filename.endswith("_" + SCENE_SUFFIX)
+
+
+def read_scene(path: str):
+    """`[(relative path, kind)]` for the files a scene lists, or
+    None when the file is not a scene this module can read -- the folder is
+    then indexed as if it held none.
+
+    A path may climb (`../`): a CBCT run lists the oriented T1 every region
+    shares, one folder up. Whether it stays inside the folder that was opened
+    is `_scene_cases`' check, the one place that knows that folder."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        listed = payload["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    found = []
+    for entry in listed if isinstance(listed, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        relative, kind = entry.get("path"), _SCENE_KINDS.get(entry.get("kind"))
+        if isinstance(relative, str) and kind and not os.path.isabs(relative):
+            found.append((relative.replace("\\", "/"), kind))
+    return found
+
+
+def _scene_cases(directory: str, filenames, label: str, relative: str, raw: str,
+                 root: str) -> tuple:
+    """The cases this directory's scene files declare, and the file names
+    they claimed. A listed file that is missing is skipped, not invented, and
+    so is one outside `root`: a scene may point at a sibling folder of the
+    same result, never at the rest of the disk."""
+    cases, claimed = [], set()
+    inside = os.path.join(os.path.realpath(root), "")
+    for filename in sorted(name for name in filenames if is_scene(name)):
+        listed = read_scene(os.path.join(directory, filename))
+        if listed is None:
+            continue
+        claimed.add(filename)
+        prefix = filename[: -len(SCENE_SUFFIX)].rstrip("_")
+        patient = prefix or (os.path.basename(relative) if relative else os.path.basename(root))
+        parent = relative if prefix else os.path.dirname(relative)
+        key = os.path.join(parent, patient) if parent else patient
+        case = Case(key, scene=True)
+        for path, kind in listed:
+            full = os.path.normpath(os.path.join(directory, *path.split("/")))
+            if not os.path.realpath(full).startswith(inside):
+                continue
+            if "/" not in path:
+                claimed.add(path)
+            if kind == TRANSFORM or not os.path.isfile(full):
+                continue
+            case.artifacts.append(Artifact(full, kind, label, relative, patient, origin=raw))
+        if case.artifacts:
+            cases.append(case)
+    return cases, claimed
 
 
 # What a case with no directory of its own is called in the picker. A blank
@@ -505,8 +592,15 @@ def build(sources, drop_timepoint: bool = False) -> list:
                 )
                 continue
 
+            declared_cases, claimed = _scene_cases(
+                directory, filenames, label, relative, raw, root)
+            for case in declared_cases:
+                cases[case.key] = case
+
             for filename in sorted(filenames):
                 if filename.startswith(_HIDDEN_PREFIX) or _is_report(filename):
+                    continue
+                if filename in claimed:
                     continue
                 full = os.path.join(directory, filename)
                 kind = kind_of(filename, full)
@@ -541,10 +635,11 @@ def _absorb_orphans(cases: dict) -> dict:
     in the middle that no suffix table can strip, so loose in a folder it
     indexed as a patient called `p1_Pred_MAND` instead of joining `p1`.
     """
-    anchored = sorted(key for key, case in cases.items() if case.of_kind(*GEOMETRY_KINDS))
+    anchored = sorted(key for key, case in cases.items()
+                      if case.of_kind(*GEOMETRY_KINDS) and not case.scene)
     for key in sorted(cases):
         case = cases[key]
-        if case.of_kind(*GEOMETRY_KINDS):
+        if case.of_kind(*GEOMETRY_KINDS) or case.scene:
             continue
         directory = os.path.dirname(key)
         # Longest first: with `P1` and `P1_T1` both anchored, an overlay of
