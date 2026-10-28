@@ -319,13 +319,39 @@ class QFormLayout(QLayout):
         QLayout.__init__(self, parent)
         self.rows = []  # [(label, widget)]
 
-    def addRow(self, label, widget):
+    def addRow(self, label, widget=None):
+        """`addRow(widget)` alone is a row spanning both columns, recorded
+        with no label."""
+        if widget is None:
+            label, widget = None, label
         self.rows.append((label, widget))
         self.widgets.append(widget)
 
     def insertRow(self, row, label, widget):
         self.rows.insert(row, (label, widget))
         self.widgets.insert(row, widget)
+
+
+class QFont:
+    DemiBold = 63
+
+    def __init__(self, *_args):
+        pass
+
+    def setWeight(self, _weight):
+        pass
+
+
+class QFontMetrics:
+    """Seven pixels a character: enough to tell a short label from one past
+    the cap, which is all the tests ask of it."""
+
+    def __init__(self, _font):
+        pass
+
+    @staticmethod
+    def horizontalAdvance(text):
+        return 7 * len(text)
 
 
 class QLabel(QObject):
@@ -345,6 +371,16 @@ class QLabel(QObject):
         between showing a whole path and showing a fragment of one, which is
         the reason that line replaced the path field."""
         self.wordWrap = bool(wrap)
+
+    def setMaximumWidth(self, width):
+        self.maximumWidth = width
+
+    def setMinimumWidth(self, width):
+        self.minimumWidth = width
+
+    @property
+    def font(self):
+        return QFont()
 
 
 class QPushButton(QObject):

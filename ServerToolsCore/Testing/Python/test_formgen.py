@@ -2092,6 +2092,76 @@ class MultiChoiceTooltipTest(unittest.TestCase):
 
 
 
+class RowLabelTest(unittest.TestCase):
+    """A long label wraps instead of widening its section's label column,
+    which pushed every field of the section to the side."""
+
+    def test_a_long_label_wraps_at_the_cap(self):
+        label = design.fit_row_label(design.section_title("x" * 80))
+        self.assertTrue(label.wordWrap)
+        self.assertEqual(label.maximumWidth, design.ROW_LABEL_MAX_WIDTH)
+        self.assertEqual(label.minimumWidth, design.ROW_LABEL_MAX_WIDTH)
+
+    def test_a_label_that_fits_is_left_alone(self):
+        """Given a measured minimum, "Mode *" wrapped as soon as the
+        measurement fell a pixel short of what Qt drew."""
+        label = design.fit_row_label(design.required_label("Mode"))
+        self.assertFalse(getattr(label, "wordWrap", False))
+        self.assertFalse(hasattr(label, "minimumWidth"))
+
+
+class ToggleRowTest(unittest.TestCase):
+    """A yes/no spans the row, box first: in the label column its words set
+    the column's width and pushed every field of the section aside."""
+
+    def test_a_bool_takes_the_whole_row(self):
+        layout = qt.QFormLayout()
+        formgen.build({
+            "mode": {"type": "str"},
+            "orient": {"type": "bool", "label": "Standardise the CBCT orientation"},
+        }, layout)
+        (text_label, _field), (no_label, row) = layout.rows
+        self.assertIsNotNone(text_label)
+        self.assertIsNone(no_label)
+        placed = row.layout.widgets
+        self.assertIsInstance(placed[0], qt.QCheckBox)
+        self.assertEqual(placed[1].text, "Standardise the CBCT orientation")
+
+
+class NoteTest(unittest.TestCase):
+    """`note` -- one line above a multichoice's options, always visible.
+
+    AREG's "Extra outputs" read as three bare words; what comes back whatever
+    is ticked, and in which space the rest lands, was only in a tooltip.
+    """
+
+    CHOICES = {"T1 scan": False}
+    NOTE = "Saved beside the result, in the same 3D space."
+
+    def _notes(self, group):
+        return [widget.text for widget in group._column.widgets
+                if isinstance(widget, qt.QLabel)]
+
+    def test_the_note_is_drawn_above_the_options(self):
+        group = formgen.MultiChoiceGroup(self.CHOICES, note=self.NOTE)
+        self.assertEqual(self._notes(group), [self.NOTE])
+        self.assertIsInstance(group._column.widgets[0], qt.QLabel)
+
+    def test_a_redraw_for_another_mode_keeps_it_once(self):
+        group = formgen.MultiChoiceGroup(self.CHOICES, note=self.NOTE)
+        group.rebuild({"CBCT scan": False, "Moved landmarks": False})
+        self.assertEqual(self._notes(group), [self.NOTE])
+
+    def test_without_one_nothing_is_added(self):
+        group = formgen.MultiChoiceGroup(self.CHOICES)
+        self.assertEqual(self._notes(group), [])
+
+    def test_the_schema_key_reaches_the_group(self):
+        widget = formgen._make_widget("outputs", {
+            "type": "multichoice", "choices": self.CHOICES, "note": self.NOTE})
+        self.assertEqual(self._notes(widget), [self.NOTE])
+
+
 class OptionHelpTest(unittest.TestCase):
     """`option_help` -- one line per option, on the option itself.
 
