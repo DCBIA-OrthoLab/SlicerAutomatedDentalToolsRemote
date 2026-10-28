@@ -121,6 +121,16 @@ _EXTRA_LEVELS = (re.compile(r"^crownseg_input(_.+)?$"),)
 # folder gives it up to a greedy match.
 _DECLARING_LEVEL = re.compile(r"^(?P<base>.+)_.+_SegOut$")
 
+# What a stopped run hands back: `intermediate/<NN>_<Tool>/`, one level per
+# step, nested when a step was itself a chain (`01_ASO/intermediate/01_ALI_CBCT/`).
+# Each step writes what it made and nothing else -- Crown_Seg the meshes,
+# ALI_IOS the landmarks on them -- so a patient is spread across the steps,
+# and filed by step it was two cases that each lacked half of it. Both levels
+# name a step, never a patient, and go. A numbered level only counts right
+# under `intermediate/`, which keeps a patient folder called `01_P1` a patient.
+_STEPS_LEVEL = "intermediate"
+_STEP_LEVEL = re.compile(r"^\d+_[A-Za-z0-9][A-Za-z0-9_]*$")
+
 # A folder that says what KIND of file is in it rather than whose it is:
 # `<root>/CBCT/` beside `<root>/Landmarks/` is one cohort filed by role, not
 # two cohorts. Stripped from the case key so a patient's scan and its points
@@ -257,10 +267,11 @@ def _is_report(filename: str) -> bool:
     return filename in _REPORT_NAMES or filename.endswith(_REPORT_SUFFIX)
 
 
-def _normalise_directory(relative: str) -> tuple:
+def _normalise_directory(relative: str, root_name: str = "") -> tuple:
     """`(directory, declared patient or "")` for a walked path.
 
-    Three kinds of level are removed. A ROLE level (`CBCT/`, `Landmarks/`,
+    Four kinds of level are removed. The steps of a stopped run
+    (`intermediate/01_ASO/`) say which step wrote a file, not whose it is. A ROLE level (`CBCT/`, `Landmarks/`,
     `IOS Landmarks/`) is how a reader files a cohort, not who is in it. The other two a tool
     invented, and they are removed for opposite reasons. Crown_Seg's carries nothing -- dropping it is what stops
     a mesh it segmented from indexing two directories away from one it passed
@@ -270,7 +281,14 @@ def _normalise_directory(relative: str) -> tuple:
     """
     parts = [part for part in relative.split(os.sep) if part not in ("", ".")]
     kept, declared = [], ""
-    for part in parts:
+    for position, part in enumerate(parts):
+        if part == _STEPS_LEVEL:
+            continue
+        # The level above the first is the folder that was opened, so opening
+        # `intermediate/` itself still reads its children as steps.
+        above = parts[position - 1] if position else root_name
+        if above == _STEPS_LEVEL and _STEP_LEVEL.match(part):
+            continue
         if is_role_level(part):
             continue
         if any(pattern.match(part) for pattern in _EXTRA_LEVELS):
@@ -355,6 +373,14 @@ BASIS_COLOCATED = "written beside this scan"
 BASIS_ACQUISITION = "assumed: the acquisition"
 BASIS_NONE = "no scan found"
 BASIS_SCENE = "declared by the tool: one space"
+BASIS_NAMED = "named after this scan"
+BASIS_COLOCATED_AND_NAMED = "written beside or named after this scan"
+
+# The label of a source a caller adds only so landmarks with no scan of their
+# own have one to land on -- a run's inputs, beside what one of its steps
+# wrote. Such a source never makes a case and never shows a scan nothing is
+# drawn on: what the reader opened is the result, not the inputs.
+SUPPORT = "inputs"
 
 # The file a tool writes to say which of its outputs make one scene, in one
 # space (SADT-VISOR, `sadt_areg_common/scene.py`). `scene.json` when a folder
@@ -409,7 +435,9 @@ class Case:
         """
         if self.scene:
             return [self._scene_view()]
-        anchors = self.of_kind(*ANCHOR_KINDS)
+        every_anchor = self.of_kind(*ANCHOR_KINDS)
+        # A support scan anchors only what is NAMED after it, below.
+        anchors = [artifact for artifact in every_anchor if artifact.source != SUPPORT]
         overlays = self.of_kind(*OVERLAY_KINDS)
         # A labelmap and a surface are both: they anchor a view of their own and
         # they are drawn on the greyscale scan beside them. Only a scan is never
@@ -431,7 +459,9 @@ class Case:
         homeless = [
             artifact for artifact in overlays
             if id(artifact) not in placed and id(artifact) not in anchored
+            and artifact.source != SUPPORT
         ]
+        homeless = self._place_by_name(homeless, every_anchor, views)
         if not homeless:
             return views
 
@@ -453,6 +483,48 @@ class Case:
             views.append(View(fallback.anchor, homeless, BASIS_ACQUISITION))
         return views
 
+
+    @staticmethod
+    def _place_by_name(homeless, anchors, views) -> list:
+        """Put each overlay on the scan its file is named after; return the rest.
+
+        A step that writes only landmarks names them after the file it read:
+        ALI_IOS turns `P1_U_Seg.vtk`, which Crown_Seg wrote one step earlier,
+        into `P1_U_Seg_lm_Pred.mrk.json`. The longest stem that prefixes the
+        overlay's on a token boundary is that file, and it settles what no
+        folder can when a stopped run spreads a patient across its steps:
+        `P1_U.vtk`, the mesh the caller sent, is a prefix too and is the wrong
+        frame for nothing here, but it is not what the points were placed on.
+
+        Added to the anchor's own view when it has one: a name is as good a
+        ground as a shared folder, and the view's basis says which held.
+        """
+        stems = [(split_extension(anchor.name)[0], anchor) for anchor in anchors]
+        named = {}
+        rest = []
+        for overlay in homeless:
+            stem = split_extension(overlay.name)[0]
+            match = max(((anchor_stem, anchor) for anchor_stem, anchor in stems
+                         if anchor is not overlay and is_token_prefix(anchor_stem, stem)),
+                        key=lambda pair: len(pair[0]), default=None)
+            if match is None:
+                rest.append(overlay)
+            else:
+                named.setdefault(id(match[1]), (match[1], []))[1].append(overlay)
+        for anchor, placed in named.values():
+            same = next((view for view in views if view.anchor is anchor), None)
+            if same is None:
+                views.append(View(anchor, placed, BASIS_NAMED))
+                continue
+            # One scan, one view. A name says the points were placed on this
+            # very file, which is as strong as having been written beside it,
+            # so they are drawn together: at an AREG IOS-to-CBCT stop the
+            # oriented CBCT carries ASO's points beside it and ALI_CBCT's
+            # named after it, and split in two the landmarks the registration
+            # uses sat in a third view nobody opened.
+            same.basis = BASIS_NAMED if not same.overlays else BASIS_COLOCATED_AND_NAMED
+            same.overlays.extend(placed)
+        return rest
 
     def _scene_view(self):
         """Everything on one anchor: the scan when there is one, else the
@@ -555,8 +627,18 @@ def folders_in(cases) -> list:
     return found
 
 
-def build(sources, drop_timepoint: bool = False) -> list:
+def build(sources, drop_timepoint: bool = False, supports=(), focus=None) -> list:
     """Index `sources` -- `[(label, root), ...]` -- into cases, ordered by key.
+
+    `supports` are paths -- folders or single files -- indexed under the
+    SUPPORT label: a case is never made of them alone, and their scans only
+    carry overlays named after them (see `Case._place_by_name`).
+
+    `focus` is a directory inside one of the sources: what a stopped run's
+    LAST step wrote. Everything outside it becomes support too, so a stop
+    shows what that step changed -- the meshes Crown_Seg made, the points
+    ALI_CBCT placed -- on whatever earlier file it needs to be seen on, and
+    not every file every earlier step left behind.
 
     `label` is how the reader named the folder ("Scans", "Results"); it travels
     with every artifact so a view can say which folder its anchor came from,
@@ -564,7 +646,11 @@ def build(sources, drop_timepoint: bool = False) -> list:
     its own.
     """
     cases = {}
-    for label, root in sources:
+    every = list(sources) + [(SUPPORT, path) for path in supports or ()]
+    for label, root in every:
+        if root and os.path.isfile(root):
+            _index_file(cases, label, root, drop_timepoint)
+            continue
         if not root or not os.path.isdir(root):
             continue
         for directory, subdirectories, filenames in os.walk(root):
@@ -573,7 +659,8 @@ def build(sources, drop_timepoint: bool = False) -> list:
             )
             raw = os.path.relpath(directory, root)
             raw = "" if raw == "." else raw
-            relative, declared = _normalise_directory(raw)
+            relative, declared = _normalise_directory(
+                raw, os.path.basename(os.path.normpath(root)))
 
             if any(name.lower().endswith(_DICOM_EXTENSION) for name in filenames):
                 # One volume, named after the folder, filed with its PARENT --
@@ -617,7 +704,27 @@ def build(sources, drop_timepoint: bool = False) -> list:
                     Artifact(full, kind, label, relative, patient, origin=raw)
                 )
 
+    if focus:
+        inside = os.path.join(os.path.realpath(focus), "")
+        for case in cases.values():
+            for artifact in case.artifacts:
+                if not os.path.realpath(artifact.path).startswith(inside):
+                    artifact.source = SUPPORT
+    cases = {key: case for key, case in cases.items()
+             if any(artifact.source != SUPPORT for artifact in case.artifacts)}
     return [cases[key] for key in sorted(_absorb_orphans(cases))]
+
+
+def _index_file(cases: dict, label: str, path: str, drop_timepoint: bool) -> None:
+    """One file given as a source of its own: a scan a run was sent alone.
+    Its folder is not walked, because nothing else in it was chosen."""
+    filename = os.path.basename(path)
+    kind = kind_of(filename, path)
+    if kind is None:
+        return
+    patient = patient_stem(filename, drop_timepoint=drop_timepoint)
+    case = cases.setdefault(patient, Case(patient))
+    case.artifacts.append(Artifact(path, kind, label, "", patient, origin=""))
 
 
 def _absorb_orphans(cases: dict) -> dict:

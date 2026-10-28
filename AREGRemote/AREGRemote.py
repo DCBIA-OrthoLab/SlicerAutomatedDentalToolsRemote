@@ -132,6 +132,13 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         ("*.gipl", "volume"),
         ("*.vtk", "model"),
         ("*.vtp", "model"),
+        # The landmarks a run hands back when "Moved landmarks" is ticked:
+        # each mesh's, moved with it, and the CBCT's it was registered on.
+        # Without these the scene showed the meshes on the CBCT and no point
+        # to judge the fit by. `*_lm.json` is the moved copy of a plain-JSON
+        # input; AREG_report.json matches neither pattern.
+        ("*.mrk.json", "markups"),
+        ("*_lm.json", "markups"),
     )
 
     def __init__(self, parent=None):

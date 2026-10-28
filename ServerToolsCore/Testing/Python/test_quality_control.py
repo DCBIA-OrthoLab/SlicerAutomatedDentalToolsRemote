@@ -313,7 +313,10 @@ class _Reviewer:
         self.available = True
         self.on_continue = None
 
-    def open_for_review(self, folder, on_continue, rewind=None, origin=None):
+    def open_for_review(self, folder, on_continue, rewind=None, origin=None, inputs=(),
+                        focus=None):
+        self.inputs = tuple(inputs)
+        self.focus = focus
         self.rewind = rewind
         self.origin = dict(origin or {})
         self.opened.append(folder)
@@ -672,6 +675,22 @@ class PanelTest(unittest.TestCase):
 
         self.assertEqual(sorted(self._collectResume()["corrections"]), ["02_ASO"])
 
+    def test_a_correction_is_sent_from_the_tree_the_server_sends_today(self):
+        """The archive puts each step under `intermediate/`. Looked for at the
+        top only, no step was found and a moved landmark never went back:
+        the run carried on with the point the reader had just corrected."""
+        self._stopped(produced=("01_ASO", "04_ALI_CBCT"), steps={
+            os.path.join("intermediate", "01_ASO"): {"p1_Or.nii.gz": "volume"},
+            os.path.join("intermediate", "04_ALI_CBCT"): {"p1_Or_lm_Pred.mrk.json": "{}"}})
+        self._edit(os.path.join("intermediate", "04_ALI_CBCT", "p1_Or_lm_Pred.mrk.json"),
+                   "corrected")
+
+        self.reviewer.press_continue(written={"p1"})
+
+        sent = self._collectResume()["corrections"]
+        self.assertEqual(sorted(sent), ["04_ALI_CBCT"])
+        self.assertEqual(self._members(sent["04_ALI_CBCT"]), ["p1_Or_lm_Pred.mrk.json"])
+
     def test_a_second_checkpoint_diffs_against_what_the_first_resume_produced(self):
         """One folder is reviewed twice, and the baseline is retaken on every
         unpack. Keeping the first one would resend every correction of round
@@ -793,6 +812,56 @@ class PanelTest(unittest.TestCase):
             RunCheckpoint(run_id="r", stopped_after="ALI_CBCT",
                           produced=(), path=None)).startswith("run_03"))
 
+    def test_the_reviewer_is_pointed_at_the_step_that_stopped(self):
+        """A stop shows what its last step wrote first: Crown_Seg's meshes,
+        not the CBCT ASO oriented two steps earlier."""
+        self._stopped(produced=("01_ASO", "02_Crown_Seg"), stopped_after="Crown_Seg", steps={
+            os.path.join("intermediate", "01_ASO"): {"p1_Or.nii.gz": "volume"},
+            os.path.join("intermediate", "02_Crown_Seg"): {"p1_U_Seg.vtk": "mesh"}})
+        self.assertTrue(self.reviewer.focus.endswith(
+            os.path.join("intermediate", "02_Crown_Seg")))
+
+    def test_a_stop_inside_a_callee_points_at_the_callee_s_folder(self):
+        self._stopped(produced=("01_ASO",), stopped_after="ASO/ALI_CBCT", steps={
+            os.path.join("intermediate", "01_ASO", "intermediate", "01_ALI_CBCT"):
+                {"p1_lm_Pred.mrk.json": "{}"}})
+        self.assertTrue(self.reviewer.focus.endswith(
+            os.path.join("01_ASO", "intermediate", "01_ALI_CBCT")))
+
+    def test_a_paused_run_refuses_a_second_apply_and_says_why(self):
+        """One run at a time: a second Apply on top of a run waiting for review
+        started work on data nobody had finished checking."""
+        self._stopped()
+        reason = self.panel._busyReason()
+        self.assertIn("paused after ALI_CBCT", reason)
+        self.assertIn("VISU", reason)
+
+    def test_a_running_run_refuses_a_second_apply_too(self):
+        self._apply()
+        self.assertIn("still in progress", self.panel._busyReason())
+
+    def test_an_idle_panel_has_nothing_to_refuse(self):
+        self.assertEqual(self.panel._busyReason(), "")
+
+    def test_the_way_back_to_the_review_shows_only_while_a_run_is_paused(self):
+        self.panel.reviewButton = qt.QPushButton("Review")
+        self.panel._syncRunControls()
+        self.assertFalse(self.panel.reviewButton.isVisible())
+        self._stopped()
+        self.panel._syncRunControls()
+        self.assertTrue(self.panel.reviewButton.isVisible())
+
+    def test_the_reviewer_is_handed_the_run_s_own_inputs(self):
+        """A step that writes only landmarks leaves its scan behind: ALI_IOS
+        hands back points on a mesh the caller sent. The panel is the one
+        side that has it, so it passes what exists on this machine along."""
+        scan = os.path.join(self.work, "p1.nii.gz")
+        open(scan, "w").close()
+        self.panel.prepareInputFiles = lambda workspace: {
+            "t1": scan, "t2": os.path.join(self.work, "gone.nii.gz")}
+        self._stopped()
+        self.assertEqual(self.reviewer.inputs, (scan,))
+
     def test_a_nested_stop_name_is_one_folder_rather_than_two(self):
         # `ASO/ALI_CBCT` is a legal stop name. Nested, one stop's folder would
         # sit INSIDE another's, which is the mixing this exists to prevent.
@@ -903,7 +972,7 @@ class ReviewModuleTest(unittest.TestCase):
         self.assertEqual(len(entry), 1,
                          "the review module must offer open_for_review()")
         self.assertEqual([arg.arg for arg in entry[0].args.args],
-                         ["folder", "on_continue", "rewind", "origin"],
+                         ["folder", "on_continue", "rewind", "origin", "inputs", "focus"],
                          "the seam is a signature, so a change to it is a "
                          "change to what both modules agree on")
 

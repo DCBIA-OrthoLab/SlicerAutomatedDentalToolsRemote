@@ -58,6 +58,8 @@ _INTERMEDIATE_DIRNAME = "intermediate"
 # checkpoint holds a copy of a step's output for a reader to correct, and the
 # run is still going to write its real answer beside it.
 _CHECKPOINT_DIRNAME = "quality_control"
+# Where a stopped run's archive puts each step's output: `intermediate/<NN>_<Tool>/`.
+_STEPS_DIRNAME = "intermediate"
 
 # How a level reads in the console. Fixed English words rather than translated
 # ones: they are a column a reader scans for "ERROR", and a fixed width keeps
@@ -260,6 +262,11 @@ class _Run:
         # observable at all.
         self.cohort = cohort
         self.cohort_index = cohort_index
+        # The files and folders the reader chose for this run, as they are on
+        # this machine. A stop hands them to the reviewer beside what the steps
+        # wrote: a step that writes only landmarks leaves its scan behind, and
+        # this side is the only one that has it.
+        self.inputs = ()
         # Entries in this batch -- top-level ones, so a per-patient folder
         # counts as the one patient it is. 0 for a run that was not divided.
         self.scan_count = scan_count
@@ -436,6 +443,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._formWidget = None  # the schema-driven part, replaced wholesale on a rebuild
         self.applyButton = None
         self.cancelButton = None
+        self.reviewButton = None
         self.uiWidget = None
         self._progressLabel = None
         self._progressBar = None  # determinate, and only while a tool reports a fraction
@@ -484,6 +492,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyButton = design.primary_button(_("Apply"))
         self.cancelButton = design.danger_button(_("Cancel"))
         self.cancelButton.setVisible(False)
+        # Shown only while a run of this panel waits at a checkpoint: the
+        # reader may have wandered off VISU, and this is the way back to the
+        # one place the run can go on from.
+        self.reviewButton = design.secondary_button(_("Review the paused run in VISU"))
+        self.reviewButton.setVisible(False)
+        self.reviewButton.connect("clicked()", self._goToReview)
+        rootLayout.addWidget(self.reviewButton)
         rootLayout.addWidget(self.applyButton)
         rootLayout.addWidget(self.cancelButton)
 
@@ -1763,7 +1778,42 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         if self.resultKind == "save_as":
             canApply = canApply and bool(self._outputFolderWidget and self._outputFolderWidget.currentPath)
-        self.applyButton.enabled = canApply
+        # One run at a time per panel. A second Apply used to queue behind the
+        # first, and with a run paused for review that read as the panel
+        # having ignored the reader -- or started a run on half-checked data.
+        # Disabled rather than hidden, and the tooltip says why: a greyed
+        # button with no reason is a question nobody can answer.
+        busy = self._busyReason()
+        self.applyButton.enabled = canApply and not busy
+        self.applyButton.toolTip = busy
+
+    def _pausedRun(self):
+        """The first run of this panel waiting at a checkpoint, or None."""
+        return next((run for run in self._runs if run.paused is not None), None)
+
+    def _busyReason(self) -> str:
+        """Why Apply is refused right now, in a sentence; "" when it is not.
+
+        The batches of one cohort are one Apply, so they never block each
+        other: they are already running when this is asked.
+        """
+        if not getattr(self, "_runs", None):
+            return ""
+        paused = self._pausedRun()
+        if paused is not None:
+            step = getattr(paused.paused, "stopped_after", "") or _("a checkpoint")
+            return _("Run {number} is paused after {step} and waits for your review "
+                     "in VISU. Continue or cancel it before starting another.").format(
+                         number=paused.number, step=step)
+        return _("Run {number} is still in progress. Wait for it to finish, or "
+                 "cancel it, before starting another.").format(number=self._runs[0].number)
+
+    def _goToReview(self) -> None:
+        """Back to VISU, where the paused run is waiting."""
+        try:
+            slicer.util.selectModule(self.REVIEW_MODULE)
+        except Exception as exc:  # noqa: BLE001 - a missing module is reported, not raised
+            logger.warning("Could not open %s: %s", self.REVIEW_MODULE, exc)
 
     def _inputReady(self) -> bool:
         arguments = (self._schema or {}).get("arguments", {})
@@ -1889,6 +1939,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                             path=outputDir, error=exc)))
                     return
             self._runsStarted += 1
+            inputs = self._reviewInputs(files)
             self._runs.append(_Run(
                 self._runsStarted,
                 self._runLabel(files, index, cohort.total if cohort else None),
@@ -1898,6 +1949,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 cohort=cohort, cohort_index=index if cohort else None,
                 scan_count=sizes[index - 1] if sizes else 0,
             ))
+            self._runs[-1].inputs = inputs
         self._pumpRuns()
 
     def _cohortBatches(self) -> list:
@@ -2322,7 +2374,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             rewind=self._previousCorrectableStep(run),
             origin={"tool": self.TOOL_NAME,
                     "step": checkpoint.stopped_after or "",
-                    "run": run.number})
+                    "run": run.number},
+            inputs=run.inputs,
+            focus=self._focusFolder(folder, checkpoint) if folder else None)
         if opened:
             return
         # Nothing to look at, or nowhere to look at it. The run is PAUSED on
@@ -2382,7 +2436,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return None
 
     def _openReviewer(self, folder: str, on_continue, rewind=None,
-                      origin=None) -> bool:
+                      origin=None, inputs=(), focus=None) -> bool:
         """Hand `folder` to the review module. False when it could not be.
 
         `rewind` is where flagged patients may be sent BACK to, or None. The
@@ -2392,15 +2446,63 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         `origin` says which run is waiting, so the reviewer can tell a reader
         who pressed Apply in a tool panel and found themselves somewhere else
         where they are.
+
+        `inputs` are the run's own files, which the reviewer uses only to put
+        landmarks that came back alone on the scan they were placed on.
+
+        `focus` is the folder of the step that stopped, which the reviewer
+        shows first (see `_focusFolder`).
         """
         try:
             module = importlib.import_module(self.REVIEW_MODULE)
             return bool(module.open_for_review(folder, on_continue, rewind=rewind,
-                                               origin=origin))
+                                               origin=origin, inputs=tuple(inputs or ()),
+                                               focus=focus))
         except Exception as exc:  # noqa: BLE001 - reported, never raised
             logger.warning("Could not open '%s' on %s: %s",
                            self.REVIEW_MODULE, folder, exc)
             return False
+
+    def _focusFolder(self, folder: str, checkpoint):
+        """Where the step this run stopped after wrote its files, or None.
+
+        The last of `produced` is the step that just ran. A stop INSIDE a
+        callee (`ASO/ALI_CBCT`) is one level further: the callee's own
+        `intermediate/<NN>_ALI_CBCT/` under the outer step's folder.
+        """
+        produced = list(getattr(checkpoint, "produced", None) or ())
+        if not produced:
+            return None
+        path = self._checkpointSlots(folder, produced).get(produced[-1])
+        if not path:
+            return None
+        stop = getattr(checkpoint, "stopped_after", "") or ""
+        if "/" in stop:
+            inner = stop.rsplit("/", 1)[-1]
+            nested = os.path.join(path, _STEPS_DIRNAME)
+            if os.path.isdir(nested):
+                for name in sorted(os.listdir(nested)):
+                    if name.partition("_")[2] == inner:
+                        return os.path.join(nested, name)
+        return path
+
+    def _reviewInputs(self, files: dict) -> tuple:
+        """Where this run's inputs are on this machine, for a reviewer.
+
+        The folder or file the reader picked, not the archive built from it:
+        unpacking a cohort a second time to show one patient's scan is gigabytes
+        for nothing. A scene node has no file of its own, so its export -- in
+        `files`, alive as long as the run -- stands for it.
+        """
+        found = []
+        widgets = getattr(self, "_inputWidgets", None) or {}
+        for arg_name, path in (files or {}).items():
+            widget = widgets.get(arg_name)
+            chosen = getattr(widget, "currentPath", "") or ""
+            location = chosen if chosen and os.path.exists(chosen) else path
+            if location and os.path.exists(location) and location not in found:
+                found.append(location)
+        return tuple(found)
 
     @staticmethod
     def _checkpointFolderName(run, checkpoint) -> str:
@@ -2491,11 +2593,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         `01_X/` and `02_Y/`. Answered here rather than anywhere the difference
         could be read as a step that went missing.
         """
-        slots = {name: os.path.join(folder, name) for name in produced
-                 if os.path.isdir(os.path.join(folder, name))}
-        if not slots and len(produced) == 1 and os.path.isdir(folder):
+        # The steps sit under `intermediate/` in what the server sends today
+        # (`intermediate/01_ASO/`, `intermediate/02_Crown_Seg/`), and at the
+        # top in what it sent before. Looked for in both: found in neither,
+        # every correction a reader made was silently dropped, and the run
+        # carried on with the landmark they had just moved.
+        for root in (os.path.join(folder, _STEPS_DIRNAME), folder):
+            slots = {name: os.path.join(root, name) for name in produced
+                     if os.path.isdir(os.path.join(root, name))}
+            if slots:
+                return slots
+        if len(produced) == 1 and os.path.isdir(folder):
             return {produced[0]: folder}
-        return slots
+        return {}
 
     def _onReviewed(self, run, reviewed) -> None:
         """The reader pressed Continue, or asked to go back a step.
@@ -2695,7 +2805,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._checkCanApply()
 
     def _syncRunControls(self) -> None:
-        """Apply stays visible whatever is running: clicking it queues another."""
+        """Apply stays visible whatever is running, disabled while a run is in
+        flight (see `_checkCanApply`)."""
+        review = getattr(self, "reviewButton", None)
+        if review is not None:
+            review.setVisible(self._pausedRun() is not None)
         if self.cancelButton is not None:
             self.cancelButton.setVisible(bool(self._runs))
             if self._cohortInFlight() is not None:
@@ -2705,6 +2819,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     _("Cancel all") if len(self._runs) > 1 else _("Cancel"))
         if self.applyButton is not None:
             self.applyButton.setVisible(True)
+            # A run starting or ending changes whether Apply may be pressed.
+            # Only on a built panel: the form it reads is made by setup().
+            if hasattr(self, "_argWidgets"):
+                self._checkCanApply()
         self._rebuildRunCancelButtons()
         self._renderProgress()
 
