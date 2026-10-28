@@ -971,7 +971,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # other argument; `layout` is the fallback for one that names none.
         section = formgen.section_of(spec)
         target = self._sectionLayouts.get(section, layout)
-        labelWidget = (
+        labelWidget = design.fit_row_label(
             design.required_label(label)
             if formgen.may_be_required(spec)
             else design.optional_label(label)

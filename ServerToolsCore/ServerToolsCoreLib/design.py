@@ -723,6 +723,46 @@ def section_title(text: str, explained: bool = False) -> qt.QLabel:
     return label
 
 
+# The widest a form row's label may grow before it wraps. A QFormLayout's
+# label column is as wide as its longest label, so one long label ("Standardise
+# the CBCT orientation (Frankfurt)") pushed every field of its section to the
+# side, file pickers included. Wrapped, it costs a second line instead.
+ROW_LABEL_MAX_WIDTH = 350
+
+
+def fit_row_label(label: qt.QLabel) -> qt.QLabel:
+    """Let a row's label wrap past ROW_LABEL_MAX_WIDTH instead of widening
+    the column. Returns the label, so a call site can wrap it inline.
+
+    Only a label longer than the cap is made to wrap. A wrapping QLabel is
+    laid out at whatever width it is given, and a form gives a label its own
+    minimum rather than the column's width; setting that minimum from a
+    measurement put "Mode *" on two lines the moment the measurement fell a
+    pixel short. A label that fits is left alone, and Qt sizes it from the
+    font it actually draws with.
+    """
+    if _one_line_width(label) > ROW_LABEL_MAX_WIDTH:
+        label.setWordWrap(True)
+        label.setMinimumWidth(ROW_LABEL_MAX_WIDTH)
+        label.setMaximumWidth(ROW_LABEL_MAX_WIDTH)
+    return label
+
+
+def _one_line_width(label: qt.QLabel) -> int:
+    """The label's text on one line, at the weight `section_title` draws it
+    in. Measured on a demi-bold copy of the font, because the stylesheet's
+    weight is not on `label.font` until the label is shown.
+
+    0 when the binding cannot measure: a label left on one line is the
+    panel as it was, never a broken one."""
+    try:
+        font = qt.QFont(label.font)
+        font.setWeight(qt.QFont.DemiBold)
+        return qt.QFontMetrics(font).horizontalAdvance(label.text)
+    except (AttributeError, TypeError):
+        return 0
+
+
 def required_label(text: str, explained: bool = False) -> qt.QLabel:
     return section_title(f"{text} *", explained)
 

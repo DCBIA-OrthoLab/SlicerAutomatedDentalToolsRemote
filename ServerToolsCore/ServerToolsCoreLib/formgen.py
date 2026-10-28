@@ -522,7 +522,7 @@ class MultiChoiceGroup:
     """
 
     def __init__(self, choices: dict, layout=None, groups=None,
-                 option_help=None, select_all=False):
+                 option_help=None, select_all=False, note=None):
         self.container = qt.QWidget()
         column = qt.QVBoxLayout(self.container)
         # Air UNDER the block, and only under it. A multichoice is several rows
@@ -545,6 +545,10 @@ class MultiChoiceGroup:
         # {option: one line saying what it is}. The tool's own words, published
         # per option because a catalogue of CODES cannot be read off its labels.
         self._option_help = option_help
+        # One line the tool wants read before anything is ticked, drawn above
+        # the options on every redraw. Not the description, which stays the
+        # label's tooltip; see `ArgSpec.note` on the server.
+        self._note = note
         self._draw(choices, groups)
 
     def _draw(self, choices: dict, groups) -> None:
@@ -552,6 +556,9 @@ class MultiChoiceGroup:
         group whose option set changed with the mode."""
         layout = self._layout
         column = self._column
+        if self._note:
+            # A plain-text label: schema text is never rendered as HTML.
+            column.addWidget(design.hint_label(self._note))
         self._add_select_all(column, choices)
         builder = _LAYOUT_BUILDERS.get(layout)
         if builder is None:
@@ -2422,8 +2429,9 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
         # all. It is also where a reader looks for it: the label is what names
         # the thing they do not understand.
         explained = bool(description)
-        label = (design.required_label(text, explained) if spec.get("required")
-                 else design.section_title(text, explained))
+        label = design.fit_row_label(
+            design.required_label(text, explained) if spec.get("required")
+            else design.section_title(text, explained))
         if description:
             label.setToolTip(plain_text(description))
         target = (sections or {}).get(section_of(spec), layout)
@@ -2436,6 +2444,13 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
             position = heads.get(id(target), 0)
             target.insertRow(position, label, field)
             heads[id(target)] = position + 1
+        elif isinstance(widget, qt.QCheckBox) and hasattr(target, "addRow"):
+            # A yes/no is read as one sentence, box first, across the whole
+            # row. In the label column its words set the column's width, and
+            # "Standardise the CBCT orientation (Frankfurt)" pushed every
+            # field of the section to the side to put a box under them.
+            field = _toggle_row(widget, label)
+            target.addRow(field)
         elif hasattr(target, "addRow"):
             target.addRow(label, field)
         else:
@@ -2466,6 +2481,22 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
         if rows is not None:
             rows[name] = (label, field)
     return widgets
+
+
+def _toggle_row(box, label):
+    """A check box with its label to its right, as one widget for a row that
+    spans the form. The label stays a QLabel, so it keeps its style and the
+    dotted rule that says it has a tooltip. It is not made clickable: PythonQt
+    refuses a Python attribute on a C++ object, so `mousePressEvent` cannot be
+    replaced, and an event filter for one label is more than it is worth."""
+    row = qt.QWidget()
+    line = qt.QHBoxLayout(row)
+    line.setContentsMargins(0, 0, 0, 0)
+    line.setSpacing(design.SPACING_SM)
+    line.addWidget(box)
+    line.addWidget(label)
+    line.addStretch(1)
+    return row
 
 
 def _make_widget(name: str, spec: dict):
@@ -2513,6 +2544,7 @@ def _make_widget(name: str, spec: dict):
             groups=spec.get("groups"),
             option_help=spec.get("option_help"),
             select_all=bool(spec.get("select_all")),
+            note=spec.get("note"),
         )
     if is_file_type(arg_type):
         return file_widget(spec)
