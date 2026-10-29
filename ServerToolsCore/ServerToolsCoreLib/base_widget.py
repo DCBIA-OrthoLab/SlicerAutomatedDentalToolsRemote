@@ -1385,7 +1385,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     extension = candidate
                     break
             return slicer_io.export_node(
-                node, workspace.file(f"{self.TOOL_NAME}_{arg_name}{extension}")
+                node, self._sceneUploadPath(workspace, arg_name, node, extension)
             )
         # Already satisfied by a MODEL the server hosts: nothing to upload,
         # collectArgs sends its name instead (see _serverSideSelections). A
@@ -1420,8 +1420,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             node = widget.currentNode()
             if node is None:
                 return None
-            return slicer_io.export_volume(node, workspace.file(f"{self.TOOL_NAME}_{arg_name}.nii.gz"))
+            return slicer_io.export_volume(
+                node, self._sceneUploadPath(workspace, arg_name, node, ".nii.gz"))
         return None
+
+    def _sceneUploadPath(self, workspace, arg_name: str, node, extension: str) -> str:
+        """Where a scene node is written before it is sent: under its own name.
+
+        The server reads the patient and the jaw off the file name -- AREG IOS
+        to CBCT pairs a surface with its CBCT by the patient's number and tells
+        an upper arch from a lower one by `U`/`L`. Written as `AREG_ios.vtk`,
+        a node picked from the scene carried neither, and the run stopped with
+        "no patient has both an intraoral scan and a CBCT". One folder per
+        argument, so two nodes sharing a name cannot overwrite each other.
+        """
+        name = slicer_io.upload_name(node.GetName(), extension) or f"{self.TOOL_NAME}_{arg_name}"
+        folder = workspace.file(arg_name)
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, name + extension)
 
     def _zipFolder(self, workspace: slicer_io.TempWorkspace, arg_name: str, folder: str,
                    entries=None) -> str:

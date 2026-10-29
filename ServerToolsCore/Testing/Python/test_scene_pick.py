@@ -25,7 +25,7 @@ sys.path.insert(0, _CORE)
 import test_hosted_test_files as fixtures  # noqa: F401,E402 - installs the stubs
 from test_hosted_test_files import _util  # noqa: E402
 
-from ServerToolsCoreLib import formgen  # noqa: E402
+from ServerToolsCoreLib import formgen, slicer_io  # noqa: E402
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase  # noqa: E402
 
 
@@ -217,18 +217,20 @@ class SceneExportTest(unittest.TestCase):
 
     def setUp(self):
         _util.saved = []
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_a_scan_is_written_as_a_scan(self):
         panel = self._panel(ALI, _Volume("Pat_0002"))
 
-        path = panel._prepareOneInputFile(self._Workspace("/tmp"), "input", "file_or_folder")
+        path = panel._prepareOneInputFile(self._Workspace(self.tmp), "input", "file_or_folder")
         self.assertTrue(path.endswith(".nii.gz"))
 
     def test_a_surface_is_written_as_a_surface(self):
         """Not `.nii.gz`: the tool could not read it."""
         panel = self._panel(ALI, _Model("L01_T2_L"))
 
-        path = panel._prepareOneInputFile(self._Workspace("/tmp"), "input", "file_or_folder")
+        path = panel._prepareOneInputFile(self._Workspace(self.tmp), "input", "file_or_folder")
         self.assertTrue(path.endswith(".vtk"))
 
     def test_it_is_written_only_when_the_run_starts(self):
@@ -237,8 +239,34 @@ class SceneExportTest(unittest.TestCase):
         panel = self._panel(ALI, _Model("L01_T2_L"))
         self.assertEqual(_util.saved, [])
 
-        panel._prepareOneInputFile(self._Workspace("/tmp"), "input", "file_or_folder")
+        panel._prepareOneInputFile(self._Workspace(self.tmp), "input", "file_or_folder")
         self.assertEqual(len(_util.saved), 1)
+
+    def test_a_node_is_sent_under_its_own_name(self):
+        """The server reads the patient and the jaw off the name: `AREG_ios.vtk`
+        carried neither, and IOS to CBCT could pair nothing."""
+        panel = self._panel(ALI, _Model("L01_T2_L"))
+
+        path = panel._prepareOneInputFile(self._Workspace(self.tmp), "input", "file_or_folder")
+        self.assertEqual(os.path.basename(path), "L01_T2_L.vtk")
+
+    def test_each_argument_gets_its_own_folder(self):
+        """Two nodes sharing a name, in two rows, must not overwrite each other."""
+        panel = self._panel(ALI, _Volume("Pat_0002"))
+
+        path = panel._prepareOneInputFile(self._Workspace(self.tmp), "input", "file_or_folder")
+        self.assertEqual(os.path.dirname(path), os.path.join(self.tmp, "input"))
+
+    def test_a_name_that_is_no_file_name_is_made_one(self):
+        self.assertEqual(slicer_io.upload_name("Pat 0002 (T1)", ".nii.gz"), "Pat_0002_T1")
+        self.assertEqual(slicer_io.upload_name("L01_T2_L.vtk", ".vtk"), "L01_T2_L")
+        self.assertEqual(slicer_io.upload_name("Pat_0002.nii.gz", ".nii.gz"), "Pat_0002")
+
+    def test_a_node_with_no_usable_name_falls_back_to_the_argument(self):
+        panel = self._panel(ALI, _Model("()"))
+
+        path = panel._prepareOneInputFile(self._Workspace(self.tmp), "input", "file_or_folder")
+        self.assertEqual(os.path.basename(path), "ALI_input.vtk")
 
 
 if __name__ == "__main__":
