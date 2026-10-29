@@ -1619,6 +1619,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             ))
             return
 
+        self._hideScene()
         failed = []
         opened = []
         for path, kind in found:
@@ -1692,6 +1693,41 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer_io.show_volume_rendering(node, self.VOLUME_RENDERING)
         except Exception as exc:  # noqa: BLE001 - never worth failing a run
             logger.warning("Could not render %s in 3D: %s", self.VOLUME_RENDERING, exc)
+
+    @staticmethod
+    def _hideScene() -> None:
+        """Hide everything already in the scene before the results go in.
+
+        The results landed on top of the inputs, the pauses' reviews and every
+        earlier run, so a finished run read as a cluttered scene where what it
+        had just produced was the hard part to find. Hidden, never removed:
+        each node is still in the Data module, one eye-click away.
+
+        Every display node of every displayable node is switched off -- a
+        volume's rendering as much as a model -- and the slice views are
+        emptied, which `_showLoadedResults` then fills with the result's scan.
+        Nodes hidden from editors (the slice-plane models) are Slicer's own
+        and left alone. Best effort, like everything after a finished run.
+        """
+        try:
+            nodes = slicer.util.getNodesByClass("vtkMRMLDisplayableNode")
+        except Exception as exc:  # noqa: BLE001 - never worth failing a run
+            logger.warning("Could not list the scene to hide it: %s", exc)
+            return
+        for node in nodes:
+            try:
+                if node.GetHideFromEditors():
+                    continue
+                for index in range(node.GetNumberOfDisplayNodes()):
+                    display = node.GetNthDisplayNode(index)
+                    if display is not None:
+                        display.SetVisibility(False)
+            except Exception as exc:  # noqa: BLE001 - one node must not keep the rest shown
+                logger.warning("Could not hide %s: %s", node.GetName(), exc)
+        try:
+            slicer.util.setSliceViewerLayers(background=None, foreground=None, label=None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not empty the slice views: %s", exc)
 
     @staticmethod
     def _makeVisible(kind: str, node) -> None:
