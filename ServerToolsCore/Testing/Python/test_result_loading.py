@@ -155,6 +155,26 @@ class IntermediateResultsTest(unittest.TestCase):
 
         self.assertEqual(len(_util.loaded), 1)
 
+    def test_an_output_folder_reached_through_a_symlink_still_filters(self):
+        """The archive's members come back resolved; the folder the reader
+        picked did not, and every file then looked outside it."""
+        real = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, real, True)
+        link = os.path.join(tempfile.mkdtemp(), "Slicer Output")
+        self.addCleanup(shutil.rmtree, os.path.dirname(link), True)
+        try:
+            os.symlink(real, link)
+        except (OSError, NotImplementedError) as exc:  # Windows without the privilege
+            self.skipTest("cannot create a symlink here: %s" % exc)
+        self.panel._producedRoot = link
+        self.panel._producedFiles = [
+            os.path.join(real, "Pat_0002_lm_Or.mrk.json"),
+            os.path.join(real, "T1_Oriented", "intermediate", "01_ALI_CBCT", "Pat_0002_lm_Pred.mrk.json"),
+        ]
+        self.panel._loadResults()
+
+        self.assertEqual(_util.loaded, [("markups", os.path.join(real, "Pat_0002_lm_Or.mrk.json"))])
+
     def test_with_no_root_recorded_nothing_is_skipped(self):
         """A single-file result records its own folder; an older panel state
         records nothing. Skipping on no information would lose results."""
@@ -220,12 +240,13 @@ class ShowLoadedResultsTest(unittest.TestCase):
 
     def test_markups_alone_ask_for_no_slice_layer(self):
         """They carry their own display node and show themselves; there is no
-        layer to put them in, and claiming one would blank the views."""
+        layer to put them in. The views are left as `_hideScene` emptied them,
+        not handed an earlier scan back."""
         self.panel._producedFiles = ["/out/Pat_0002_lm_Or.mrk.json"]
         self.panel._loadResults()
 
         self.assertEqual(_util.loaded, [("markups", "/out/Pat_0002_lm_Or.mrk.json")])
-        self.assertIsNone(_util.shown)
+        self.assertEqual(_util.shown, (None, None, False))
 
     def test_a_cohort_shows_the_first_scan_and_always_the_same_one(self):
         """Forty patients offer no better answer than a deterministic one."""
@@ -825,3 +846,159 @@ class SoleScanInAFolderTest(ImportPreviewTest):
 
         self.assertEqual(_util.loaded,
                          [("volume", os.path.join(folder, "scan.nii.gz"))])
+
+
+class _Display:
+    """A display node's visibility, view list and Modified observers."""
+
+    def __init__(self, views=()):
+        self.visible = True
+        self.views = list(views)
+        self.observers = {}
+
+    def SetVisibility(self, visible):
+        self.visible = bool(visible)
+        for callback in list(self.observers.values()):
+            callback(self, "ModifiedEvent")
+
+    def GetVisibility(self):
+        return self.visible
+
+    def GetNumberOfViewNodeIDs(self):
+        return len(self.views)
+
+    def GetNthViewNodeID(self, index):
+        return self.views[index]
+
+    def RemoveAllViewNodeIDs(self):
+        self.views = []
+
+    def AddViewNodeID(self, view):
+        self.views.append(view)
+
+    def AddObserver(self, _event, callback):
+        tag = len(self.observers) + 1
+        self.observers[tag] = callback
+        return tag
+
+    def RemoveObserver(self, tag):
+        self.observers.pop(tag, None)
+
+
+class _SceneNode:
+    def __init__(self, name, displays=1, hidden_from_editors=False):
+        self.name = name
+        self.displays = [_Display() for _ in range(displays)]
+        self.hidden_from_editors = hidden_from_editors
+
+    def GetName(self):
+        return self.name
+
+    def GetHideFromEditors(self):
+        return self.hidden_from_editors
+
+    def GetNumberOfDisplayNodes(self):
+        return len(self.displays)
+
+    def GetNthDisplayNode(self, index):
+        return self.displays[index]
+
+
+class HideSceneTest(unittest.TestCase):
+    """A finished run's results go into a scene with nothing else showing.
+
+    They landed on top of the inputs, the pauses' reviews and earlier runs,
+    and what the run had just produced was the hard part to find."""
+
+    class _Panel(ServerToolWidgetBase):
+        TOOL_NAME = "AREG"
+        _LOADABLE = (("*.nii.gz", "volume"), ("*.mrk.json", "markups"))
+
+    def setUp(self):
+        _util.loaded = []
+        _util.shown = None
+        self.panel = self._Panel.__new__(self._Panel)
+        self.panel._producedRoot = "/out"
+        self.panel._loadResultsCheckBox = None
+        self.addCleanup(setattr, _util, "scene_nodes", {})
+
+    def _scene(self, *nodes):
+        _util.scene_nodes = {"vtkMRMLDisplayableNode": list(nodes)}
+
+    def test_everything_already_shown_is_hidden_not_removed(self):
+        """A CBCT with its volume rendering (two display nodes) and a mesh."""
+        cbct, mesh = _SceneNode("input CBCT", displays=2), _SceneNode("input mesh")
+        self._scene(cbct, mesh)
+        self.panel._producedFiles = ["/out/case_Or.nii.gz"]
+        self.panel._loadResults()
+
+        self.assertFalse(any(d.visible for d in cbct.displays + mesh.displays))
+        self.assertEqual(_util.loaded, [("volume", "/out/case_Or.nii.gz")])
+        self.assertEqual(_util.shown[0].path, "/out/case_Or.nii.gz",
+                         "the result's scan goes back into the emptied views")
+
+    def test_slicers_own_nodes_are_left_alone(self):
+        """The slice-plane models are hidden from editors and are not ours."""
+        plane = _SceneNode("Red Volume Slice", hidden_from_editors=True)
+        self._scene(plane)
+        self.panel._producedFiles = ["/out/case_lm.mrk.json"]
+        self.panel._loadResults()
+
+        self.assertTrue(plane.displays[0].visible)
+
+    def test_nothing_is_hidden_when_nothing_will_be_loaded(self):
+        """Too many results, or none: the scene must not go blank for nothing."""
+        mesh = _SceneNode("input mesh")
+        self._scene(mesh)
+        self.panel._producedFiles = ["/out/report.json"]
+        self.panel._loadResults()
+
+        self.assertTrue(mesh.displays[0].visible)
+
+    def test_one_node_that_refuses_does_not_keep_the_others_shown(self):
+        broken, mesh = _SceneNode("broken"), _SceneNode("input mesh")
+        broken.GetNumberOfDisplayNodes = None
+        self._scene(broken, mesh)
+        self.panel._producedFiles = ["/out/case_lm.mrk.json"]
+        self.panel._loadResults()
+
+        self.assertFalse(mesh.displays[0].visible)
+        self.assertEqual(len(_util.loaded), 1)
+
+
+class ParkedOutOfTheViewsTest(unittest.TestCase):
+    """Hidden is not enough for the 3D view's box: Slicer sizes it to every
+    node displayable in the view, hidden or not, so at a pause after ASO it
+    spanned the original CBCT and the oriented one."""
+
+    def setUp(self):
+        self.addCleanup(setattr, _util, "scene_nodes", {})
+
+    def _hide(self, *nodes):
+        _util.scene_nodes = {"vtkMRMLDisplayableNode": list(nodes)}
+        slicer_io.hide_scene()
+
+    def test_a_hidden_node_is_in_no_view(self):
+        node = _SceneNode("input CBCT")
+        self._hide(node)
+        self.assertEqual(node.displays[0].views, [slicer_io._PARKED_VIEW_ID])
+
+    def test_showing_it_again_gives_it_its_own_views_back(self):
+        """Empty means every view; one limited to a view keeps that limit."""
+        everywhere, one_view = _SceneNode("a"), _SceneNode("b")
+        one_view.displays[0].views = ["vtkMRMLViewNode1"]
+        self._hide(everywhere, one_view)
+
+        everywhere.displays[0].SetVisibility(True)
+        one_view.displays[0].SetVisibility(True)
+        self.assertEqual(everywhere.displays[0].views, [])
+        self.assertEqual(one_view.displays[0].views, ["vtkMRMLViewNode1"])
+        self.assertEqual(everywhere.displays[0].observers, {}, "the watch ends once shown")
+
+    def test_hiding_twice_keeps_the_readers_views(self):
+        node = _SceneNode("a")
+        node.displays[0].views = ["vtkMRMLViewNode1"]
+        self._hide(node)
+        self._hide(node)
+        node.displays[0].SetVisibility(True)
+        self.assertEqual(node.displays[0].views, ["vtkMRMLViewNode1"])

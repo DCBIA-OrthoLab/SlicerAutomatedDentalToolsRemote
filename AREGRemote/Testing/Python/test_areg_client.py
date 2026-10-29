@@ -23,6 +23,7 @@ Usage:
     python3 -m unittest AREGRemote/Testing/Python/test_areg_client.py
 """
 
+import json
 import os
 import shutil
 import sys
@@ -741,6 +742,63 @@ class ResultDiscoveryTest(unittest.TestCase):
         self._write("CB/P1_CB_Reg.nii.gz")
         self.assertEqual(len(AREGRemoteWidget._findResults(self.dir)), 1)
 
+
+class _Display:
+    def __init__(self):
+        self.color = self.selected = None
+
+    def SetColor(self, *rgb):
+        self.color = rgb
+
+    def SetSelectedColor(self, *rgb):
+        self.selected = rgb
+
+
+class _Node:
+    def __init__(self, name):
+        self.name, self.display = name, _Display()
+
+    def GetName(self):
+        return self.name
+
+    def GetDisplayNode(self):
+        return self.display
+
+
+class ResultColorTest(unittest.TestCase):
+    def test_the_cbct_is_rendered_in_3d(self):
+        """The CBCT is what every arch was registered onto: without a
+        rendering the 3D view showed the meshes floating on nothing."""
+        self.assertEqual(AREGRemoteWidget.VOLUME_RENDERING, "CT-AAA")
+
+    def test_each_landmark_set_and_each_mesh_gets_its_own_colour(self):
+        """All markups arrived in Slicer's default colour, so the orientation,
+        CBCT and moved landmarks were one cloud, and both arches one grey."""
+        markups = [_Node(name) for name in ("U_lm", "CBCT_lm", "L_lm", "Or_lm")]
+        models = [_Node("U"), _Node("L")]
+        opened = [("markups", node) for node in markups] + [("model", node) for node in models]
+        AREGRemoteWidget._colorResults(opened + [("volume", object()), ("markups", None)])
+
+        markup_colors = [node.display.selected for node in markups]
+        self.assertEqual(len(set(markup_colors)), len(markups))
+        self.assertEqual([node.display.color for node in markups], markup_colors)
+        self.assertEqual(len({node.display.color for node in models}), len(models))
+        self.assertTrue(all(node.display.selected is None for node in models))
+
+    def test_a_file_keeps_its_colour_from_one_run_to_the_next(self):
+        """By name, not by load order: the lower arch is the same colour every time."""
+        first = [_Node("L"), _Node("U")]
+        second = [_Node("U"), _Node("L")]
+        AREGRemoteWidget._colorResults([("model", node) for node in first])
+        AREGRemoteWidget._colorResults([("model", node) for node in second])
+        self.assertEqual(first[0].display.color, second[1].display.color)
+
+    def test_a_node_that_cannot_be_coloured_does_not_stop_the_others(self):
+        broken, fine = _Node("A"), _Node("B")
+        broken.display.SetColor = None
+        AREGRemoteWidget._colorResults([("model", broken), ("model", fine)])
+        self.assertIsNotNone(fine.display.color)
+
 # ---------------------------------------------------------------------------
 # What Apply waits for
 # ---------------------------------------------------------------------------
@@ -920,3 +978,87 @@ class PrepareInputFilesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Stored:
+    def __init__(self, path):
+        self.path = path
+
+    def GetFileName(self):
+        return self.path
+
+
+class _Volume:
+    def __init__(self, path):
+        self.path = path
+
+    def GetName(self):
+        return os.path.basename(self.path)
+
+    def GetStorageNode(self):
+        return _Stored(self.path)
+
+
+class RegisteredPairTest(unittest.TestCase):
+    """A CBCT run ended on one grey scan and an empty 3D view with only the
+    landmarks in it: the base class shows the first scan, and renders one
+    only when there is one."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.shown, self.rendered = [], []
+        util = sys.modules["slicer"].util
+        self.addCleanup(setattr, util, "setSliceViewerLayers",
+                        getattr(util, "setSliceViewerLayers", None))
+        util.setSliceViewerLayers = lambda **kwargs: self.shown.append(kwargs)
+        self.panel = AREGRemoteWidget.__new__(AREGRemoteWidget)
+        self.panel._renderScan = lambda node: self.rendered.append(node)
+
+    def _file(self, relative):
+        path = os.path.join(self.dir, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        return path
+
+    def _scene(self, relative, files):
+        path = self._file(relative)
+        with open(path, "w") as handle:
+            json.dump({"files": files}, handle)
+        return path
+
+    def test_the_t1_is_under_the_registered_t2_in_slices_and_in_3d(self):
+        t1 = _Volume(self._file("T1_Oriented/case_T1_Or.nii.gz"))
+        t2 = _Volume(self._file("CB/case_CB_Reg.nii.gz"))
+        scene = self._scene("CB/case_CB_Reg_scene.json", [
+            {"path": "../T1_Oriented/case_T1_Or.nii.gz", "kind": "volume", "role": "reference"},
+            {"path": "case_CB_Reg.nii.gz", "kind": "volume", "role": "registered"}])
+        self.panel._producedFiles = [t1.path, t2.path, scene]
+
+        self.panel._showRegisteredPair([("volume", t2), ("volume", t1)])
+
+        self.assertEqual(self.shown[-1]["background"], t1)
+        self.assertEqual(self.shown[-1]["foreground"], t2)
+        self.assertEqual(self.shown[-1]["foregroundOpacity"], 0.5)
+        self.assertEqual(self.rendered, [t1, t2])
+
+    def test_an_oriented_t1_the_scene_does_not_name_is_still_the_reference(self):
+        """Oriented first, the T1 travels under T1_Oriented/ whether or not
+        "T1 scan" was ticked; the scene only names it when it was."""
+        t1 = _Volume(self._file("T1_Oriented/case_T1_Or.nii.gz"))
+        t2 = _Volume(self._file("CB/case_CB_Reg.nii.gz"))
+        scene = self._scene("CB/case_CB_Reg_scene.json", [
+            {"path": "case_CB_Reg.nii.gz", "kind": "volume", "role": "registered"}])
+        self.panel._producedFiles = [t1.path, t2.path, scene]
+
+        self.panel._showRegisteredPair([("volume", t2), ("volume", t1)])
+
+        self.assertEqual(self.shown[-1]["background"], t1)
+        self.assertEqual(self.shown[-1]["foreground"], t2)
+
+    def test_without_a_scene_nothing_is_guessed(self):
+        t2 = _Volume(self._file("CB/case_CB_Reg.nii.gz"))
+        self.panel._producedFiles = [t2.path]
+        self.panel._showRegisteredPair([("volume", t2)])
+        self.assertEqual(self.shown, [])
+        self.assertEqual(self.rendered, [])

@@ -446,6 +446,18 @@ class Case:
 
         views = []
         placed = set()
+        if not volumes:
+            # Masks and no scan beside them: AMASSS at a stop, which writes the
+            # labels and nothing else. They go on the scan they are named
+            # after -- `P1_T1_Or_seg_CBMASK` on the `P1_T1_Or` an earlier step
+            # oriented -- or a reader judged a segmentation on black.
+            masks = [artifact for artifact in anchors if artifact.kind == LABELMAP]
+            scans = [artifact for artifact in every_anchor
+                     if artifact.source == SUPPORT and artifact.kind == VOLUME]
+            if masks and scans:
+                unplaced = self._place_by_name(masks, scans, views)
+                placed.update(id(mask) for mask in masks if mask not in unplaced)
+                anchors = [artifact for artifact in anchors if id(artifact) not in placed]
         for anchor in volumes or anchors:
             beside = [
                 artifact for artifact in overlays
@@ -504,9 +516,14 @@ class Case:
         rest = []
         for overlay in homeless:
             stem = split_extension(overlay.name)[0]
+            # Ties go to a step's output over the reader's own file: a cohort
+            # sent already named `P1_T1_Or` meets the `P1_T1_Or` ASO wrote, and
+            # what a later step read is the one it wrote.
             match = max(((anchor_stem, anchor) for anchor_stem, anchor in stems
-                         if anchor is not overlay and is_token_prefix(anchor_stem, stem)),
-                        key=lambda pair: len(pair[0]), default=None)
+                         if anchor is not overlay and is_token_prefix(anchor_stem, stem)
+                         and not _ran_inside(overlay, anchor)),
+                        key=lambda pair: (len(pair[0]), _is_step_output(pair[1])),
+                        default=None)
             if match is None:
                 rest.append(overlay)
             else:
@@ -534,6 +551,24 @@ class Case:
         anchor = anchors[0] if anchors else None
         overlays = [artifact for artifact in self.artifacts if artifact is not anchor]
         return View(anchor, overlays, BASIS_SCENE if anchor else BASIS_NONE)
+
+
+def _ran_inside(overlay, anchor) -> bool:
+    """Whether `overlay` came from a step nested inside the one that wrote `anchor`.
+
+    Such a file was written BEFORE the anchor and cannot be in its frame: at a
+    stop after ASO, ALI_CBCT's points (`01_ASO/intermediate/01_ALI_CBCT/`) were
+    placed on the scan the reader sent, never on the oriented one ASO wrote
+    afterwards (`01_ASO/`) -- even when both scans carry one name.
+    """
+    outer = (anchor.origin or "").replace("\\", "/").rstrip("/")
+    inner = (overlay.origin or "").replace("\\", "/")
+    return bool(outer) and _is_step_output(anchor) and inner.startswith(outer + "/")
+
+
+def _is_step_output(artifact) -> bool:
+    """Whether a stopped run's step wrote this, rather than the reader."""
+    return _STEPS_LEVEL in (artifact.origin or "").replace("\\", "/").split("/")
 
 
 def is_scene(filename: str) -> bool:

@@ -415,6 +415,41 @@ class PauseTest(unittest.TestCase):
         self.assertEqual(self._views(case), {
             "cbct_case_T2.nii.gz": (["cbct_case_T2_lm_Pred.mrk.json"], index.BASIS_NAMED)})
 
+    def test_a_segmentation_stop_draws_the_mask_on_the_scan_it_segmented(self):
+        """AMASSS writes the labels and nothing else; on their own they were
+        a mask on black. They are named after the T1 ASO oriented."""
+        tree(self.root, [
+            "out/intermediate/01_ASO/cbct_case_T1_Or.nii.gz",
+            "out/intermediate/01_ASO/cbct_case_T1_lm_Or.mrk.json",
+            "out/intermediate/02_AMASSS/cbct_case_T1_Or_seg_SegOut/cbct_case_T1_Or_seg_CBMASK.nii.gz",
+        ])
+        (case,) = index.build([("Results", os.path.join(self.root, "out"))],
+                              focus=os.path.join(self.root, "out", "intermediate", "02_AMASSS"))
+        (view,) = case.views(acquisition="Results")
+        self.assertEqual(view.anchor.name, "cbct_case_T1_Or.nii.gz")
+        self.assertEqual(view.anchor.origin, os.path.join("intermediate", "01_ASO"))
+        self.assertEqual([o.name for o in view.overlays], ["cbct_case_T1_Or_seg_CBMASK.nii.gz"])
+
+    def test_a_step_inside_another_is_never_drawn_on_what_that_one_wrote(self):
+        """A cohort sent already named `_Or` meets the `_Or` scan ASO wrote.
+        ALI_CBCT ran inside ASO, on the scan sent, before ASO wrote its own:
+        its points belong on the input, whatever the names say."""
+        tree(self.root, [
+            "out/intermediate/01_ASO/cbct_case_T1_Or.nii.gz",
+            "out/intermediate/01_ASO/cbct_case_T1_lm_Or.mrk.json",
+            "out/intermediate/01_ASO/intermediate/01_ALI_CBCT/cbct_case_T1_Or_lm_Pred.mrk.json",
+            "inputs/cbct_case_T1_Or.nii.gz",
+        ])
+        (case,) = index.build([("Results", os.path.join(self.root, "out"))],
+                              supports=[os.path.join(self.root, "inputs")],
+                              focus=os.path.join(self.root, "out", "intermediate", "01_ASO"))
+        drawn = {(view.anchor.origin, tuple(o.name for o in view.overlays))
+                 for view in case.views(acquisition="Results")}
+        self.assertEqual(drawn, {
+            (os.path.join("intermediate", "01_ASO"), ("cbct_case_T1_lm_Or.mrk.json",)),
+            ("", ("cbct_case_T1_Or_lm_Pred.mrk.json",)),
+        })
+
     def test_inputs_never_make_a_case_or_an_empty_view(self):
         tree(self.root, self.ALI_IOS)
         tree(self.root, ["inputs/ios_case_T2_U.vtk", "inputs/P009_T2_U.vtk"])

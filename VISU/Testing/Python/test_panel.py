@@ -81,6 +81,9 @@ class _Node:
     def SetName(self, name):
         self.name = name
 
+    def CreateClosedSurfaceRepresentation(self):
+        self.surface = True
+
     def SetLocked(self, locked):
         self.locked = bool(locked)
 
@@ -269,9 +272,14 @@ def _loader(path, kind):
     return node
 
 
+# How many files VISU had opened each time it hid the scene: hiding has to come
+# BEFORE a view loads, or it would hide the view itself.
+HIDDEN = []
+
 VISU.slicer_io = types.SimpleNamespace(
     load_result=_loader,
     show_volume_rendering=lambda node, preset: VIEWS["rendered"].append((node.path, preset)),
+    hide_scene=lambda: HIDDEN.append(len(OPENED)),
 )
 # Reading ahead touches the disk in a thread and asserts nothing; the files
 # here are one byte each and the thread would race the temp directory's
@@ -371,6 +379,7 @@ class PanelTest(unittest.TestCase):
         del VIEWS["rendered"][:]
         del OPENED[:]
         del JUMPS[:]
+        del HIDDEN[:]
         qt_stubs.QSettings.store.clear()
         self.root = tempfile.TemporaryDirectory()
         self.addCleanup(self.root.cleanup)
@@ -415,6 +424,13 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(len(SCENE), 1)
         self.assertNotIn(first, SCENE, "the previous case stayed in the scene")
 
+    def test_what_visu_did_not_load_is_hidden_before_each_view(self):
+        """A pause after ASO drew the oriented CBCT over the input scan the
+        panel had already rendered: two volumes in one place."""
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 3)])
+        self.widget.onNext()
+        self.assertEqual(HIDDEN, [0, 1], "hidden before each view loads, never after")
+
     def test_a_scan_fills_the_slices_and_the_3d_view(self):
         # A volume loads into the slice views and leaves 3D EMPTY, which reads
         # as a failed load. Every tool panel returning a scan turns rendering
@@ -445,10 +461,13 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(all(c.label is None for c in COMPOSITES),
                         "one mask was made the label layer")
 
-    def test_a_single_mask_stays_the_label_layer(self):
+    def test_a_single_mask_is_a_segmentation_too_so_it_shows_in_3d(self):
+        """A label layer is drawn in the slices only: at an AMASSS stop the
+        reader judged a segmentation with an empty 3D view."""
         self.open(["scans/p1_scan.nii.gz", "scans/p1_Pred_MAND.nii.gz"])
-        self.assertEqual(dict(OPENED)["p1_Pred_MAND.nii.gz"], "labelmap")
-        self.assertTrue(all(c.label is not None for c in COMPOSITES))
+        self.assertEqual(dict(OPENED)["p1_Pred_MAND.nii.gz"], "segmentation")
+        mask = next(n for n in SCENE if n.path.endswith("p1_Pred_MAND.nii.gz"))
+        self.assertTrue(getattr(mask, "surface", False), "no 3D surface was built")
 
     def test_a_mesh_on_a_scan_is_drawn_on_the_slices_too(self):
         # Where a reader checks whether a mesh sits on the anatomy it was

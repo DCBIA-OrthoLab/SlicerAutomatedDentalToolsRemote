@@ -26,6 +26,8 @@ Authors:
 """
 
 import glob
+import json
+import logging
 import os
 
 import qt
@@ -35,6 +37,8 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule
 
 from ServerToolsCoreLib import slicer_io
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase
+
+logger = logging.getLogger("AREGRemote")
 
 
 class AREGRemote(ScriptedLoadableModule):
@@ -118,6 +122,30 @@ class AREGRemoteWidget(ServerToolWidgetBase):
     # three regions legitimately returns hundreds of files, and loading them all
     # would be worse than useless.
     MAX_RESULTS_TO_LOAD = 12
+    # The CBCT every IOS was registered onto is the scene's frame of reference;
+    # without a rendering the 3D view showed the arches floating on nothing.
+    # The base class renders a scan only when the run returned exactly one, so
+    # a CBCT run handing back both timepoints keeps an empty 3D view.
+    VOLUME_RENDERING = "CT-AAA"
+    # One colour per landmark set and one per mesh, in the order the files sort.
+    # Every markups file loaded in Slicer's default colour, so the orientation
+    # landmarks, the CBCT's and each arch's moved copy were one indistinct cloud,
+    # and both arches the same grey. Kept apart so a landmark never takes the
+    # colour of a mesh it sits on.
+    _MARKUPS_COLORS = (
+        (0.90, 0.20, 0.20),  # red
+        (0.20, 0.75, 0.25),  # green
+        (0.20, 0.45, 1.00),  # blue
+        (1.00, 0.80, 0.10),  # yellow
+        (0.80, 0.30, 0.90),  # purple
+        (0.10, 0.80, 0.85),  # cyan
+    )
+    _MODEL_COLORS = (
+        (0.95, 0.85, 0.65),  # ivory
+        (0.65, 0.80, 1.00),  # light blue
+        (1.00, 0.70, 0.75),  # pink
+        (0.70, 0.95, 0.70),  # light green
+    )
     # Pattern -> how to load it. A registered CBCT is a VOLUME, not a
     # segmentation: AREG moves a scan, it does not label one. `*.tfm` is
     # deliberately absent — the transform is there to carry a measurement back
@@ -132,8 +160,9 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         ("*.gipl", "volume"),
         ("*.vtk", "model"),
         ("*.vtp", "model"),
-        # The landmarks a run hands back when "Moved landmarks" is ticked:
-        # each mesh's, moved with it, and the CBCT's it was registered on.
+        # The landmarks a run hands back when "Registration landmarks" is
+        # ticked (each mesh's, moved with it, and the CBCT's it was registered
+        # on) or "Orientation landmarks" (the ones ASO oriented the CBCT on).
         # Without these the scene showed the meshes on the CBCT and no point
         # to judge the fit by. `*_lm.json` is the moved copy of a plain-JSON
         # input; AREG_report.json matches neither pattern.
@@ -157,6 +186,97 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         if not (self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked()):
             return
         self._loadResults()
+
+    def _showLoadedResults(self, opened: list) -> None:
+        """Show the results (base class), each landmark set and mesh in its own
+        colour, and a CBCT pair as the pair it is."""
+        super()._showLoadedResults(opened)
+        self._colorResults(opened)
+        self._showRegisteredPair(opened)
+
+    def _showRegisteredPair(self, opened: list) -> None:
+        """The T1 under the registered T2, in the slices and in 3D.
+
+        The base class puts the FIRST scan in the slices and renders a scan in
+        3D only when there is one, so a CBCT run -- the T1 and the registered
+        T2 -- ended on one grey scan and an empty 3D view with the landmarks
+        floating in it. Which is which is what the run's `scene.json` says
+        (`reference`, `registered`); without one, nothing is guessed.
+        Best effort, like every view after a finished run.
+        """
+        roles = self._sceneRoles()
+        volumes = [node for kind, node in opened if kind == "volume" and node is not None]
+        registered = [node for node in volumes if roles.get(self._nodePath(node)) == "registered"]
+        if not registered:
+            return
+        reference = next((node for node in volumes
+                          if roles.get(self._nodePath(node)) == "reference"), None)
+        if reference is None:
+            # Oriented first, the T1 travels under `T1_Oriented/` whether or
+            # not it was ticked, and the scene only names it when it was.
+            reference = next((node for node in volumes if node not in registered
+                              and "T1_Oriented" in self._nodePath(node).split(os.sep)), None)
+        try:
+            slicer.util.setSliceViewerLayers(
+                background=reference or registered[0],
+                foreground=registered[0] if reference else None,
+                foregroundOpacity=0.5, fit=True)
+        except Exception as exc:  # noqa: BLE001 - a view is never worth a failure
+            logger.warning("Could not show the registered pair: %s", exc)
+        for node in ([reference] if reference else []) + registered[:1]:
+            self._renderScan(node)
+
+    def _sceneRoles(self) -> dict:
+        """{resolved path: role} from every `scene.json` this run produced."""
+        roles = {}
+        for path in getattr(self, "_producedFiles", None) or ():
+            if not path.endswith("scene.json"):
+                continue
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    listed = json.load(handle).get("files", [])
+            except (OSError, ValueError) as exc:
+                logger.warning("Could not read %s: %s", os.path.basename(path), exc)
+                continue
+            folder = os.path.dirname(path)
+            for entry in listed:
+                if isinstance(entry, dict) and entry.get("path") and entry.get("role"):
+                    roles[os.path.realpath(os.path.join(folder, entry["path"]))] = entry["role"]
+        return roles
+
+    @staticmethod
+    def _nodePath(node) -> str:
+        """The resolved file a loaded node was read from, or ""."""
+        try:
+            storage = node.GetStorageNode()
+            return os.path.realpath(storage.GetFileName()) if storage else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @classmethod
+    def _colorResults(cls, opened: list) -> None:
+        """Give every markups node and every model a colour of its own.
+
+        Ordered by node name, which is the file's, so a lower arch and its
+        landmarks get the same colours on every run. Best effort: a colour is
+        never worth failing a run that finished.
+        """
+        for kind, palette in (("markups", cls._MARKUPS_COLORS), ("model", cls._MODEL_COLORS)):
+            nodes = sorted((node for k, node in opened if k == kind and node is not None),
+                           key=lambda node: node.GetName())
+            for index, node in enumerate(nodes):
+                color = palette[index % len(palette)]
+                try:
+                    display = node.GetDisplayNode()
+                    if display is None:
+                        continue
+                    display.SetColor(*color)
+                    if kind == "markups":
+                        # A markups point is drawn in its SELECTED colour, which
+                        # every point is until clicked.
+                        display.SetSelectedColor(*color)
+                except Exception as exc:  # noqa: BLE001 - never worth failing a run
+                    logger.warning("Could not colour %s: %s", node.GetName(), exc)
 
     @classmethod
     def _findResults(cls, outputDir: str) -> list:

@@ -1619,6 +1619,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             ))
             return
 
+        self._hideScene()
         failed = []
         opened = []
         for path, kind in found:
@@ -1694,6 +1695,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.warning("Could not render %s in 3D: %s", self.VOLUME_RENDERING, exc)
 
     @staticmethod
+    def _hideScene() -> None:
+        """Hide everything already in the scene before the results go in.
+
+        The results landed on top of the inputs, the pauses' reviews and every
+        earlier run, so a finished run read as a cluttered scene where what it
+        had just produced was the hard part to find. See `slicer_io.hide_scene`.
+        """
+        slicer_io.hide_scene()
+
+    @staticmethod
     def _makeVisible(kind: str, node) -> None:
         """Switch a self-displaying result's display node on.
 
@@ -1742,7 +1753,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not self._producedRoot:
             return False
         try:
-            relative = os.path.relpath(path, self._producedRoot)
+            # Both resolved: the archive's members come back as real paths
+            # (`slicer_io.unzip_folder`), and an output folder reached through
+            # a symlink -- ~/Documents moved to another disk -- made every one
+            # of them look outside it, so nothing was filtered at all.
+            relative = os.path.relpath(os.path.realpath(path),
+                                       os.path.realpath(self._producedRoot))
         except ValueError:  # different drive on Windows; not ours then
             return False
         folders = relative.replace("\\", "/").split("/")[:-1]
