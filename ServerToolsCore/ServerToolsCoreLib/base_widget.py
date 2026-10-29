@@ -400,6 +400,29 @@ class _Run:
             self.workspace = None
 
 
+# A timepoint word in a case's name: `P001_T1` and `P001_T2` are one patient.
+_TIMEPOINT_WORD = re.compile(r"(?i)(^|[_\-.\s])T[0-9](?=$|[_\-.\s])")
+
+
+def _patients_of(paths) -> set:
+    """The patients a run's results cover, read off its `scene.json` files.
+
+    One `scene.json` per case is the tools' convention (VISU's
+    `index.SCENE_SUFFIX`): `<case>/scene.json`, or `<case>_scene.json` when
+    several share a folder. The case is that name with its timepoint removed.
+    """
+    patients = set()
+    for path in paths:
+        name = os.path.basename(path)
+        if not name.endswith("scene.json"):
+            continue
+        case = name[: -len("scene.json")].rstrip("_-. ")
+        if not case:
+            case = os.path.basename(os.path.dirname(path))
+        patients.add(_TIMEPOINT_WORD.sub("", case).strip("_-. ").lower())
+    return patients
+
+
 class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """Only TOOL_NAME is required. Everything the tool's own schema already
     states — which arguments are file inputs, what each picker looks like, what
@@ -1669,11 +1692,27 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 _("{tool}: no result file found to load.").format(tool=self.TOOL_NAME), 5000)
             return
 
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
+        # Two patients loaded into one scene put two CBCTs on top of each
+        # other. Counted as PATIENTS, not cases: a T1 and a T2 of one patient
+        # are two `scene.json` and still one patient to look at.
+        patients = _patients_of(self._producedFiles)
+        if len(patients) >= 2 or len(found) > self.MAX_RESULTS_TO_LOAD:
+            # Several cases, or too many files for the scene at once: that is
+            # what VISU is for. It opens one case at a time, each with what its
+            # `scene.json` lists.
+            # The folder handed over is the narrowest one holding what THIS run
+            # produced, so earlier runs beside it in the output folder are not
+            # offered as cases unless they share it.
+            folder = os.path.commonpath([os.path.dirname(path) for path, _kind in found])
+            if self._openReviewer(folder, None):
+                slicer.util.showStatusMessage(
+                    _("{tool}: {count} result files, opened in VISU one case at a time.").format(
+                        tool=self.TOOL_NAME, count=len(found)), 8000)
+                return
             slicer.util.infoDisplay(plain_text(
                 _("{count} result files were produced - too many to load at once.\n"
                   "They are all saved in {path}.").format(
-                      count=len(found), path=os.path.dirname(found[0][0]))
+                      count=len(found), path=folder)
             ))
             return
 

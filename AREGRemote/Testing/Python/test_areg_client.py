@@ -104,7 +104,8 @@ def _load_areg_module():
     return module
 
 
-AREGRemoteWidget = _load_areg_module().AREGRemoteWidget
+_AREG = _load_areg_module()
+AREGRemoteWidget = _AREG.AREGRemoteWidget
 
 
 def _module_source() -> str:
@@ -744,8 +745,12 @@ class ResultDiscoveryTest(unittest.TestCase):
 
 
 class _Display:
-    def __init__(self):
-        self.color = self.selected = None
+    def __init__(self, selected=(0.26666, 0.67451, 0.39216)):
+        self.color, self.selected = None, None
+        self._file_selected = selected
+
+    def GetSelectedColor(self):
+        return self.selected or self._file_selected
 
     def SetColor(self, *rgb):
         self.color = rgb
@@ -792,6 +797,18 @@ class ResultColorTest(unittest.TestCase):
         AREGRemoteWidget._colorResults([("model", node) for node in first])
         AREGRemoteWidget._colorResults([("model", node) for node in second])
         self.assertEqual(first[0].display.color, second[1].display.color)
+
+    def test_a_colour_set_in_the_landmark_file_is_kept(self):
+        """Consistent with every other module: a `.mrk.json` that names its own
+        colour shows in it here too."""
+        chosen, default, plain = _Node("A_lm"), _Node("B_lm"), _Node("C_lm")
+        chosen.display = _Display(selected=(0.1, 0.2, 0.9))
+        plain.display = _Display(selected=(1.0, 0.5000076, 0.5000076))
+        AREGRemoteWidget._colorResults([("markups", n) for n in (chosen, default, plain)])
+        self.assertIsNone(chosen.display.selected)
+        self.assertIsNone(chosen.display.color)
+        self.assertIsNotNone(default.display.selected)
+        self.assertIsNotNone(plain.display.selected)
 
     def test_a_node_that_cannot_be_coloured_does_not_stop_the_others(self):
         broken, fine = _Node("A"), _Node("B")
@@ -974,6 +991,91 @@ class PrepareInputFilesTest(unittest.TestCase):
         files = self.panel.prepareInputFiles(self.workspace)
         self.assertEqual(sorted(files), ["mgl_landmarks", "t1", "t2"])
         self.assertTrue(all(os.path.exists(path) for path in files.values()))
+
+
+
+class _PathWidget:
+    """An input row holding a local path, or an open volume."""
+
+    def __init__(self, path="", volume=""):
+        self.currentPath, self._volume = path, volume
+
+    def volume_name(self):
+        return self._volume
+
+
+class IntraoralCbctPairingTest(unittest.TestCase):
+    """One CBCT file beside a folder of intraoral scans sends only that
+    patient's scans at that timepoint, mirroring how the server pairs them."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.ios = os.path.join(self.root, "ios")
+        for name in ("P001_T1_U.vtk", "P001_T1_L.vtk", "P001_T2_U.vtk",
+                     "P001_T2_L.vtk", "P002_T1_U.vtk", "notes.txt"):
+            self._touch(os.path.join(self.ios, name))
+        self.cbct = self._touch(os.path.join(self.root, "cbct", "P_0001_T1.nii.gz"))
+
+    @staticmethod
+    def _touch(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        return path
+
+    def test_a_name_gives_its_patient_and_timepoint(self):
+        self.assertEqual(_AREG.subject_of("P001_T2_U.vtk"), ("1", "t2"))
+        self.assertEqual(_AREG.subject_of("P_0001_T2.nii.gz"), ("1", "t2"))
+        self.assertEqual(_AREG.subject_of("P1_UpperT2.vtk"), ("1", "t2"))
+        self.assertEqual(_AREG.subject_of("T1/case7_U.vtk"), ("7", "t1"))
+        self.assertEqual(_AREG.subject_of("case7_U.vtk"), ("7", None))
+
+    def test_only_the_patient_and_timepoint_of_the_cbct_are_kept(self):
+        self.assertEqual(
+            _AREG.matching_entries(self.ios, self.cbct, _AREG._SURFACE_EXTENSIONS),
+            ["P001_T1_L.vtk", "P001_T1_U.vtk"])
+
+    def test_a_cbct_naming_no_timepoint_beside_two_is_refused(self):
+        with self.assertRaises(ValueError):
+            _AREG.matching_entries(self.ios, "P_0001.nii.gz", _AREG._SURFACE_EXTENSIONS)
+
+    def test_nothing_matching_is_refused_before_anything_is_sent(self):
+        with self.assertRaises(ValueError):
+            _AREG.matching_entries(self.ios, "P_0009_T1.nii.gz", _AREG._SURFACE_EXTENSIONS)
+
+    def _panel(self, ios, cbct):
+        panel = object.__new__(AREGRemoteWidget)
+        panel._hiddenArgs = set()
+        panel._sceneVolumes = {}
+        panel._inputWidgets = {"ios": ios, "cbct": cbct}
+        zipped = []
+        panel._zipFolder = lambda workspace, arg, folder, entries=None: (
+            zipped.append((arg, folder, entries)) or f"{arg}.zip")
+        return panel, zipped
+
+    def test_the_folder_beside_a_single_cbct_is_narrowed_before_upload(self):
+        panel, zipped = self._panel(_PathWidget(self.ios), _PathWidget(self.cbct))
+        panel._prepareOneInputFile(None, "ios", "file_or_folder")
+        self.assertEqual(zipped, [("ios", self.ios, ["P001_T1_L.vtk", "P001_T1_U.vtk"])])
+
+    def test_two_folders_are_sent_whole(self):
+        cbct_folder = os.path.dirname(self.cbct)
+        panel, zipped = self._panel(_PathWidget(self.ios), _PathWidget(cbct_folder))
+        original = ServerToolWidgetBase._prepareOneInputFile
+        calls = []
+        ServerToolWidgetBase._prepareOneInputFile = (
+            lambda self, workspace, arg, mode, entries=None: calls.append(arg))
+        try:
+            panel._prepareOneInputFile(None, "ios", "file_or_folder")
+        finally:
+            ServerToolWidgetBase._prepareOneInputFile = original
+        self.assertEqual((calls, zipped), (["ios"], []))
+
+    def test_an_open_volume_names_the_patient_the_folder_is_narrowed_to(self):
+        panel, zipped = self._panel(_PathWidget(self.ios), _PathWidget(volume="P_0001_T2"))
+        panel._sceneVolumes = {"P_0001_T2": _Node("P_0001_T2")}
+        panel._prepareOneInputFile(None, "ios", "file_or_folder")
+        self.assertEqual(zipped[0][2], ["P001_T2_L.vtk", "P001_T2_U.vtk"])
 
 
 if __name__ == "__main__":

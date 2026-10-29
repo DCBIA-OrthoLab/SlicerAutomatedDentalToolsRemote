@@ -29,6 +29,7 @@ import glob
 import json
 import logging
 import os
+import re
 
 import qt
 import slicer
@@ -39,6 +40,104 @@ from ServerToolsCoreLib import slicer_io
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase
 
 logger = logging.getLogger("AREGRemote")
+
+
+# How the intraoral-to-CBCT engine pairs its two sides, mirrored so the panel
+# sends only the files of the patient a single file names. The server's
+# `sadt_areg_ioscbct.pipeline.patient_key` and `timepoint_of` are the reference:
+# the digits of the name once a timepoint word is dropped, and the timepoint
+# (T0, T1, T2) the name -- or the folder above it -- gives.
+_VOLUME_EXTENSIONS = (".nii.gz", ".nrrd.gz", ".gipl.gz", ".nii", ".nrrd", ".gipl")
+_SURFACE_EXTENSIONS = (".vtk", ".stl")
+_TIMEPOINTS = ("t1", "t2", "t0")
+_JAWS = ("u", "up", "upper", "maxilla", "max", "mx",
+         "l", "low", "lower", "mandible", "mandibule", "mand", "md")
+_SEPARATORS = re.compile(r"[_\-.\s]+")
+
+
+def _strip_extension(name: str) -> str:
+    lowered = name.lower()
+    for extension in _VOLUME_EXTENSIONS + _SURFACE_EXTENSIONS:
+        if lowered.endswith(extension):
+            return name[: -len(extension)]
+    return name
+
+
+def _tokens(stem: str) -> list:
+    """Lowercase words, with `UpperT2` split into `upper` and `t2` as the
+    server splits it -- otherwise the 2 would count as a patient digit."""
+    words = []
+    for part in _SEPARATORS.split(stem.lower()):
+        if not part:
+            continue
+        for point in _TIMEPOINTS:
+            if part.endswith(point) and part[: -len(point)] in _JAWS:
+                words.extend((part[: -len(point)], point))
+                break
+        else:
+            words.append(part)
+    return words
+
+
+def subject_of(relative_path: str) -> tuple:
+    """`(patient, timepoint)` of a file, as the server pairs it.
+
+    The timepoint is read off the name first, then off the folders above it;
+    None when nothing names one, or when two different ones are named.
+    """
+    parts = relative_path.replace("\\", "/").split("/")
+    stem = _strip_extension(parts[-1])
+    words = _tokens(stem)
+    digits = "".join(c for word in words if word not in _TIMEPOINTS
+                     for c in word if c.isdigit())
+    patient = digits.lstrip("0") or digits or stem
+    timepoint = None
+    for part in [stem] + list(reversed(parts[:-1])):
+        named = {word for word in _tokens(part) if word in _TIMEPOINTS}
+        if named:
+            timepoint = named.pop() if len(named) == 1 else None
+            break
+    return patient, timepoint
+
+
+def matching_entries(folder: str, anchor: str, extensions) -> list:
+    """The files under `folder` that belong with the single file `anchor`.
+
+    Relative paths, sorted. Same patient, and the same timepoint when both
+    name one; files naming no timepoint are taken only when none names the
+    anchor's. Raises ValueError, said in the panel's terms, when nothing
+    matches or when the anchor cannot tell two timepoints apart.
+    """
+    patient, timepoint = subject_of(os.path.basename(anchor))
+    same = []
+    for root, directories, names in os.walk(folder):
+        directories.sort()
+        for name in sorted(names):
+            if name.startswith(".") or not name.lower().endswith(tuple(extensions)):
+                continue
+            relative = os.path.relpath(os.path.join(root, name), folder).replace(os.sep, "/")
+            found_patient, found_point = subject_of(relative)
+            if found_patient == patient:
+                same.append((relative, found_point))
+    if timepoint:
+        chosen = [path for path, point in same if point == timepoint]
+        chosen = chosen or [path for path, point in same if point is None]
+    else:
+        points = {point for _path, point in same if point}
+        if len(points) > 1:
+            raise ValueError(_(
+                "'{anchor}' names no timepoint, and the folder holds {points} for "
+                "this patient. Put T1 or T2 in its name so the right files are sent."
+            ).format(anchor=os.path.basename(anchor),
+                     points=" and ".join(sorted(p.upper() for p in points))))
+        chosen = [path for path, _point in same]
+    if not chosen:
+        raise ValueError(_(
+            "Nothing in '{folder}' matches '{anchor}'. Files are matched on the "
+            "digits of their names and on T1/T2 when the names give one."
+        ).format(folder=os.path.basename(os.path.normpath(folder)),
+                 anchor=os.path.basename(anchor)))
+    return sorted(chosen)
 
 
 class AREGRemote(ScriptedLoadableModule):
@@ -140,6 +239,14 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         (0.80, 0.30, 0.90),  # purple
         (0.10, 0.80, 0.85),  # cyan
     )
+    # The colours a landmark file carries when nobody chose one: the green ALI
+    # and ASO write into every `.mrk.json`, and Slicer's own default for a
+    # file that names none (a plain `.json`). Only these are replaced; any
+    # other colour was set in the file on purpose and is kept.
+    _DEFAULT_MARKUPS_COLORS = (
+        (0.2667, 0.6745, 0.3922),  # ALI / ASO
+        (1.0, 0.5, 0.5),  # Slicer
+    )
     _MODEL_COLORS = (
         (0.95, 0.85, 0.65),  # ivory
         (0.65, 0.80, 1.00),  # light blue
@@ -173,6 +280,55 @@ class AREGRemoteWidget(ServerToolWidgetBase):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._loadResultsCheckBox = None
+
+    # The two sides of an intraoral-to-CBCT run, each with the file types of
+    # the OTHER side's folder. Either may be one file while the other is a
+    # folder: the folder is then narrowed to that file's patient and timepoint.
+    _PAIRED_SIDES = {
+        "ios": ("cbct", _SURFACE_EXTENSIONS),
+        "cbct": ("ios", _VOLUME_EXTENSIONS),
+    }
+
+    def _prepareOneInputFile(self, workspace, arg_name: str, mode: str, entries=None):
+        """Send only what pairs with a single file on the other side.
+
+        A folder of a whole cohort sent beside one CBCT uploaded every mesh of
+        every patient for one registration. The single file may also be a
+        node picked from the scene, read by its node name -- the name the base
+        class uploads it under.
+        """
+        sides = self._PAIRED_SIDES.get(arg_name)
+        if sides is None or arg_name in self._hiddenArgs:
+            return super()._prepareOneInputFile(workspace, arg_name, mode, entries)
+        widget = self._inputWidgets.get(arg_name)
+        other, extensions = sides
+        anchor = self._singleInputName(other)
+        folder = getattr(widget, "currentPath", "") if widget else ""
+        if not anchor or not folder or not os.path.isdir(folder):
+            return super()._prepareOneInputFile(workspace, arg_name, mode, entries)
+        wanted = matching_entries(folder, anchor, extensions)
+        if entries is not None:
+            batch = set(entries)
+            wanted = [path for path in wanted if path.split("/", 1)[0] in batch]
+        logger.info("Sending %d file(s) of '%s' that match the %s", len(wanted), arg_name, other)
+        return self._zipFolder(workspace, arg_name, folder, wanted)
+
+    def _sceneNodeOf(self, widget):
+        reader = getattr(widget, "volume_name", None)
+        name = reader() if reader else ""
+        return self._sceneVolumes.get(name) if name else None
+
+    def _singleInputName(self, arg_name: str) -> str:
+        """The name of the ONE file `arg_name` holds, or "" when it holds a
+        folder, nothing, or is hidden."""
+        if arg_name in self._hiddenArgs:
+            return ""
+        widget = self._inputWidgets.get(arg_name)
+        node = self._sceneNodeOf(widget)
+        if node is not None:
+            return node.GetName()
+        path = getattr(widget, "currentPath", "") if widget else ""
+        return os.path.basename(path) if path and os.path.isfile(path) else ""
 
     def addExtraWidgets(self, layout) -> None:
         self._loadResultsCheckBox = qt.QCheckBox(_("Load the results into the scene when done"))
@@ -258,8 +414,11 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         """Give every markups node and every model a colour of its own.
 
         Ordered by node name, which is the file's, so a lower arch and its
-        landmarks get the same colours on every run. Best effort: a colour is
-        never worth failing a run that finished.
+        landmarks get the same colours on every run. A landmark file that
+        carries a colour of its own keeps it: only the default one is replaced
+        (see _DEFAULT_MARKUPS_COLORS), so a colour set in the `.mrk.json` reads
+        the same here as in any other module. Best effort: a colour is never
+        worth failing a run that finished.
         """
         for kind, palette in (("markups", cls._MARKUPS_COLORS), ("model", cls._MODEL_COLORS)):
             nodes = sorted((node for k, node in opened if k == kind and node is not None),
@@ -270,6 +429,8 @@ class AREGRemoteWidget(ServerToolWidgetBase):
                     display = node.GetDisplayNode()
                     if display is None:
                         continue
+                    if kind == "markups" and not cls._hasDefaultColor(display):
+                        continue
                     display.SetColor(*color)
                     if kind == "markups":
                         # A markups point is drawn in its SELECTED colour, which
@@ -277,6 +438,16 @@ class AREGRemoteWidget(ServerToolWidgetBase):
                         display.SetSelectedColor(*color)
                 except Exception as exc:  # noqa: BLE001 - never worth failing a run
                     logger.warning("Could not colour %s: %s", node.GetName(), exc)
+
+    @classmethod
+    def _hasDefaultColor(cls, display) -> bool:
+        """Whether a markups display still shows a colour nobody chose."""
+        reader = getattr(display, "GetSelectedColor", None)
+        current = tuple(reader()) if reader else ()
+        if len(current) != 3:
+            return True
+        return any(all(abs(a - b) < 0.01 for a, b in zip(current, default))
+                   for default in cls._DEFAULT_MARKUPS_COLORS)
 
     @classmethod
     def _findResults(cls, outputDir: str) -> list:
