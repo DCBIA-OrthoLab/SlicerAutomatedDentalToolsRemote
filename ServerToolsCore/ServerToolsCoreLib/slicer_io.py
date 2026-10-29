@@ -590,6 +590,87 @@ _PRESET_OFFSET_SLIDER = "PresetOffsetSlider"
 _VISIBILITY_CHECKBOX = "VisibilityCheckBox"
 
 
+# A view ID no view carries. A hidden display node is pointed at it so that no
+# view counts it: see `hide_scene`.
+_PARKED_VIEW_ID = "vtkMRMLViewNodeHiddenByServerTools"
+
+
+def hide_scene() -> None:
+    """Hide every node in the scene; remove none.
+
+    Every display node of every displayable node is switched off -- a volume's
+    rendering as much as a model -- and the slice views are emptied, for the
+    caller to fill with what it is about to show. Each node is still in the
+    Data module, one eye-click away. Nodes hidden from editors (the slice-plane
+    models) are Slicer's own and left alone.
+
+    Called before a run's results are loaded and before VISU draws a view: a
+    pause showed the oriented CBCT it was reviewing on top of the input scan
+    the panel had already rendered, two volumes in one place.
+
+    **Hidden is not enough for the 3D view's box.** Slicer sizes that box to
+    every node DISPLAYABLE in the view, which is a matter of the display node's
+    view list and not of its visibility -- so at a pause after ASO the box
+    spanned the hidden original and the oriented CBCT, grew, and the camera
+    centred on the gap between them. Each hidden display node is therefore also
+    parked on a view that does not exist, and given its own views back the
+    moment it is shown again, by the eye in the Data module or by anyone else
+    (see `_park`).
+
+    Best effort: one node that refuses does not keep the others shown, and
+    nothing here is worth failing the caller for.
+    """
+    try:
+        nodes = slicer.util.getNodesByClass("vtkMRMLDisplayableNode")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not list the scene to hide it: %s", exc)
+        return
+    for node in nodes:
+        try:
+            if node.GetHideFromEditors():
+                continue
+            for index in range(node.GetNumberOfDisplayNodes()):
+                display = node.GetNthDisplayNode(index)
+                if display is None:
+                    continue
+                display.SetVisibility(False)
+                try:
+                    _park(display)
+                except Exception as exc:  # noqa: BLE001 - hidden is what matters most
+                    logger.warning("Could not take %s out of the views: %s", node.GetName(), exc)
+        except Exception as exc:  # noqa: BLE001 - one node must not keep the rest shown
+            logger.warning("Could not hide %s: %s", node.GetName(), exc)
+    try:
+        slicer.util.setSliceViewerLayers(background=None, foreground=None, label=None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not empty the slice views: %s", exc)
+
+
+def _park(display) -> None:
+    """Take a hidden display node out of every view until it is shown again.
+
+    Its own view list is kept and restored as it was: empty means every view,
+    and a node the reader had limited to one view must not come back in all
+    of them. Parking twice keeps the first list, which is the reader's.
+    """
+    views = [display.GetNthViewNodeID(i) for i in range(display.GetNumberOfViewNodeIDs())]
+    if _PARKED_VIEW_ID in views:
+        return
+    display.RemoveAllViewNodeIDs()
+    display.AddViewNodeID(_PARKED_VIEW_ID)
+    tag = []
+
+    def restore(caller, _event):
+        if not caller.GetVisibility():
+            return
+        caller.RemoveObserver(tag[0])
+        caller.RemoveAllViewNodeIDs()
+        for view in views:
+            caller.AddViewNodeID(view)
+
+    tag.append(display.AddObserver("ModifiedEvent", restore))
+
+
 def show_volume_rendering(node, preset: str, shift: float = None):
     """Turn a loaded scan into a 3D rendering, with `preset` applied.
 

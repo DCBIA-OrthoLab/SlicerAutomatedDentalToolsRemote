@@ -384,6 +384,19 @@ class SceneLoader:
             logger.warning("Could not set the views up: %s", exc)
 
     @staticmethod
+    def show_in_3d(segmentation) -> None:
+        """Give a segmentation its surface, which is what the 3D view draws.
+
+        Opened from a labelmap it holds voxels only, and Slicer builds the
+        closed surface on demand -- so without asking, the mask was in the
+        slices and the 3D view stayed empty.
+        """
+        try:
+            segmentation.CreateClosedSurfaceRepresentation()
+        except Exception as exc:  # noqa: BLE001 - the slices still show it
+            logger.warning("Could not build the 3D surface of %s: %s", segmentation.GetName(), exc)
+
+    @staticmethod
     def _set_layers(background, label, fit: bool) -> None:
         """Put the scan in the slice views, through the SCENE.
 
@@ -1393,6 +1406,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.scene.clear()
         if not self.views:
             return
+        # What VISU did not load is hidden too: the input scan a panel had
+        # rendered, an earlier run's results. A pause after ASO showed the
+        # oriented CBCT on top of the original, two volumes in one place.
+        slicer_io.hide_scene()
         position = max(0, self.viewCombo.currentIndex)
         view = self.views[min(position, len(self.views) - 1)]
 
@@ -1411,10 +1428,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._anchorNode = anchor_node
         on_a_scan = anchor is not None and anchor.kind == index.VOLUME
         masks = [o for o in overlays if o.kind == index.LABELMAP]
-        # One mask can be the volume's label layer. Several cannot, so they
-        # all become segmentations rather than one being shown and the rest
-        # loaded invisibly -- which reads as a viewer that lost them.
-        stack = on_a_scan and len(masks) > 1
+        # Masks on a scan become segmentations, one as much as several: a
+        # label layer is drawn in the slices only, and at an AMASSS stop the
+        # reader judged a segmentation with an empty 3D view. Several could
+        # never be label layers anyway, a volume having one.
+        stack = on_a_scan and bool(masks)
 
         label_node = None
         points = []
@@ -1423,10 +1441,12 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         for artifact in self.cases[self.position].of_kind(index.TRANSFORM):
             self.scene.load(artifact)
         for overlay in overlays:
-            node = self.scene.load(overlay, opened_as=SEGMENTATION if
-                                   (stack and overlay.kind == index.LABELMAP) else "")
+            as_segmentation = stack and overlay.kind == index.LABELMAP
+            node = self.scene.load(overlay, opened_as=SEGMENTATION if as_segmentation else "")
             if node is None:
                 continue
+            if as_segmentation:
+                SceneLoader.show_in_3d(node)
             if overlay.kind == index.LABELMAP and not stack and label_node is None:
                 label_node = node
             if overlay.kind == index.MODEL and on_a_scan:

@@ -26,6 +26,7 @@ Authors:
 """
 
 import glob
+import json
 import logging
 import os
 
@@ -187,9 +188,70 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         self._loadResults()
 
     def _showLoadedResults(self, opened: list) -> None:
-        """Show the results (base class), each landmark set and mesh in its own colour."""
+        """Show the results (base class), each landmark set and mesh in its own
+        colour, and a CBCT pair as the pair it is."""
         super()._showLoadedResults(opened)
         self._colorResults(opened)
+        self._showRegisteredPair(opened)
+
+    def _showRegisteredPair(self, opened: list) -> None:
+        """The T1 under the registered T2, in the slices and in 3D.
+
+        The base class puts the FIRST scan in the slices and renders a scan in
+        3D only when there is one, so a CBCT run -- the T1 and the registered
+        T2 -- ended on one grey scan and an empty 3D view with the landmarks
+        floating in it. Which is which is what the run's `scene.json` says
+        (`reference`, `registered`); without one, nothing is guessed.
+        Best effort, like every view after a finished run.
+        """
+        roles = self._sceneRoles()
+        volumes = [node for kind, node in opened if kind == "volume" and node is not None]
+        registered = [node for node in volumes if roles.get(self._nodePath(node)) == "registered"]
+        if not registered:
+            return
+        reference = next((node for node in volumes
+                          if roles.get(self._nodePath(node)) == "reference"), None)
+        if reference is None:
+            # Oriented first, the T1 travels under `T1_Oriented/` whether or
+            # not it was ticked, and the scene only names it when it was.
+            reference = next((node for node in volumes if node not in registered
+                              and "T1_Oriented" in self._nodePath(node).split(os.sep)), None)
+        try:
+            slicer.util.setSliceViewerLayers(
+                background=reference or registered[0],
+                foreground=registered[0] if reference else None,
+                foregroundOpacity=0.5, fit=True)
+        except Exception as exc:  # noqa: BLE001 - a view is never worth a failure
+            logger.warning("Could not show the registered pair: %s", exc)
+        for node in ([reference] if reference else []) + registered[:1]:
+            self._renderScan(node)
+
+    def _sceneRoles(self) -> dict:
+        """{resolved path: role} from every `scene.json` this run produced."""
+        roles = {}
+        for path in getattr(self, "_producedFiles", None) or ():
+            if not path.endswith("scene.json"):
+                continue
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    listed = json.load(handle).get("files", [])
+            except (OSError, ValueError) as exc:
+                logger.warning("Could not read %s: %s", os.path.basename(path), exc)
+                continue
+            folder = os.path.dirname(path)
+            for entry in listed:
+                if isinstance(entry, dict) and entry.get("path") and entry.get("role"):
+                    roles[os.path.realpath(os.path.join(folder, entry["path"]))] = entry["role"]
+        return roles
+
+    @staticmethod
+    def _nodePath(node) -> str:
+        """The resolved file a loaded node was read from, or ""."""
+        try:
+            storage = node.GetStorageNode()
+            return os.path.realpath(storage.GetFileName()) if storage else ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     @classmethod
     def _colorResults(cls, opened: list) -> None:

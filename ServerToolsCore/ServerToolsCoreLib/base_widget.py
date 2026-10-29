@@ -1700,34 +1700,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         The results landed on top of the inputs, the pauses' reviews and every
         earlier run, so a finished run read as a cluttered scene where what it
-        had just produced was the hard part to find. Hidden, never removed:
-        each node is still in the Data module, one eye-click away.
-
-        Every display node of every displayable node is switched off -- a
-        volume's rendering as much as a model -- and the slice views are
-        emptied, which `_showLoadedResults` then fills with the result's scan.
-        Nodes hidden from editors (the slice-plane models) are Slicer's own
-        and left alone. Best effort, like everything after a finished run.
+        had just produced was the hard part to find. See `slicer_io.hide_scene`.
         """
-        try:
-            nodes = slicer.util.getNodesByClass("vtkMRMLDisplayableNode")
-        except Exception as exc:  # noqa: BLE001 - never worth failing a run
-            logger.warning("Could not list the scene to hide it: %s", exc)
-            return
-        for node in nodes:
-            try:
-                if node.GetHideFromEditors():
-                    continue
-                for index in range(node.GetNumberOfDisplayNodes()):
-                    display = node.GetNthDisplayNode(index)
-                    if display is not None:
-                        display.SetVisibility(False)
-            except Exception as exc:  # noqa: BLE001 - one node must not keep the rest shown
-                logger.warning("Could not hide %s: %s", node.GetName(), exc)
-        try:
-            slicer.util.setSliceViewerLayers(background=None, foreground=None, label=None)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not empty the slice views: %s", exc)
+        slicer_io.hide_scene()
 
     @staticmethod
     def _makeVisible(kind: str, node) -> None:
@@ -1778,7 +1753,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not self._producedRoot:
             return False
         try:
-            relative = os.path.relpath(path, self._producedRoot)
+            # Both resolved: the archive's members come back as real paths
+            # (`slicer_io.unzip_folder`), and an output folder reached through
+            # a symlink -- ~/Documents moved to another disk -- made every one
+            # of them look outside it, so nothing was filtered at all.
+            relative = os.path.relpath(os.path.realpath(path),
+                                       os.path.realpath(self._producedRoot))
         except ValueError:  # different drive on Windows; not ours then
             return False
         folders = relative.replace("\\", "/").split("/")[:-1]
