@@ -39,7 +39,7 @@ class AutoCrop3DRemote(ScriptedLoadableModule):
         are matched per patient by name, so a cohort needs one ROI per patient.
         See more information in <a href="https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools">documentation</a>.
         """)
-        self.parent.acknowledgementText = ""
+        self.parent.acknowledgementText = _("This module was supported by NIDCR R01 024450.")
 
 
 class AutoCrop3DRemoteWidget(ServerToolWidgetBase):
