@@ -44,6 +44,24 @@ class TempWorkspace:
         return os.path.join(self.path, name)
 
 
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def upload_name(node_name: str, extension: str = "") -> str:
+    """A node's name as a file name: what the scene shows, safe on any disk.
+
+    Runs of anything but letters, digits, `.`, `_` and `-` become one `_`, and
+    an extension the name already ends with is dropped so it is not doubled.
+    Empty when nothing usable is left.
+    """
+    name = (node_name or "").strip()
+    for suffix in {extension, ".nii.gz", ".nii", ".nrrd", ".vtk", ".vtp", ".stl", ".obj"}:
+        if suffix and name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return _UNSAFE.sub("_", name).strip("._")
+
+
 def export_volume(volume_node, dest_path: str) -> str:
     return export_node(volume_node, dest_path)
 
