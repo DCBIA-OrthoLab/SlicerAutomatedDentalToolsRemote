@@ -162,7 +162,10 @@ class IntermediateResultsTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, real, True)
         link = os.path.join(tempfile.mkdtemp(), "Slicer Output")
         self.addCleanup(shutil.rmtree, os.path.dirname(link), True)
-        os.symlink(real, link)
+        try:
+            os.symlink(real, link)
+        except (OSError, NotImplementedError) as exc:  # Windows without the privilege
+            self.skipTest("cannot create a symlink here: %s" % exc)
         self.panel._producedRoot = link
         self.panel._producedFiles = [
             os.path.join(real, "Pat_0002_lm_Or.mrk.json"),

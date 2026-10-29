@@ -427,7 +427,7 @@ class PauseTest(unittest.TestCase):
                               focus=os.path.join(self.root, "out", "intermediate", "02_AMASSS"))
         (view,) = case.views(acquisition="Results")
         self.assertEqual(view.anchor.name, "cbct_case_T1_Or.nii.gz")
-        self.assertEqual(view.anchor.origin, "intermediate/01_ASO")
+        self.assertEqual(view.anchor.origin, os.path.join("intermediate", "01_ASO"))
         self.assertEqual([o.name for o in view.overlays], ["cbct_case_T1_Or_seg_CBMASK.nii.gz"])
 
     def test_a_step_inside_another_is_never_drawn_on_what_that_one_wrote(self):
@@ -446,7 +446,7 @@ class PauseTest(unittest.TestCase):
         drawn = {(view.anchor.origin, tuple(o.name for o in view.overlays))
                  for view in case.views(acquisition="Results")}
         self.assertEqual(drawn, {
-            ("intermediate/01_ASO", ("cbct_case_T1_lm_Or.mrk.json",)),
+            (os.path.join("intermediate", "01_ASO"), ("cbct_case_T1_lm_Or.mrk.json",)),
             ("", ("cbct_case_T1_Or_lm_Pred.mrk.json",)),
         })
 
