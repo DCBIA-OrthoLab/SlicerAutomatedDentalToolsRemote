@@ -26,6 +26,7 @@ Authors:
 """
 
 import glob
+import logging
 import os
 
 import qt
@@ -35,6 +36,8 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule
 
 from ServerToolsCoreLib import slicer_io
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase
+
+logger = logging.getLogger("AREGRemote")
 
 
 class AREGRemote(ScriptedLoadableModule):
@@ -118,6 +121,30 @@ class AREGRemoteWidget(ServerToolWidgetBase):
     # three regions legitimately returns hundreds of files, and loading them all
     # would be worse than useless.
     MAX_RESULTS_TO_LOAD = 12
+    # The CBCT every IOS was registered onto is the scene's frame of reference;
+    # without a rendering the 3D view showed the arches floating on nothing.
+    # The base class renders a scan only when the run returned exactly one, so
+    # a CBCT run handing back both timepoints keeps an empty 3D view.
+    VOLUME_RENDERING = "CT-AAA"
+    # One colour per landmark set and one per mesh, in the order the files sort.
+    # Every markups file loaded in Slicer's default colour, so the orientation
+    # landmarks, the CBCT's and each arch's moved copy were one indistinct cloud,
+    # and both arches the same grey. Kept apart so a landmark never takes the
+    # colour of a mesh it sits on.
+    _MARKUPS_COLORS = (
+        (0.90, 0.20, 0.20),  # red
+        (0.20, 0.75, 0.25),  # green
+        (0.20, 0.45, 1.00),  # blue
+        (1.00, 0.80, 0.10),  # yellow
+        (0.80, 0.30, 0.90),  # purple
+        (0.10, 0.80, 0.85),  # cyan
+    )
+    _MODEL_COLORS = (
+        (0.95, 0.85, 0.65),  # ivory
+        (0.65, 0.80, 1.00),  # light blue
+        (1.00, 0.70, 0.75),  # pink
+        (0.70, 0.95, 0.70),  # light green
+    )
     # Pattern -> how to load it. A registered CBCT is a VOLUME, not a
     # segmentation: AREG moves a scan, it does not label one. `*.tfm` is
     # deliberately absent — the transform is there to carry a measurement back
@@ -132,8 +159,9 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         ("*.gipl", "volume"),
         ("*.vtk", "model"),
         ("*.vtp", "model"),
-        # The landmarks a run hands back when "Moved landmarks" is ticked:
-        # each mesh's, moved with it, and the CBCT's it was registered on.
+        # The landmarks a run hands back when "Registration landmarks" is
+        # ticked (each mesh's, moved with it, and the CBCT's it was registered
+        # on) or "Orientation landmarks" (the ones ASO oriented the CBCT on).
         # Without these the scene showed the meshes on the CBCT and no point
         # to judge the fit by. `*_lm.json` is the moved copy of a plain-JSON
         # input; AREG_report.json matches neither pattern.
@@ -157,6 +185,36 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         if not (self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked()):
             return
         self._loadResults()
+
+    def _showLoadedResults(self, opened: list) -> None:
+        """Show the results (base class), each landmark set and mesh in its own colour."""
+        super()._showLoadedResults(opened)
+        self._colorResults(opened)
+
+    @classmethod
+    def _colorResults(cls, opened: list) -> None:
+        """Give every markups node and every model a colour of its own.
+
+        Ordered by node name, which is the file's, so a lower arch and its
+        landmarks get the same colours on every run. Best effort: a colour is
+        never worth failing a run that finished.
+        """
+        for kind, palette in (("markups", cls._MARKUPS_COLORS), ("model", cls._MODEL_COLORS)):
+            nodes = sorted((node for k, node in opened if k == kind and node is not None),
+                           key=lambda node: node.GetName())
+            for index, node in enumerate(nodes):
+                color = palette[index % len(palette)]
+                try:
+                    display = node.GetDisplayNode()
+                    if display is None:
+                        continue
+                    display.SetColor(*color)
+                    if kind == "markups":
+                        # A markups point is drawn in its SELECTED colour, which
+                        # every point is until clicked.
+                        display.SetSelectedColor(*color)
+                except Exception as exc:  # noqa: BLE001 - never worth failing a run
+                    logger.warning("Could not colour %s: %s", node.GetName(), exc)
 
     @classmethod
     def _findResults(cls, outputDir: str) -> list:

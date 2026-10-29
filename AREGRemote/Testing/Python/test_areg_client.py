@@ -741,6 +741,63 @@ class ResultDiscoveryTest(unittest.TestCase):
         self._write("CB/P1_CB_Reg.nii.gz")
         self.assertEqual(len(AREGRemoteWidget._findResults(self.dir)), 1)
 
+
+class _Display:
+    def __init__(self):
+        self.color = self.selected = None
+
+    def SetColor(self, *rgb):
+        self.color = rgb
+
+    def SetSelectedColor(self, *rgb):
+        self.selected = rgb
+
+
+class _Node:
+    def __init__(self, name):
+        self.name, self.display = name, _Display()
+
+    def GetName(self):
+        return self.name
+
+    def GetDisplayNode(self):
+        return self.display
+
+
+class ResultColorTest(unittest.TestCase):
+    def test_the_cbct_is_rendered_in_3d(self):
+        """The CBCT is what every arch was registered onto: without a
+        rendering the 3D view showed the meshes floating on nothing."""
+        self.assertEqual(AREGRemoteWidget.VOLUME_RENDERING, "CT-AAA")
+
+    def test_each_landmark_set_and_each_mesh_gets_its_own_colour(self):
+        """All markups arrived in Slicer's default colour, so the orientation,
+        CBCT and moved landmarks were one cloud, and both arches one grey."""
+        markups = [_Node(name) for name in ("U_lm", "CBCT_lm", "L_lm", "Or_lm")]
+        models = [_Node("U"), _Node("L")]
+        opened = [("markups", node) for node in markups] + [("model", node) for node in models]
+        AREGRemoteWidget._colorResults(opened + [("volume", object()), ("markups", None)])
+
+        markup_colors = [node.display.selected for node in markups]
+        self.assertEqual(len(set(markup_colors)), len(markups))
+        self.assertEqual([node.display.color for node in markups], markup_colors)
+        self.assertEqual(len({node.display.color for node in models}), len(models))
+        self.assertTrue(all(node.display.selected is None for node in models))
+
+    def test_a_file_keeps_its_colour_from_one_run_to_the_next(self):
+        """By name, not by load order: the lower arch is the same colour every time."""
+        first = [_Node("L"), _Node("U")]
+        second = [_Node("U"), _Node("L")]
+        AREGRemoteWidget._colorResults([("model", node) for node in first])
+        AREGRemoteWidget._colorResults([("model", node) for node in second])
+        self.assertEqual(first[0].display.color, second[1].display.color)
+
+    def test_a_node_that_cannot_be_coloured_does_not_stop_the_others(self):
+        broken, fine = _Node("A"), _Node("B")
+        broken.display.SetColor = None
+        AREGRemoteWidget._colorResults([("model", broken), ("model", fine)])
+        self.assertIsNotNone(fine.display.color)
+
 # ---------------------------------------------------------------------------
 # What Apply waits for
 # ---------------------------------------------------------------------------
