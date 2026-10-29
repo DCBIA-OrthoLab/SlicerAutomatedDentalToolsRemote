@@ -1329,7 +1329,7 @@ class LoadResultsTest(unittest.TestCase):
         self.panel._loadResults()
 
         self.assertEqual(_util.loaded, [])
-        self.assertEqual(opened, [("/out/run", None)],
+        self.assertEqual(opened, [(os.path.normpath("/out/run"), None)],
                          "a cohort is handed to VISU, opened on this run's folder")
         self.assertEqual(_util.infos, [])
 
@@ -1344,7 +1344,7 @@ class LoadResultsTest(unittest.TestCase):
         self.panel._loadResults()
 
         self.assertEqual(_util.loaded, [])
-        self.assertEqual(opened, ["/out/run"])
+        self.assertEqual(opened, [os.path.normpath("/out/run")])
 
     def test_a_t1_and_a_t2_of_one_patient_are_one_patient(self):
         """Counted as patients, not timepoints: one patient stays in the scene."""
