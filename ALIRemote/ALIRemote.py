@@ -148,7 +148,9 @@ class ALIRemoteWidget(ServerToolWidgetBase):
         very different things, and only `run_report.json` says which.
         """
         resultDir = os.path.dirname(result.path)
-        if slicer_io.is_extractable_archive(result.path):
+        # Normally unpacked already, off the main thread, before this is called
+        # (base_widget._unpackedOnWorker); then the archive is gone.
+        if getattr(result, "extracted", None) is None and slicer_io.is_extractable_archive(result.path):
             slicer_io.unzip_folder(result.path, resultDir)
             os.remove(result.path)
 

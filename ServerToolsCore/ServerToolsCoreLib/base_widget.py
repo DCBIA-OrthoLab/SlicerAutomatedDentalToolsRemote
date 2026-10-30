@@ -1493,13 +1493,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         a zip signature: .xlsx/.docx/.ods are themselves zip containers
         (OOXML), so that would "extract" a result spreadsheet into raw XML
         parts instead of keeping it as the file it is."""
-        if slicer_io.is_extractable_archive(result.path):
+        extracted = getattr(result, "extracted", None)
+        if extracted is not None:
+            # Unpacked already, on the job's worker thread, where a result
+            # archive expanding far beyond its own size (label volumes
+            # compress ~100x) freezes nothing (see `_unpackedOnWorker`).
             resultDir = os.path.dirname(result.path)
-            # Unpacking runs on the main thread and a result archive can expand
-            # far beyond its own size (label volumes compress ~100x), so say so
-            # before starting rather than letting the panel look frozen again.
-            # processEvents is what actually paints it: without it the label is
-            # only repainted once the (blocking) extraction is already done.
+            self._producedFiles = list(extracted)
+            self._producedRoot = resultDir
+            self._mergeRunReport(resultDir)
+            self._announce(_("Results saved to {path}").format(path=resultDir))
+        elif slicer_io.is_extractable_archive(result.path):
+            resultDir = os.path.dirname(result.path)
+            # Reached when the worker could not unpack it, or for a result
+            # that never went through one. Unpacking here runs on the main
+            # thread, so say so before starting rather than letting the panel
+            # look frozen again. processEvents is what actually paints it:
+            # without it the label is only repainted once the (blocking)
+            # extraction is already done.
             self._showPhase(_("Extracting results..."))
             slicer.app.processEvents()
             try:
@@ -2190,7 +2201,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # exactly what must not be introduced: BackgroundJob's queue plus
             # its main-thread timer is the one place Qt is touched from.
             # _onJobProgress tells the two apart by type.
-            return self.client.run(
+            result = self.client.run(
                 self.TOOL_NAME,
                 args=run.args,
                 files=run.files,
@@ -2202,6 +2213,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 batch=({"id": run.cohort.batch_id, "index": run.cohort_index,
                         "total": run.cohort.total} if run.cohort else None),
             )
+            return self._unpackedOnWorker(run, result, progress_cb)
 
         run.phase = _("Sending request...")
         run.started_at = time.monotonic()
@@ -2290,6 +2302,37 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     logger.debug("Server-side cancel failed", exc_info=True)
 
         threading.Thread(target=cancel_all, name="sadt-run-cancel", daemon=True).start()
+
+    def _unpackedOnWorker(self, run, result, progress_cb):
+        """Do what a delivery costs on disk HERE, on the job's worker thread,
+        and hand the result to `on_success` with it done.
+
+        Unpacking the answer -- a checkpoint for review, a "save_as" archive
+        -- and digesting what a reader is about to correct used to run in
+        `on_success`, which is the Qt main thread: 1.45 s of a frozen Slicer
+        for a 500 MB checkpoint, a cohort's worth for every batch. Nothing
+        here touches the scene or a widget, which is the one thing a worker
+        may not do (see worker.py).
+
+        Best effort: a failure is left for the main thread to meet again in
+        `_unpackCheckpoint` / `_handleSaveAsResult`, which already turn a bad
+        archive into what the panel says about one.
+        """
+        checkpoint = getattr(result, "checkpoint", None)
+        try:
+            if checkpoint is not None:
+                if checkpoint.path and run.output_dir:
+                    checkpoint.unpacked = self._unpackCheckpointFiles(run, checkpoint)
+            elif (self.resultKind == "save_as" and getattr(result, "path", None)
+                    and slicer_io.is_extractable_archive(result.path)):
+                progress_cb(_("Extracting results..."))
+                result.extracted = slicer_io.unzip_folder(
+                    result.path, os.path.dirname(result.path))
+                os.remove(result.path)
+        except Exception as exc:  # noqa: BLE001 - the main thread reports it
+            logger.warning("Could not unpack the answer of run %d on its worker: %s",
+                           run.number, exc)
+        return result
 
     def _onJobSuccess(self, run, result) -> None:
         if getattr(result, "checkpoint", None) is not None:
@@ -2694,10 +2737,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         that step produced this time, and files the previous pass left would
         otherwise read as part of it.
 
-        The digest of everything unpacked is taken here, before the reader can
-        touch any of it, and that timing is the whole mechanism: it is the only
-        moment at which the folder is known to hold exactly what the server
-        produced.
+        The digest of everything unpacked is taken as it is unpacked, before
+        the reader can touch any of it, and that timing is the whole mechanism:
+        it is the only moment at which the folder is known to hold exactly what
+        the server produced.
         """
         # Cleared first, so a checkpoint that fails to unpack cannot leave the
         # PREVIOUS one's baseline in place -- against which every file of a
@@ -2705,19 +2748,32 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         run.checkpoint_digests = {}
         if not checkpoint.path or not run.output_dir:
             return None
+        # Done already on the job's worker thread, in the normal case (see
+        # `_unpackedOnWorker`); here only for a checkpoint that did not go
+        # through one, or that the worker failed to unpack.
+        unpacked = getattr(checkpoint, "unpacked", None)
+        if unpacked is None:
+            try:
+                unpacked = self._unpackCheckpointFiles(run, checkpoint)
+            except Exception as exc:  # noqa: BLE001 - a bad archive is not a crash
+                logger.warning("Could not unpack the checkpoint of run %d: %s",
+                               run.number, exc)
+                return None
+        folder, run.checkpoint_digests = unpacked
+        return folder
+
+    def _unpackCheckpointFiles(self, run, checkpoint) -> tuple:
+        """`(folder, digests)`: the checkpoint unpacked where its review goes,
+        and the digest of every file in it. Disk work only -- no widget, no
+        scene, nothing of `run` changed -- so the job's worker thread runs it.
+        Raises on an archive that cannot be unpacked."""
         folder = os.path.join(run.output_dir, _CHECKPOINT_DIRNAME,
                               self._checkpointFolderName(run, checkpoint))
-        try:
-            shutil.rmtree(folder, ignore_errors=True)
-            os.makedirs(folder, exist_ok=True)
-            slicer_io.unzip_folder(checkpoint.path, folder)
-            os.remove(checkpoint.path)
-        except Exception as exc:  # noqa: BLE001 - a bad archive is not a crash
-            logger.warning("Could not unpack the checkpoint of run %d: %s",
-                           run.number, exc)
-            return None
-        run.checkpoint_digests = digest.digest_tree(folder)
-        return folder
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder, exist_ok=True)
+        slicer_io.unzip_folder(checkpoint.path, folder)
+        os.remove(checkpoint.path)
+        return folder, digest.digest_tree(folder)
 
     @staticmethod
     def _checkpointSlots(folder: str, produced) -> dict:
@@ -2837,7 +2893,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                      if rewind_to else _("Carrying the run on..."))
 
         def task(progress_cb):
-            return self.client.resume_run(
+            result = self.client.resume_run(
                 self.TOOL_NAME,
                 checkpoint.run_id,
                 corrections=corrections,
@@ -2845,6 +2901,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 progress_cb=progress_cb,
                 rewind_to=rewind_to,
             )
+            return self._unpackedOnWorker(run, result, progress_cb)
 
         run.job = BackgroundJob(
             task,

@@ -685,6 +685,9 @@ class RunCheckpoint:
     stopped_after: str
     produced: tuple = ()
     path: Optional[str] = None
+    # `(folder, digests)` once a panel's worker thread has unpacked `path` for
+    # review (base_widget._unpackedOnWorker), so the main thread does not.
+    unpacked: Optional[tuple] = None
 
 
 @dataclass
@@ -698,6 +701,10 @@ class ToolResult:
     # on `resume_run`. A caller that has never heard of this reads None and
     # behaves exactly as it always did.
     checkpoint: Optional[RunCheckpoint] = None
+    # Every file written, once a panel's worker thread has unpacked the
+    # archive at `path` -- which is then gone -- into the folder holding it
+    # (base_widget._unpackedOnWorker). None: nothing was unpacked yet.
+    extracted: Optional[list] = None
 
 
 def checked_server_url(server_url: str) -> str:
