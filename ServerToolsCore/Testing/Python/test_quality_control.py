@@ -963,6 +963,65 @@ class PanelTest(unittest.TestCase):
 
         self.assertEqual(self.handled, ["done"])
 
+    # -- the disk work of a delivery is the worker's, not Qt's -----------
+
+    def _deliveredOnAWorker(self, answer):
+        """Apply, let the job's target run on a thread of its own, the way
+        BackgroundJob runs it, then deliver on THIS thread, the main one.
+        Returns the unzip and digest calls made here, which is what freezes
+        the panel: 1.45 s for a 500 MB checkpoint."""
+        main, made = threading.get_ident(), []
+
+        def spy(name, real):
+            def recorded(*args, **kwargs):
+                if threading.get_ident() == main:
+                    made.append(name)
+                return real(*args, **kwargs)
+            return recorded
+
+        self.client.run = lambda tool_name, **kwargs: answer
+        job = self._apply()
+        self.panel._runs[0].output_dir = self.work
+        with mock.patch.object(base_widget.slicer_io, "unzip_folder",
+                               spy("unzip_folder", base_widget.slicer_io.unzip_folder)), \
+                mock.patch.object(base_widget.digest, "digest_tree",
+                                  spy("digest_tree", base_widget.digest.digest_tree)):
+            delivered = []
+            worker = threading.Thread(target=lambda: delivered.append(job.collect()))
+            worker.start()
+            worker.join(30)
+            self.assertFalse(worker.is_alive(), "the job's target never returned")
+            job.succeed(delivered[0])
+        return made
+
+    def test_a_checkpoint_is_unpacked_and_digested_off_the_main_thread(self):
+        made = self._deliveredOnAWorker(self._checkpoint())
+
+        self.assertEqual(made, [])
+        run = self.panel._runs[0]
+        self.assertEqual(self.reviewer.opened, [self._reviewed()])
+        self.assertTrue(os.path.isfile(
+            os.path.join(self._reviewed(), "01_ALI_CBCT", "p1_lm_Pred.mrk.json")))
+        self.assertEqual(sorted(run.checkpoint_digests),
+                         [os.path.join("01_ALI_CBCT", "p1_lm_Pred.mrk.json")])
+
+    def test_a_result_archive_is_unpacked_off_the_main_thread(self):
+        archive = os.path.join(self.work, "AREG_output.zip")
+        with open(archive, "wb") as handle:
+            handle.write(_zip_bytes({"p1/p1_lm_Pred.mrk.json": "{}"}))
+        del self.panel.handleResult  # the base class's own: "save_as" unpacks
+        self.panel.RESULT_KIND = "save_as"
+        self.panel._schema = {}
+
+        made = self._deliveredOnAWorker(ToolResult(kind="file", path=archive))
+
+        self.assertEqual(made, [])
+        landed = os.path.realpath(os.path.join(self.work, "p1", "p1_lm_Pred.mrk.json"))
+        self.assertTrue(os.path.isfile(landed))
+        self.assertFalse(os.path.exists(archive))
+        self.assertEqual(self.panel._producedFiles, [landed])
+        self.assertEqual(self.panel._producedRoot, self.work)
+
 
 class ReviewModuleTest(unittest.TestCase):
     """The seam between the two halves, which is a NAME and a function.
