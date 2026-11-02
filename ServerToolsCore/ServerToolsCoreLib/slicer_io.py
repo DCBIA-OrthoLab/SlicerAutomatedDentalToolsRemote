@@ -17,10 +17,14 @@ from urllib.parse import urlparse
 import qt
 import slicer
 
-from . import config
+from . import config, console
 from .errors import ServerToolError
 
 logger = logging.getLogger("ServerToolsCore.slicer_io")
+
+# Also installed by the ServerToolsCore module at startup; repeated here for a
+# module reloaded on its own, which imports this file and nothing at startup.
+console.install()
 
 
 class TempWorkspace:

@@ -274,8 +274,8 @@ class LogEventShapeTest(unittest.TestCase):
     def test_a_progress_event_is_not_a_log_line(self):
         self.assertFalse(is_log_event(normalise_run_event(_event(1))))
 
-    def test_the_four_levels_survive_and_anything_else_reads_as_info(self):
-        for level in ("debug", "info", "warning", "error"):
+    def test_the_known_levels_survive_and_anything_else_reads_as_info(self):
+        for level in ("debug", "info", "warning", "error", "metric"):
             self.assertEqual(normalise_run_event(_log(1, level=level))["level"], level)
         self.assertEqual(normalise_run_event(_log(1, level="WARNING"))["level"], "warning")
         for level in ("critical", "", None, 3, "<b>error</b>"):
@@ -375,6 +375,24 @@ class WatchRunTest(_LiveServerTest):
         self.assertTrue(delivered)
         self.assertEqual([event["seq"] for event in received], [0, 1, 2])
         self.assertEqual(received[-1]["state"], "done")
+
+    def test_a_resumed_run_is_watched_from_where_its_first_watch_stopped(self):
+        """The resume of a stopped run keeps its id and its event file; a new
+        watcher replaying it from the start would print every line before the
+        stop a second time."""
+        self.state.events = [_event(0), _event(1, state="paused", phase="paused")]
+        # A pause ends nothing on the stream: `run` stops its watcher once the
+        # POST has answered with the checkpoint, which is what this stands for.
+        stop = threading.Event()
+        self.client.watch_run("run-id-0123456789abcdef",
+                              lambda event: event["seq"] == 1 and stop.set(),
+                              stop_event=stop)
+        self.state.events += [_event(2), _event(3, state="done", phase="done")]
+
+        seen = self.client.__dict__["_delivered_seq"]["run-id-0123456789abcdef"]
+        _delivered, received = self._watch(after_seq=seen)
+
+        self.assertEqual([event["seq"] for event in received], [2, 3])
 
     def test_a_reconnect_does_not_re_announce_an_hour_of_progress(self):
         """Every connection replays the run from the beginning by design (a

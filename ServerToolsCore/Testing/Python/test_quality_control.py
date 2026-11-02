@@ -338,11 +338,12 @@ class _RecordingClient:
         raise AssertionError("the stub job never invokes its target")
 
     def resume_run(self, tool_name, run_id, corrections=None, output_dir=None,
-                   progress_cb=None, rewind_to=None):
+                   progress_cb=None, rewind_to=None, event_cb=None, cancel_event=None):
         self.resumed.append({"tool": tool_name, "run_id": run_id,
                              "corrections": dict(corrections or {}),
                              "output_dir": output_dir,
-                             "rewind_to": rewind_to})
+                             "rewind_to": rewind_to,
+                             "event_cb": event_cb, "cancel_event": cancel_event})
         return ToolResult(kind="text", text="carried on")
 
     def cancel_run(self, run_id):
@@ -516,6 +517,17 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(sorted(sent["corrections"]), ["01_ALI_CBCT"])
         self.assertTrue(zipfile.is_zipfile(sent["corrections"]["01_ALI_CBCT"]))
         self.assertIsNone(run.paused, "the run is going again")
+
+    def test_the_steps_after_the_review_are_still_watched(self):
+        """A registration computes its residuals after the last stop. Resumed
+        without a watcher, the panel went quiet and they never reached the
+        console."""
+        run, _job = self._stopped()
+        self.reviewer.press_continue(flagged=set(), written=set())
+
+        sent = self._collectResume()
+        self.assertIsNotNone(sent["event_cb"], "progress and log lines keep arriving")
+        self.assertIs(sent["cancel_event"], run.cancel_event)
 
     def test_a_reader_who_changed_nothing_sends_nothing_back(self):
         """A step is a cohort's worth of scans. Re-uploading every one of them

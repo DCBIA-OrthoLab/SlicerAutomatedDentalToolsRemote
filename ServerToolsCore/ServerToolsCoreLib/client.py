@@ -131,7 +131,9 @@ _RUN_LOGS_QUERY = {"logs": "user"}
 # The contract's four levels. Anything else a server or a tool sends reads as
 # "info": a level is only ever used to pick a colour, so an unknown one must
 # degrade to the plain line rather than to no line at all.
-RUN_LOG_LEVELS = ("debug", "info", "warning", "error")
+# "metric" is a number the user may want and can skip -- a residual, a volume --
+# printed in its own colour; an older server never sends it.
+RUN_LOG_LEVELS = ("debug", "info", "warning", "error", "metric")
 
 # A tool name as the server publishes one (`source` on a log line, `tool` on a
 # nested call's marker). Held to an identifier on this side too, because it is
@@ -1146,7 +1148,10 @@ class ToolServerClient:
         self._raise_if_cancelled(cancel_event, tool_name)
 
         if progress_cb:
-            progress_cb(f"Sending '{tool_name}' request...")
+            # Not the tool's name: a module's tool can be a router (AREG sends
+            # an "IOS to CBCT" run to AREG_IOSCBCT), and naming the router read
+            # as a step of its own. What is happening is the request leaving.
+            progress_cb("Sending the request to the server...")
 
         post_headers = {**headers, **_RESULT_DELIVERY_HEADER}
         if detached:
@@ -1294,7 +1299,7 @@ class ToolServerClient:
             response.close()
         raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
 
-    def _start_watcher(self, run_id, event_cb, watch_stop, cancel_event):
+    def _start_watcher(self, run_id, event_cb, watch_stop, cancel_event, after_seq=-1):
         """The second connection, on its own daemon thread, or None.
 
         None whenever there is nothing to watch (no id) or nobody to tell (no
@@ -1308,7 +1313,7 @@ class ToolServerClient:
 
         def watch():
             try:
-                self.watch_run(run_id, event_cb, stop_event=stop)
+                self.watch_run(run_id, event_cb, stop_event=stop, after_seq=after_seq)
             except Exception:
                 # Never propagates, and never fails a run. This thread exists
                 # to make a wait legible; a run that completed must not be
@@ -1321,7 +1326,8 @@ class ToolServerClient:
         thread.start()
         return thread
 
-    def watch_run(self, run_id: str, on_event: Callable[[dict], None], stop_event=None) -> bool:
+    def watch_run(self, run_id: str, on_event: Callable[[dict], None], stop_event=None,
+                  after_seq: int = -1) -> bool:
         """Stream a run's progress events, calling `on_event` for each.
 
         Blocks until the run reaches a terminal state, until `stop_event` is
@@ -1346,6 +1352,11 @@ class ToolServerClient:
           ("a watcher that attaches late is never behind"), so `seq` is what
           keeps a reconnect from re-announcing an hour of progress.
 
+        `after_seq` skips what an earlier watcher of the same run already
+        delivered: a run carried on after a review keeps its id and its event
+        file, and replaying it from the start would announce everything before
+        the stop a second time.
+
         Nothing here is ever fatal to a run. It raises only what the caller
         chooses to let escape; `_start_watcher` lets nothing.
         """
@@ -1358,8 +1369,10 @@ class ToolServerClient:
             "Accept-Encoding": "identity",
         }
         started = time.monotonic()
-        delivered_seq = -1
+        delivered_seq = after_seq
         delivered_any = False
+        # Where this run's stream has got to, for the watcher of its resume.
+        seen = self.__dict__.setdefault("_delivered_seq", {})
 
         def stopped() -> bool:
             return stop_event is not None and stop_event.is_set()
@@ -1438,6 +1451,7 @@ class ToolServerClient:
                         if event is None or event["seq"] <= delivered_seq:
                             continue
                         delivered_seq = event["seq"]
+                        seen[run_id] = delivered_seq
                         delivered_any = True
                         on_event(event)
                         # A log line never ends the watch, whatever state a
@@ -1498,8 +1512,16 @@ class ToolServerClient:
         output_dir: Optional[str] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
         rewind_to: Optional[str] = None,
+        event_cb: Optional[Callable[[dict], None]] = None,
+        cancel_event=None,
     ) -> ToolResult:
         """Carry a stopped run on: POST /runs/{id}/resume.
+
+        `event_cb` and `cancel_event` are `run`'s: the steps after a review
+        report their progress and their log lines exactly as the ones before
+        it did. Without a watcher here the panel went silent at the first stop,
+        and whatever the tool said after it -- a registration's residuals,
+        computed last -- never reached the person who started the run.
 
         `rewind_to` sends it BACKWARDS instead: the run is armed again at a
         checkpoint it already cleared and stops there, with that step's
@@ -1531,6 +1553,22 @@ class ToolServerClient:
             progress_cb(
                 f"Taking '{tool_name}' back to {rewind_to}..." if rewind_to
                 else f"Sending your corrections to '{tool_name}'...")
+
+        watch_stop = threading.Event()
+        watcher = self._start_watcher(
+            run_id, event_cb, watch_stop, cancel_event,
+            after_seq=self.__dict__.get("_delivered_seq", {}).get(run_id, -1))
+        try:
+            return self._resume_request(tool_name, run_id, url, headers, schema,
+                                        corrections, output_dir, progress_cb, rewind_to)
+        finally:
+            watch_stop.set()
+            if watcher is not None:
+                watcher.join(timeout=0.5)
+
+    def _resume_request(self, tool_name, run_id, url, headers, schema, corrections,
+                        output_dir, progress_cb, rewind_to) -> ToolResult:
+        """The resume POST itself and its answer; see `resume_run`."""
 
         # Straight multipart, with no /uploads staging: the server reads this
         # body as a form and has no reference field for it. A correction is a

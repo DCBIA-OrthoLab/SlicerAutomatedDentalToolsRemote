@@ -129,6 +129,15 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
+# test_console.py: this extension's warnings printed orange in the Python
+# console, its errors left red, and nothing lost from the application log.
+# Stdlib only: the filter is handed a fake handler and a fake printer.
+add_test(
+  NAME ServerToolsCore_test_console
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_console
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
 # test_quality_control.py: a run that stops for a reader to correct it, and is
 # then carried on. Both halves -- the client recognising the record and posting
 # the corrections back, and the panel's loop around a stub reviewer -- run
