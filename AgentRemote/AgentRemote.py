@@ -130,7 +130,7 @@ class AgentRemoteParameterNode:
     """
 
     prompt: str
-    folders: list
+    folders: list[str]
     modeagent: str
 
 #

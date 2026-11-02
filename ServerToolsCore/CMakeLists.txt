@@ -12,6 +12,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   ServerToolsCoreLib/__init__.py
   ServerToolsCoreLib/config.py
+  ServerToolsCoreLib/console.py
   ServerToolsCoreLib/errors.py
   ServerToolsCoreLib/client.py
   ServerToolsCoreLib/transfer.py

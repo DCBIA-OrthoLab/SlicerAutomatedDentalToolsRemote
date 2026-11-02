@@ -27,7 +27,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
-from . import (config, design, digest, formgen, is_file_type, is_log_event,
+from . import (config, console, design, digest, formgen, is_file_type, is_log_event,
                new_run_id, slicer_io, testfile_entries)
 from .errors import RunCancelled, ServerToolError, plain_text
 from .worker import BackgroundJob
@@ -64,7 +64,8 @@ _STEPS_DIRNAME = "intermediate"
 # How a level reads in the console. Fixed English words rather than translated
 # ones: they are a column a reader scans for "ERROR", and a fixed width keeps
 # the messages after them aligned.
-_LOG_LEVEL_WORDS = {"debug": "DEBUG", "info": "INFO", "warning": "WARNING", "error": "ERROR"}
+_LOG_LEVEL_WORDS = {"debug": "DEBUG", "info": "INFO", "warning": "WARNING", "error": "ERROR",
+                    "metric": "METRIC"}
 
 
 def format_run_log_line(event, prefix: str = "", now=None) -> str:
@@ -94,6 +95,31 @@ def format_run_log_line(event, prefix: str = "", now=None) -> str:
     parts.append(_LOG_LEVEL_WORDS.get(level, "INFO").ljust(7))
     parts.append(event.get("message") or "")
     return "  ".join(parts)
+
+
+_DIGITS = re.compile(r"\d+")
+
+
+def step_key(text: str) -> str:
+    """What makes two step lines "the same step" for the console narrative.
+
+    Numbers are blanked, so "scan 3 of 12" follows "scan 2 of 12" on the panel
+    without adding a console line per scan: the console tells the run's story
+    one step at a time, the panel keeps the live count.
+    """
+    return _DIGITS.sub("#", text or "").strip()
+
+
+def format_duration(seconds: float) -> str:
+    """`seconds` the way the end-of-run line says it: "48 s", "4 min 58 s"."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return "{} s".format(seconds)
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return "{} min {:02d} s".format(minutes, seconds)
+    hours, minutes = divmod(minutes, 60)
+    return "{} h {:02d} min".format(hours, minutes)
 
 
 # Result kinds drawn by their own display node rather than by a slice
@@ -315,6 +341,9 @@ class _Run:
         self.job = None
         self.phase = ""
         self.started_at = None  # None while the run is still queued
+        # The step the console last narrated, as `step_key` reads it, so a
+        # step is written once however many progress events repeat it.
+        self.narrated_step = None
         # The checkpoint this run is stopped at, or None. A stopped run holds
         # no thread and no card -- the server is keeping its work for it while
         # somebody reads what it produced -- but it is emphatically not over,
@@ -660,8 +689,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # says so -- and a user who downloaded a 648 MB cohort once and did not
         # come back would keep it for good. Opening any tool is now enough.
         self._sweepLeftoverTestFiles()
-        self._refreshSchema()
-        self._refreshServerSelectables()
+        # A server that could not be reached for the schema will not answer
+        # for the hosted files a moment later either; asking anyway only adds
+        # a second warning about the same outage.
+        if self._refreshSchema() is not False:
+            self._refreshServerSelectables()
         self._refreshSceneVolumes()
         self._refreshServerStatus()
 
@@ -1166,8 +1198,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             widget.setCurrentIndex(entries.index(previous))
         return choices
 
-    def _refreshSchema(self) -> None:
+    def _refreshSchema(self) -> "bool | None":
         """Rebuild the form when the SERVER's schema has changed under it.
+
+        Returns False when the server could not be reached, so `enter()` does
+        not ask it for anything else; None when there was nothing to compare.
 
         The schema is read once, at `setup()`. A panel built while the server
         offered an older version of this tool then keeps that form for the
@@ -1188,18 +1223,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         it.
         """
         if self._schema is None:
-            return
+            return None
         try:
             schema = self.client.get_tool_schema(self.TOOL_NAME, force_refresh=True)
         except ServerToolError as exc:
             logger.warning("Could not re-read the schema for '%s': %s",
                            self.TOOL_NAME, exc)
-            return
+            return False
         if schema == self._schema:
-            return
+            return True
         logger.info("'%s': the server's schema changed; rebuilding the panel",
                     self.TOOL_NAME)
         self._buildForm(force_refresh=True)
+        return True
 
     def _refreshServerSelectables(self) -> None:
         """Re-read the hosted-file lists and update the dropdowns in place.
@@ -2343,6 +2379,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             run.job = None
             self._reviewCheckpoint(run, result.checkpoint)
             return
+        self._narrateEnd(run, _("Finished"), console.OUTPUT)
         self._finishRun(run)
         self._countBatch(run)
         # Which run `handleResult` is handling. It takes only the result -- the
@@ -2368,6 +2405,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # the next Apply somewhere the current cohort is still writing.
         if not run.cohort:
             self._suggestOutputFolder()
+        self._showOutcome(run, _("Finished"))
+
+    def _showOutcome(self, run, outcome: str, finished: bool = True) -> None:
+        """Leave how the run ended on the panel, once nothing else is running.
+
+        Hiding the progress line at the end left whatever it said last --
+        "Extracting results... 2:30 elapsed" -- whenever a late message put it
+        back, and said nothing either way about whether the run had finished.
+        """
+        if self._runs:
+            return
+        if run.started_at is not None:
+            elapsed = int(time.monotonic() - run.started_at)
+            template = (_("{outcome} in {minutes}:{seconds:02d}") if finished
+                        else _("{outcome} after {minutes}:{seconds:02d}"))
+            outcome = template.format(
+                outcome=outcome, minutes=elapsed // 60, seconds=elapsed % 60)
+        self._showPhase(outcome)
 
     def _finishCohort(self, run) -> None:
         """Put a divided cohort back in one folder, once its last batch has
@@ -2489,6 +2544,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""
+        if isinstance(exc, RunCancelled):
+            self._narrateEnd(run, _("Cancelled"), console.STEP)
+        else:
+            self._narrateEnd(run, _("Failed: {reason}").format(
+                reason=plain_text(str(exc))), console.ERROR)
         self._finishRun(run)
         self._countBatch(run, succeeded=False)
         # A cohort whose last batch failed still has the earlier ones to put
@@ -2505,7 +2565,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.info("Run %d of '%s' was cancelled", run.number, self.TOOL_NAME)
             slicer.util.showStatusMessage(
                 _("Run {number} cancelled.").format(number=run.number), 3000)
+            self._showOutcome(run, _("Cancelled"), finished=False)
             return
+        self._showOutcome(run, _("Failed"), finished=False)
         slicer.util.errorDisplay(plain_text(str(exc)))
 
     # ------------------------------------------------------------------
@@ -2529,6 +2591,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         run.clear_server_progress()
         run.phase = _("Stopped after {step} — waiting for your review").format(
             step=checkpoint.stopped_after or _("a checkpoint"))
+        self._narrateStep(run)
         self._syncRunControls()
 
         folder = self._unpackCheckpoint(run, checkpoint)
@@ -2900,6 +2963,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 output_dir=run.output_dir,
                 progress_cb=progress_cb,
                 rewind_to=rewind_to,
+                # The same callback a first attempt gets, so the steps after
+                # the review are narrated like the ones before it.
+                event_cb=progress_cb,
+                cancel_event=run.cancel_event,
             )
             return self._unpackedOnWorker(run, result, progress_cb)
 
@@ -2944,6 +3011,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # response" comes after "packaging" -- so the older half is dropped
         # rather than left on the panel beside the newer one.
         run.clear_server_progress()
+        self._narrateStep(run)
         self._renderProgress()
 
     def _onRunEvent(self, run, event) -> None:
@@ -2964,6 +3032,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Only below the root: the tool the user asked for is already named by
         # the panel it is running in.
         run.nested_tool = run.call_tools.get(call) if run.depth and call else None
+        # Not for a call's open or close marker: it names the sub-tool and says
+        # nothing it is doing, and the sub-tool's first real step follows it.
+        if not event.get("edge"):
+            self._narrateStep(run)
         self._renderProgress()
 
     def _onRunLog(self, run, event) -> None:
@@ -2976,14 +3048,111 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         Prefixed with this panel's tool, since every panel prints to the same
         console.
         """
-        prefix = ""
-        if len(self._runs) > 1:
-            # Named the way the run's own progress line names it, so a reader
-            # can match the two: "Batch 2" inside a cohort, "Run 7" otherwise.
-            prefix = (_("Batch {index}").format(index=run.cohort_index)
-                      if run.cohort_index else
-                      _("Run {number}").format(number=run.number))
-        print("[{}] {}".format(self.TOOL_NAME, format_run_log_line(event, prefix)))
+        line = "[{}] {}".format(self.consoleName(run),
+                                format_run_log_line(event, self._runPrefix(run)))
+        level = event.get("level")
+        color = {"warning": console.WARNING, "error": console.ERROR,
+                 "metric": console.METRIC}.get(level, console.OUTPUT)
+        self._consoleBreak("metric" if level == "metric" else "line",
+                           section=event.get("source"))
+        # `print` as the fallback only: what it writes is also copied into
+        # Slicer's log file, which is exactly where this line must not go.
+        if not console.show(line, color):
+            print(line)
+
+    def _consoleBreak(self, kind: str, section=None) -> None:
+        """A blank line where the console's story changes paragraph.
+
+        Before a run's first line and its last, and around a block of metrics,
+        so a run reads as steps, then its numbers, then its outcome, instead of
+        one undifferentiated column. `kind` is what is about to be written:
+        "start", "line", "metric" or "end". `section` is the sub-tool a line
+        comes from, None for the tool itself: entering or leaving a sub-call
+        starts a paragraph too.
+        """
+        previous = self.__dict__.get("_lastConsoleKind")
+        if previous is not None and (
+                kind in ("start", "end")
+                or (kind == "metric") != (previous == "metric")
+                or section != self.__dict__.get("_lastConsoleSection")):
+            console.show("", console.OUTPUT)
+        self._lastConsoleKind = "line" if kind in ("start", "end") else kind
+        self._lastConsoleSection = section
+
+    def consoleName(self, run) -> str:
+        """The name a run's console lines carry: the tool, by default.
+
+        A module whose one tool routes to several on the server -- AREG sends
+        an "IOS to CBCT" run to AREG_IOSCBCT -- overrides this with the one
+        actually running, which is the name a reader of the console needs.
+        """
+        return self.TOOL_NAME
+
+    def _runPrefix(self, run) -> str:
+        """"Batch 2" or "Run 7" when several runs share the console, else "".
+
+        Named the way the run's own progress line names it, so a reader can
+        match the two.
+        """
+        if len(self._runs) <= 1:
+            return ""
+        return (_("Batch {index}").format(index=run.cohort_index)
+                if run.cohort_index else
+                _("Run {number}").format(number=run.number))
+
+    def _narrate(self, run, text: str, color: str) -> None:
+        """One line of the run's story in the console: `[TOOL] HH:MM:SS  text`.
+
+        Through `console.show` and never `print` or `logging`: a step can name
+        what the tool is working on, and the console is read by the person who
+        started the run, on their own workstation, while Slicer's log file is
+        sent around when something goes wrong.
+        """
+        parts = ["[{}]".format(self.consoleName(run))]
+        prefix = self._runPrefix(run)
+        if prefix:
+            parts.append(prefix + ":")
+        parts.append(time.strftime("%H:%M:%S"))
+        parts.append(text)
+        console.show("  ".join(parts), color)
+
+    def _consoleStepText(self, run) -> str:
+        """The step for the console: what is happening, and in which sub-tool.
+
+        Plainer than the panel's line: no phase word when the tool said what it
+        is doing, no dash, no arrows. A sub-call is named instead, and set off
+        by a blank line (see `_consoleBreak`), which is what makes a chain read.
+        """
+        if not run.server_phase:
+            return (run.phase or "").replace(" — ", ": ")
+        text = run.server_message or self._phaseLabel(run.server_phase)
+        if run.depth and run.nested_tool:
+            text = "{}: {}".format(run.nested_tool, text)
+        return text
+
+    def _narrateStep(self, run) -> None:
+        """Write the step the run is at, once, when it changes.
+
+        The same words as the panel's progress line, without the percentage: a
+        bar moving from 35 % to 36 % is not a new step, and neither is the next
+        scan of a cohort (see `step_key`).
+        """
+        text = self._consoleStepText(run)
+        key = step_key(text)
+        if not key or key == run.narrated_step:
+            return
+        self._consoleBreak("start" if run.narrated_step is None else "line",
+                           section=run.nested_tool if run.depth else None)
+        run.narrated_step = key
+        self._narrate(run, text, console.STEP)
+
+    def _narrateEnd(self, run, outcome: str, color: str) -> None:
+        """The run's last console line: what happened and how long it took."""
+        if run.started_at is not None:
+            outcome = "{} ({})".format(
+                outcome, format_duration(time.monotonic() - run.started_at))
+        self._consoleBreak("end")
+        self._narrate(run, outcome, color)
 
     def _finishRun(self, run) -> None:
         run.job = None
@@ -3356,7 +3525,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return _("Run {number} ({label}): {line}").format(
             number=run.number, label=run.label, line=line)
 
-    def _runPhaseText(self, run) -> str:
+    def _runPhaseText(self, run, with_fraction: bool = True) -> str:
         """What this run is doing, in one phrase, from whichever side knows.
 
         The server's word wins while the server is the one working: it is the
@@ -3371,7 +3540,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         parts = [self._phaseLabel(run.server_phase)]
         if run.server_message:
             parts.append(run.server_message)
-        if run.fraction is not None:
+        if with_fraction and run.fraction is not None:
             parts.append("{:.0%}".format(run.fraction))
         text = " — ".join(part for part in parts if part)
         if run.depth:

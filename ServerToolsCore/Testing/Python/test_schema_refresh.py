@@ -81,6 +81,30 @@ class SchemaRefreshTest(unittest.TestCase):
 
         self.assertEqual(panel.rebuilds, [])
 
+    def test_an_unreachable_server_is_reported_once_per_visit(self):
+        """The schema re-read and the hosted-file refresh both reach the same
+        server on enter(). When the first could not, the second would only log
+        the same outage again -- two red lines per module, per visit."""
+        panel = self._panel(_Client(None, error=ServerToolError("down")))
+        self.assertIs(panel._refreshSchema(), False)
+
+        asked = []
+        panel.uiWidget = None
+        panel._collapsePending = False
+        panel._sweepLeftoverTestFiles = lambda: None
+        panel._refreshServerSelectables = lambda: asked.append("files")
+        panel._refreshSceneVolumes = lambda: None
+        panel._refreshServerStatus = lambda: asked.append("status")
+
+        panel.enter()
+
+        self.assertEqual(asked, ["status"],
+                         "the hosted files must not be asked of a server already found down")
+
+    def test_a_reachable_server_still_has_its_files_refreshed(self):
+        panel = self._panel(_Client(A))
+        self.assertIs(panel._refreshSchema(), True)
+
     def test_a_panel_that_never_built_is_left_to_the_build_path(self):
         """`_schema` is None while the panel could not be built at all. That
         case has its own retry; re-entering must not race with it."""

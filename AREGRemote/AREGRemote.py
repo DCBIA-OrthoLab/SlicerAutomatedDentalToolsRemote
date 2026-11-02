@@ -200,6 +200,9 @@ class AREGRemoteWidget(ServerToolWidgetBase):
     """
 
     TOOL_NAME = "AREG"
+    # What the server runs for each `mode`, as the console names it: "AREG"
+    # alone does not say which of the three registrations is talking.
+    CONSOLE_NAMES = {"CBCT": "AREG CBCT", "IOS": "AREG IOS", "IOS to CBCT": "AREG IOS-CBCT"}
     # FILE_INPUTS names `patients` only (below): the schema types `t1`, `t2`
     # and `t1_masks` as ["folder", "zip_file"], so "auto" already gives each
     # one a picker that takes a folder and zips it before upload. `t1`/`t2`
@@ -276,6 +279,9 @@ class AREGRemoteWidget(ServerToolWidgetBase):
         ("*.mrk.json", "markups"),
         ("*_lm.json", "markups"),
     )
+
+    def consoleName(self, run) -> str:
+        return self.CONSOLE_NAMES.get((run.args or {}).get("mode"), self.TOOL_NAME)
 
     def __init__(self, parent=None):
         super().__init__(parent)

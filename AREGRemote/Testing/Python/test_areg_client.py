@@ -503,6 +503,23 @@ class DeclarationTest(unittest.TestCase):
         self.assertNotIn("TEST_DATA", _module_source())
 
 
+class ConsoleNameTest(unittest.TestCase):
+    """The console says which registration is running, not just "AREG"."""
+
+    def _name(self, args):
+        panel = AREGRemoteWidget.__new__(AREGRemoteWidget)
+        return panel.consoleName(types.SimpleNamespace(args=args))
+
+    def test_each_mode_names_the_tool_the_server_routes_it_to(self):
+        self.assertEqual(self._name({"mode": "IOS to CBCT"}), "AREG IOS-CBCT")
+        self.assertEqual(self._name({"mode": "CBCT"}), "AREG CBCT")
+        self.assertEqual(self._name({"mode": "IOS"}), "AREG IOS")
+
+    def test_an_unknown_mode_falls_back_on_the_module(self):
+        self.assertEqual(self._name({"mode": "something new"}), "AREG")
+        self.assertEqual(self._name(None), "AREG")
+
+
 class SchemaDrivenPanelTest(unittest.TestCase):
     def test_the_two_timepoints_take_a_folder_or_an_archive(self):
         """`t1`/`t2` list "folder" alongside "zip_file", so the panel gives one

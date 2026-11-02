@@ -26,7 +26,10 @@ class ServerToolsCore(ScriptedLoadableModule):
         # tool module is opened. Applies any server URL/API key/etc. the user
         # saved via "Server Tools Settings" in a previous session, on top of
         # config.py's compiled-in defaults.
-        from ServerToolsCoreLib import get_client
+        # The console filter goes in first, so the warnings of the very first
+        # module to load are already shown in their own colour.
+        from ServerToolsCoreLib import console, get_client
         from ServerToolsCoreLib.settings_qt import apply_saved_overrides
 
+        console.install()
         apply_saved_overrides(get_client())
