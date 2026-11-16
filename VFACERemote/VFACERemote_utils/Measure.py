@@ -309,7 +309,7 @@ class Distance(Measure):
         try :
             direction1 = lst_measurement[0][0:3]
             direction2 = lst_measurement[1][0:3]
-        except :
+        except Exception:
             logger.error('AN ERROR OCCURED')
             logger.info(f"lst_measurement : {lst_measurement}")
             direction1 = "No_direction"
@@ -351,7 +351,7 @@ class Distance(Measure):
             try :
                 direction1 = lst_measurement[0][0]
                 direction2 = lst_measurement[1][0]
-            except :
+            except Exception:
                 logger.error('AN ERROR OCCURED AGAIN')
                 logger.error(f"lst_measurement : {lst_measurement}")
                 direction1 = "No_direction"

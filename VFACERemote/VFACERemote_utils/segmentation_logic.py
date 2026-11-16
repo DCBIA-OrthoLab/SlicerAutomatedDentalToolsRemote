@@ -267,7 +267,7 @@ class SegmentationLogic:
                         test_seg = self.logic.loadSegmentation()
                         if test_seg:
                             segmentation_finished = True
-                    except:
+                    except Exception:
                         segmentation_finished = False
                         
             except Exception as e:

@@ -2325,7 +2325,7 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
                 pattern_exact = r'\b' + re.escape(list_patient_clean) + r'\b'
                 if re.search(pattern_exact, patient_id_clean, re.IGNORECASE):
                     return True
-            except:
+            except Exception:
                 pass
             if list_patient_clean.isdigit():
                 if patient_id_clean.lower() == f"pat{list_patient_clean}":

@@ -48,7 +48,7 @@ from typing import Union
 try:
     import pandas as pd
 
-except:
+except Exception:
     slicer.util.pip_install("pandas")
     import pandas as pd  # news users will not need to refresh the AQ3DC for the first 
 
@@ -56,7 +56,7 @@ except:
 try:
     # we need this package for pandas package
     import openpyxl
-except:
+except Exception:
     slicer.util.pip_install("openpyxl")
     import openpyxl
 
@@ -1639,7 +1639,7 @@ class AQ3DCLogic(ScriptedLoadableModuleLogic):
                         midpoint_position = self.computeMidPoint(
                             np.array(P1_pos), np.array(P2_pos)
                         )
-                    except:
+                    except Exception:
                         logger.warning(
                             f"Save Midpoint, Warning this patient : {patient}, landmark : {mid_point}, it s not save. Please verify your folder"
                         )
@@ -2231,7 +2231,7 @@ class AQ3DCLogic(ScriptedLoadableModuleLogic):
 
             try:
                 p = list((np.array(p1) + np.array(p2)) / 2)
-            except:
+            except Exception:
                 logger.warning(
                     f"Warning compute midpoint error, patient : {patient}, landmarks : {landmark1} {landmark2}"
                 )
