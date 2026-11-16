@@ -412,12 +412,6 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 patient_compute["Roll Meaning"][i] = "x"
         return patient_compute
 
-    def checkKeepSign(self,list_measure,landmarks,measurement):
-        for measure in list_measure :
-            if measurement in measure["Type of measurement"]:
-                if measure["group"]=="Angle":
-                    land = measure["line1"] + " " + measure["line2"]
-
 
 
     def renameTimepoint(self,patient_compute):
