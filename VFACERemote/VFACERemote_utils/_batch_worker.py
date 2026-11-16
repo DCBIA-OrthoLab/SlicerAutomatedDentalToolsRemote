@@ -145,7 +145,7 @@ def compute_distance(pd1, pd2, signed=True):
     HEAVY_SUBSAMPLE_THRESHOLD = 2_000_000 # 2M points combined
 
     if total_points > HEAVY_SUBSAMPLE_THRESHOLD:
-        logger.debug(f"  -> HEAVY subsampling (target_reduction=0.7)")
+        logger.debug("  -> HEAVY subsampling (target_reduction=0.7)")
         pd1_sub = subsample_polydata(pd1, target_reduction=0.7)
         pd2_sub = subsample_polydata(pd2, target_reduction=0.7)
         result_sub = compute_distance_direct(pd1_sub, pd2_sub, signed)
@@ -153,7 +153,7 @@ def compute_distance(pd1, pd2, signed=True):
         return result
 
     elif total_points > SUBSAMPLE_THRESHOLD:
-        logger.debug(f"  -> MODERATE subsampling (target_reduction=0.5)")
+        logger.debug("  -> MODERATE subsampling (target_reduction=0.5)")
         pd1_sub = subsample_polydata(pd1, target_reduction=0.5)
         pd2_sub = subsample_polydata(pd2, target_reduction=0.5)
         result_sub = compute_distance_direct(pd1_sub, pd2_sub, signed)
@@ -161,7 +161,7 @@ def compute_distance(pd1, pd2, signed=True):
         return result
 
     else:
-        logger.debug(f"  -> Direct computation (no subsampling needed)")
+        logger.debug("  -> Direct computation (no subsampling needed)")
         return compute_distance_direct(pd1, pd2, signed)
 
 
@@ -212,7 +212,7 @@ def main():
         logger.info(f"Reading {args.file2}...")
         pd2 = read_vtk(args.file2)
 
-        logger.info(f"Cleaning and triangulating...")
+        logger.info("Cleaning and triangulating...")
         pd1 = clean_and_triangulate(pd1)
         pd2 = clean_and_triangulate(pd2)
 

@@ -1070,7 +1070,7 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             },
             "TabAngle": {
                 False: {"Angle between 2 lines": 3},
-                True: {"Angle between 2 lines": 4, f"Angle line T1 and line T2": 5},
+                True: {"Angle between 2 lines": 4, "Angle line T1 and line T2": 5},
             },
         }
 
@@ -1095,7 +1095,7 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
         else:
             if self.ui.CheckBoxT1T2.isChecked() == True:
-                self.ui.CbListMeasurement.addItem(f"Angle line T1 and line T2")
+                self.ui.CbListMeasurement.addItem("Angle line T1 and line T2")
             self.ui.CbListMeasurement.addItem("Angle between 2 lines")
         self.manageDisplayComboboxMeasurement()
 

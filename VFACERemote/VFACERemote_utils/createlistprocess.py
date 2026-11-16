@@ -1248,7 +1248,7 @@ def run_bds(input_path, output_path, model_name="DentalSegmentator", device="cud
     try:
         from VFACERemote_utils.segmentation_logic import run_dental_segmentation, ExportFormat
         
-        logger.info(f"[BDS] Starting dental segmentation...")
+        logger.info("[BDS] Starting dental segmentation...")
         logger.info(f"[BDS] Input folder: {input_path}")
         logger.info(f"[BDS] Output folder: {output_path}")
         logger.info(f"[BDS] Model: {model_name}")
@@ -1265,16 +1265,16 @@ def run_bds(input_path, output_path, model_name="DentalSegmentator", device="cud
         )
         
         if success:
-            logger.info(f"[BDS] Dental segmentation completed successfully")
+            logger.info("[BDS] Dental segmentation completed successfully")
             logger.info(f"[BDS] Results saved to: {output_path}")
         else:
-            logger.error(f"[BDS] Dental segmentation failed")
+            logger.error("[BDS] Dental segmentation failed")
             
         return success
         
     except ImportError as e:
         logger.error(f"[BDS] Failed to import segmentation logic: {str(e)}")
-        logger.error(f"[BDS] Make sure segmentation_logic.py is in the parent directory")
+        logger.error("[BDS] Make sure segmentation_logic.py is in the parent directory")
         return False
     except Exception as e:
         logger.error(f"[BDS] Error in dental segmentation: {str(e)}")
@@ -1556,7 +1556,7 @@ def SplitMeasurements(measurements_folder,mode2):
     if missing_files:
         logger.warning(f"Missing Excel Files: {', '.join(missing_files)}")
     
-    logger.info(f"All measurements files have been successfully identify")
+    logger.info("All measurements files have been successfully identify")
     return cb_path, mand_path, max_path,features_path
 
 def SplitOriented(t1_folder):
@@ -2453,7 +2453,7 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
                 "--signed" if signed else "--unsigned",
             ]
             
-            logger.info(f"Launching subprocess...")
+            logger.info("Launching subprocess...")
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
