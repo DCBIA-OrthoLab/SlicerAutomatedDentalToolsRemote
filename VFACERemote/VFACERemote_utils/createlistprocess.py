@@ -1328,7 +1328,7 @@ def reorganizeStat(patient_compute):
                 if t in patient_compute["Landmarks"][i] :
                     tooth = t
 
-            if tooth != None:
+            if tooth is not None:
                 #Arch : upper=0, lower=1
                 if "U" in tooth :
                     dic_stats["Arch"].append(0)
@@ -2514,7 +2514,7 @@ def search(path, *args):
     """
     arguments = []
     for arg in args:
-        if type(arg) == list:
+        if type(arg) is list:
             arguments.extend(arg)
         else:
             arguments.append(arg)

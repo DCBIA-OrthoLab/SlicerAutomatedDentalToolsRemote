@@ -523,7 +523,7 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 if t in patient_compute["Landmarks"][i] :
                     tooth = t
 
-            if tooth != None:
+            if tooth is not None:
                 #Arch : upper=0, lower=1
                 if "U" in tooth :
                     dic_stats["Arch"].append(0)
@@ -1312,7 +1312,7 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def selectFolderT2Patients(self):
         """ Open window allow user to choose folder with T1 patients' information.
         """
-        if self.dict_patient_T1 == None:
+        if self.dict_patient_T1 is None:
             self.warningMessage("Missing T1 folder")
         else:
 
@@ -2376,7 +2376,7 @@ class AQ3DCTest(ScriptedLoadableModuleTest):
         patient_T2,x = logic.createDictPatient(os.path.join(folder,'T2'))
 
         dif_landmark , dif_patient = logic.compareT1T2(patient_T1,patient_T2)
-        assert dif_landmark == {} and dif_patient == None
+        assert dif_landmark == {} and dif_patient is None
 
         list_landmark_exist, group_landmark = logic.updateGroupLandmark(patient_T1,group_landmark)
         list_landmark_exist, group_landmark = logic.updateGroupLandmark(patient_T2,group_landmark)
