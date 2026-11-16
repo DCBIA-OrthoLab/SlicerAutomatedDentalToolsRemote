@@ -63,8 +63,6 @@ class IOSCBCT(Method):
 
     def TestReference(self, ref_folder: str):
         out = None
-        scan_extension = [".nrrd", ".nrrd.gz", ".nii", ".nii.gz", ".gipl", ".gipl.gz"]
-        lm_extension = [".json"]
 
         if self.NumberScan(ref_folder) == 0:
             out = "The selected folder must contain scans"
@@ -134,7 +132,6 @@ class IOSCBCT(Method):
         return ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr"]
 
     def CheckboxisChecked(self, diccheckbox: dict, in_str=False):
-        out = ""
         listchecked = []
         if not len(diccheckbox) == 0:
             for checkboxs in diccheckbox.values():

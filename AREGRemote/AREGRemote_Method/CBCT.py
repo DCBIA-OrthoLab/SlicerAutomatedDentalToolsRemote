@@ -59,8 +59,6 @@ class Semi_CBCT(Method):
 
     def TestReference(self, ref_folder: str):
         out = None
-        scan_extension = [".nrrd", ".nrrd.gz", ".nii", ".nii.gz", ".gipl", ".gipl.gz"]
-        lm_extension = [".json"]
 
         if self.NumberScan(ref_folder) == 0:
             out = "The selected folder must contain scans"
@@ -154,7 +152,6 @@ class Semi_CBCT(Method):
         liste_keys=("scanT1", "scanT2", "segT1"),
     ):
         out = ""
-        scan_extension = [".nrrd", ".nrrd.gz", ".nii", ".nii.gz", ".gipl", ".gipl.gz"]
         if self.NumberScan(scan_folder_t1, scan_folder_t2) == 0:
             return "Please Select folder with scans"
         

@@ -1322,7 +1322,6 @@ def reorganizeStat(patient_compute):
                 T2=True
 
 
-            type = "skeletal"
             tooth = None
             for t in TOOTHS :
                 if t in patient_compute["Landmarks"][i] :
@@ -2397,7 +2396,6 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
     
     if 'slicer' in globals() or 'slicer' in dir():
         try:
-            slicer_home = os.path.dirname(slicer.app.slicerHome)
             candidates = [
                 os.path.join(slicer.app.slicerHome, "bin", "PythonSlicer"),
                 os.path.join(slicer.app.slicerHome, "bin", "python-real"),

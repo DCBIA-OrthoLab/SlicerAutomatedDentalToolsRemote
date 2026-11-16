@@ -83,7 +83,7 @@ try:
         MyDict,
     )
     
-except ImportError as e:
+except ImportError:
     spec = importlib.util.spec_from_file_location("Classes.Measure", os.path.join(local_classes_path, "Measure.py"))
     measure_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(measure_module)
@@ -517,7 +517,6 @@ class AQ3DCWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 dic_stats["Time"].append(str(self.ui.lineEditNameT2.text))
 
 
-            type = "skeletal"
             tooth = None
             for t in TOOTHS :
                 if t in patient_compute["Landmarks"][i] :
