@@ -200,6 +200,9 @@ class AREGRemoteWidget(ServerToolWidgetBase):
     """
 
     TOOL_NAME = "AREG"
+    # Merged across the batches of a divided cohort, as every engine writes
+    # its own; without this only the first batch's report survived the merge.
+    RUN_REPORT = "AREG_report.json"
     # What the server runs for each `mode`, as the console names it: "AREG"
     # alone does not say which of the three registrations is talking.
     CONSOLE_NAMES = {"CBCT": "AREG CBCT", "IOS": "AREG IOS", "IOS to CBCT": "AREG IOS-CBCT"}
