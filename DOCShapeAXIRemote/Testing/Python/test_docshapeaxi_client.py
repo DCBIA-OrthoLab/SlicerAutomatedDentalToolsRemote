@@ -31,7 +31,6 @@ import qt_stubs
 
 qt, ctk = qt_stubs.install()
 
-from ServerToolsCoreLib import client as client_module
 from ServerToolsCoreLib import formgen
 from ServerToolsCoreLib.client import ToolServerClient
 
