@@ -131,7 +131,6 @@ def compute_distance(pd1, pd2, signed=True):
     Compute distance between two polydata meshes.
     Uses subsampling for large meshes to reduce memory usage.
     """
-    import vtk
 
     n1 = pd1.GetNumberOfPoints()
     n2 = pd2.GetNumberOfPoints()

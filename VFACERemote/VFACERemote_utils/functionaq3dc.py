@@ -6,7 +6,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 import logging
-import vtk, qt, ctk, slicer
+import qt, ctk, slicer
 import glob
 import numpy as np
 
@@ -23,9 +23,6 @@ from qt import (
     QTabWidget,
     QGridLayout,
 )
-
-import logging
-import sys
 
 # ===== Logging Configuration =====
 logger = logging.getLogger("VFACE_AQ3DC")
@@ -58,7 +55,7 @@ try:
     import openpyxl
 except Exception:
     slicer.util.pip_install("openpyxl")
-    import openpyxl
+    import openpyxl  # noqa: F401 -- installed for pandas, which loads it by name to write .xlsx
 
 import importlib.util
 import sys
@@ -79,7 +76,6 @@ try:
         Point,
         Line,
         Group_landmark,
-        MyList,
         MyDict,
     )
     

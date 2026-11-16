@@ -8,7 +8,7 @@ if current_dir not in sys.path:
 from .Progress import DisplayASOCBCT,DisplayAMASSS,DisplayAREGCBCT,DisplayALICBCT
 from glob import iglob
 import slicer
-from .functionaq3dc import AQ3DCLogic, AQ3DCWidget
+from .functionaq3dc import AQ3DCLogic
 import qt
 import re
 import shutil
@@ -2278,8 +2278,6 @@ def batch_process(t1_dir, t2_dir, patient_list, output_dir, signed=True, output_
     fully free. Only a separate process guarantees memory release via the OS.
     """
     import subprocess
-    import json
-    import tempfile
     
     input_dir1 = Path(t1_dir)
     input_dir2 = Path(t2_dir)

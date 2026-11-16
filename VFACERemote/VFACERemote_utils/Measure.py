@@ -2,7 +2,6 @@ from .Point import Point
 from .Line import Line
 import numpy as np
 from typing import Union
-import math
 import logging
 import sys
 

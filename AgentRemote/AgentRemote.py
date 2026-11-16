@@ -614,7 +614,6 @@ class AgentRemoteWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onCliUpdated(self, caller, event):
         import time
         import json
-        import subprocess
         cliNode = caller
 
         status = cliNode.GetStatus()

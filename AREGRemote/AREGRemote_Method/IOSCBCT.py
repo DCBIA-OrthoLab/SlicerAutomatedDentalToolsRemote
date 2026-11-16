@@ -1,11 +1,7 @@
 from AREGRemote_Method.Method import Method
 from AREGRemote_Method.Progress import DisplayAREGIOSCBCT, DisplayALICBCT,DisplayASOIOS,DisplayASOCBCT,DisplayCrownSeg,DisplayALIIOS
-import webbrowser
 import os
 import slicer
-import json
-import time
-import qt
 import csv
 import platform
 

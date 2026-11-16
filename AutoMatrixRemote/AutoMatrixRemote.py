@@ -22,7 +22,6 @@ Three things about AutoMatrix's schema are worth knowing when reading this file:
   and both kinds are offered to the scene.
 """
 
-import json
 import logging
 import os
 
@@ -31,7 +30,7 @@ import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule
 
-from ServerToolsCoreLib import formgen, slicer_io
+from ServerToolsCoreLib import formgen
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase
 
 logger = logging.getLogger("AutoMatrix")

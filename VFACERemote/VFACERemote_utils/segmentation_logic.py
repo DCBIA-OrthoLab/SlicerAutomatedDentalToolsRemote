@@ -6,8 +6,6 @@ import os
 import sys
 from pathlib import Path
 from enum import Flag, auto
-import qt
-import sys
 
 # ===== Logging Configuration =====
 logger = logging.getLogger("VFACE_segmentation_logic")
@@ -213,7 +211,7 @@ class SegmentationLogic:
     def _runSegmentationForVolume(self, volumeNode):
         """Run the segmentation"""
         try:
-            from SlicerNNUNetLib import Parameter
+            from SlicerNNUNetLib import Parameter  # noqa: F401 -- fails early when SlicerNNUNet is missing
             
             #Model Configuration
             parameter = self._getModelParameter()
@@ -531,7 +529,7 @@ class SegmentationLogic:
     def _exportMergedVTK(self, segmentationNode):
         """Export VTK"""
         try:
-            import os, re
+            import os
             from vtk.util.numpy_support import vtk_to_numpy
             
             self.log_info("MergedVTK: Start")
@@ -818,7 +816,7 @@ class SegmentationLogic:
     def isNNUNetModuleInstalled():
         """Check if nnunet is installed"""
         try:
-            import SlicerNNUNetLib
+            import SlicerNNUNetLib  # noqa: F401 -- the import is the installation check
             return True
         except ImportError:
             return False
