@@ -46,6 +46,12 @@ def _write_fake_ctl(install_dir: str, body: str) -> str:
 
 class TempInstallDir(unittest.TestCase):
     def setUp(self):
+        # These suites describe the Docker path. On an Apple-silicon runner the
+        # deployment would otherwise choose the native backend by itself; the
+        # native one has its own tests below, which ask for it explicitly.
+        patcher = mock.patch.object(deploy, "is_apple_silicon", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.tmp = tempfile.mkdtemp(prefix="slicercloud_test_")
         self.install_dir = os.path.join(self.tmp, "SlicerCloudServer")
 
@@ -478,7 +484,8 @@ class TestClientUrl(unittest.TestCase):
 
     def test_the_message_names_every_way_to_get_a_public_address(self):
         message = deploy.NO_PUBLIC_URL_MESSAGE
-        self.assertIn("setup-tailscale.sh", message)
+        self.assertIn("tailscale serve", message)
+        self.assertNotIn("setup-tailscale", message)
         self.assertIn("PUBLIC_URL", message)
         self.assertIn("reverse proxy", message)
 
@@ -534,6 +541,274 @@ class TestFindPython(unittest.TestCase):
             self.assertNotEqual(interpreter, sys.executable)
         finally:
             sys.executable = original
+
+
+# --- the native backend (Apple-silicon Mac) ---------------------------------
+#
+# Nothing below starts a server or a build: commands are captured at `run_ctl`
+# / `_spawn`, which is where the argv leaves this module.
+
+class TestAppleSiliconDetection(unittest.TestCase):
+    def test_native_is_for_apple_silicon_only(self):
+        self.assertTrue(deploy.is_apple_silicon("darwin", "arm64"))
+        self.assertFalse(deploy.is_apple_silicon("darwin", "x86_64", sysctl="0"))
+        self.assertFalse(deploy.is_apple_silicon("linux", "aarch64"))
+        self.assertFalse(deploy.is_apple_silicon("linux", "x86_64"))
+        self.assertFalse(deploy.is_apple_silicon("win32", "AMD64"))
+
+    def test_a_rosetta_process_on_an_apple_cpu_still_counts(self):
+        """The stable Slicer for macOS is x86_64: platform.machine() lies there,
+        `sysctl hw.optional.arm64` does not."""
+        self.assertTrue(deploy.is_apple_silicon("darwin", "x86_64", sysctl="1\n"))
+
+    def test_an_intel_mac_stays_on_docker(self):
+        """No native backend for Intel: the deployment is Docker, its commands
+        carry no --native, and no certificate is made."""
+        with mock.patch.object(deploy.sys, "platform", "darwin"), \
+                mock.patch.object(deploy.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(deploy.subprocess, "run",
+                                  return_value=deploy.subprocess.CompletedProcess([], 0, "0\n", "")):
+            self.assertFalse(deploy.is_apple_silicon())
+            self.assertFalse(deploy.prefer_native())
+            d = LocalServerDeployment("/x")
+        self.assertFalse(d.native)
+        self.assertEqual(d._native_args(), [])
+        self.assertEqual(d._tls_args(), [])
+
+    def test_the_default_follows_the_machine(self):
+        with mock.patch.object(deploy, "is_apple_silicon", return_value=True):
+            self.assertTrue(LocalServerDeployment("/x").native)
+            self.assertFalse(LocalServerDeployment("/x", native=False).native)
+        with mock.patch.object(deploy, "is_apple_silicon", return_value=False):
+            self.assertFalse(LocalServerDeployment("/x").native)
+            self.assertTrue(LocalServerDeployment("/x", native=True).native)
+
+
+class NativeCase(TempInstallDir):
+    def setUp(self):
+        super().setUp()
+        _write_fake_ctl(self.install_dir, "print('{}')\n")
+        self.pin_dir = os.path.join(self.tmp, "pin")
+        patcher = mock.patch.object(deploy.tls, "local_tls_dir", return_value=self.pin_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tools = os.path.join(self.tmp, "SADT-VISOR")
+        self.captured = []
+
+    def native(self, **kwargs):
+        return self.deployment(native=True, tools_dir=self.tools, **kwargs)
+
+    def capture(self, deployment):
+        def fake(args, progress_cb=None):
+            self.captured.append(list(args))
+            return {"url": "https://127.0.0.1:8000"}
+        return mock.patch.object(deployment, "run_ctl", side_effect=fake)
+
+
+class TestNativeCommands(NativeCase):
+    def test_up_names_the_backend_the_tools_and_the_certificate(self):
+        d = self.native()
+        with self.capture(d):
+            d.up(port=8123, bind=deploy.BIND_LOCALHOST)
+        args = self.captured[0]
+        cert = os.path.join(self.pin_dir, "server.crt")
+        key = os.path.join(self.pin_dir, "server.key")
+        self.assertEqual(args, ["up", "--native", "--tools-dir", self.tools,
+                                "--tls-cert", cert, "--tls-key", key,
+                                "--port", "8123", "--bind", "127.0.0.1"])
+
+    def test_the_certificate_exists_when_up_is_called(self):
+        d = self.native()
+        with self.capture(d):
+            d.up()
+        self.assertTrue(os.path.isfile(os.path.join(self.pin_dir, "server.crt")))
+        self.assertTrue(os.path.isfile(os.path.join(self.pin_dir, "server.key")))
+        self.assertEqual(deploy.tls.pinned_certificate("127.0.0.1"),
+                         os.path.join(self.pin_dir, "server.crt"))
+
+    def test_update_carries_the_certificate_too(self):
+        d = self.native()
+        with self.capture(d):
+            d.update(force=True)
+        args = self.captured[0]
+        self.assertEqual(args[:4], ["update", "--native", "--tools-dir", self.tools])
+        self.assertIn("--tls-cert", args)
+        self.assertIn("--tls-key", args)
+        self.assertEqual(args[args.index("--branch") + 1], deploy.DEFAULT_BRANCH)
+        self.assertEqual(args[-1], "--force")
+
+    def test_install_tools_is_native_only_and_names_each_tool(self):
+        d = self.native()
+        with self.capture(d):
+            d.install_tools()
+            d.install_tools(tools=["AMASSS", "ALI_CBCT"], force=True)
+        self.assertEqual(self.captured[0], ["install-tools", "--native", "--tools-dir", self.tools])
+        self.assertEqual(self.captured[1], ["install-tools", "--native", "--tools-dir", self.tools,
+                                            "--tool", "AMASSS", "--tool", "ALI_CBCT", "--force"])
+        with self.assertRaises(DeploymentError):
+            self.deployment(native=False).install_tools()
+
+    def test_the_rest_of_the_commands_say_native_too(self):
+        d = self.native()
+        with self.capture(d):
+            d.status(check_remote=True)
+            d.down()
+            d.logs(50)
+        base = ["--native", "--tools-dir", self.tools]
+        self.assertEqual(self.captured[0], ["status"] + base + ["--branch", deploy.DEFAULT_BRANCH,
+                                                                 "--check-remote"])
+        self.assertEqual(self.captured[1], ["down"] + base)
+        self.assertEqual(self.captured[2], ["logs"] + base + ["-n", "50"])
+
+    def test_up_and_update_never_reach_for_the_certificate_in_docker_mode(self):
+        d = self.deployment(native=False)
+        with self.capture(d):
+            d.up(port=8123)
+            d.update()
+        self.assertEqual(self.captured[0], ["up", "--port", "8123"])
+        self.assertEqual(self.captured[1], ["update", "--branch", deploy.DEFAULT_BRANCH])
+        self.assertFalse(os.path.exists(self.pin_dir))
+
+    def test_a_wider_bind_is_refused_before_anything_starts(self):
+        d = self.native()
+        for bind in (deploy.BIND_EVERYWHERE, "192.168.1.10"):
+            with self.capture(d), self.assertRaises(DeploymentError):
+                d.up(bind=bind)
+            with self.capture(d), self.assertRaises(DeploymentError):
+                d.update(bind=bind)
+        self.assertEqual(self.captured, [])
+        self.assertFalse(os.path.exists(self.pin_dir))
+
+    def test_a_certificate_failure_is_a_DeploymentError(self):
+        d = self.native()
+        boom = deploy.local_cert.CertificateError("no openssl")
+        with mock.patch.object(deploy.local_cert, "ensure_local_certificate", side_effect=boom), \
+                self.capture(d), self.assertRaises(DeploymentError) as caught:
+            d.up()
+        self.assertIn("no openssl", str(caught.exception))
+        self.assertEqual(self.captured, [])
+
+    def test_the_stop_on_quit_is_native_too(self):
+        d = self.native()
+        with mock.patch.object(deploy.subprocess, "Popen") as popen:
+            self.assertTrue(d.stop_detached())
+        command = popen.call_args[0][0]
+        self.assertEqual(command[2:], ["down", "--native", "--tools-dir", self.tools])
+
+
+class TestNativeToolsCheckout(NativeCase):
+    def test_the_tools_folder_is_beside_the_install_folder(self):
+        d = self.deployment(native=True)
+        self.assertEqual(d.tools_dir, os.path.join(self.tmp, "SADT-VISOR"))
+        self.assertFalse(d.tools_cloned)
+
+    def test_it_is_cloned_with_the_configured_branch(self):
+        d = self.native(tools_branch="feat/mps-devices", tools_repo_url="https://example.org/t.git")
+        with mock.patch.object(d, "_spawn", return_value=(1, "")) as spawn, \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/git"), \
+                self.assertRaises(DeploymentError):
+            d.clone_tools()
+        self.assertEqual(spawn.call_args[0][0], ["git", "clone", "--branch", "feat/mps-devices",
+                                                 "https://example.org/t.git", self.tools])
+
+    def test_an_existing_checkout_is_reused(self):
+        os.makedirs(os.path.join(self.tools, "tools"))
+        d = self.native()
+        with mock.patch.object(d, "_spawn") as spawn:
+            d.clone_tools()
+        spawn.assert_not_called()
+
+    def test_a_foreign_folder_is_not_cloned_over(self):
+        os.makedirs(self.tools)
+        open(os.path.join(self.tools, "mine.txt"), "w").close()
+        d = self.native()
+        with mock.patch.object(d, "_spawn") as spawn, \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/git"), \
+                self.assertRaises(DeploymentError):
+            d.clone_tools()
+        spawn.assert_not_called()
+
+    def test_docker_mode_clones_nothing(self):
+        d = self.deployment(native=False)
+        with mock.patch.object(d, "_spawn") as spawn:
+            d.clone_tools()
+        spawn.assert_not_called()
+
+
+class TestNativeStatusBeforeInstalling(NativeCase):
+    def test_docker_is_never_asked(self):
+        shutil.rmtree(os.path.join(self.install_dir, "scripts"))     # nothing installed yet
+        d = self.native()
+        asked = []
+
+        def fake_run(command, **_kwargs):
+            asked.append(command[0])
+            return deploy.subprocess.CompletedProcess(command, 0, "git version 2.50\n", "")
+
+        with mock.patch.object(deploy.subprocess, "run", fake_run), \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/x"):
+            status = d.status()
+        self.assertNotIn("docker", asked)
+        self.assertTrue(status["native"])
+        self.assertFalse(status["cloned"])
+        self.assertFalse(status["docker"]["available"])
+
+
+class TestNativeClientUrl(NativeCase):
+    def setUp(self):
+        super().setUp()
+        self.reported = {"url": "https://127.0.0.1:8123", "token": "t", "healthy": True,
+                         "tls": {"enabled": True, "cert": os.path.join(self.pin_dir, "server.crt")}}
+
+    def pin(self):
+        deploy.local_cert.ensure_local_certificate(self.pin_dir)
+
+    def test_the_pinned_local_address_is_handed_over(self):
+        self.pin()
+        self.assertEqual(deploy.client_url(self.reported), "https://127.0.0.1:8123")
+        # `status` reports the same thing under `server`
+        status = {"server": {"url": "http://127.0.0.1:8123", "healthy": True},
+                  "tls": {"enabled": True}}
+        self.assertEqual(deploy.client_url(status), "https://127.0.0.1:8123")
+        # a stand-in answering from [::1] still gets OUR host; a name is not accepted
+        self.assertEqual(deploy.client_url(dict(self.reported, url="https://[::1]:9000")),
+                         "https://127.0.0.1:9000")
+        self.assertIsNone(deploy.client_url(dict(self.reported, url="https://localhost:9000")))
+
+    def test_without_the_server_saying_it_serves_tls_nothing_is_handed_over(self):
+        self.pin()
+        for tls_field in (None, {}, {"enabled": False}, "yes", []):
+            with self.subTest(tls=tls_field):
+                result = dict(self.reported, tls=tls_field)
+                self.assertIsNone(deploy.client_url(result))
+        result = dict(self.reported)
+        del result["tls"]
+        self.assertIsNone(deploy.client_url(result))
+
+    def test_without_a_pinned_certificate_nothing_is_handed_over(self):
+        self.assertIsNone(deploy.client_url(self.reported))
+
+    def test_only_this_machine_qualifies(self):
+        self.pin()
+        for url in ("https://10.0.0.5:8123", "https://server.example.org:8123", "https://127.0.0.2:8123",
+                    "https://127.0.0.1", "", None):
+            with self.subTest(url=url):
+                self.assertIsNone(deploy.client_url(dict(self.reported, url=url)))
+
+    def test_a_server_serving_some_other_certificate_is_not_trusted_to_say_so(self):
+        self.pin()
+        other = dict(self.reported, tls={"enabled": True, "cert": "/tmp/elsewhere.crt"})
+        self.assertIsNone(deploy.client_url(other))
+
+    def test_a_public_url_still_wins_and_docker_results_are_unchanged(self):
+        self.pin()
+        self.assertEqual(deploy.client_url(dict(self.reported, public_url="https://v.example.ts.net")),
+                         "https://v.example.ts.net")
+        self.assertIsNone(deploy.client_url({"url": "https://localhost:8000"}))
+
+    def test_the_message_for_a_native_server_that_does_not_report_tls(self):
+        self.assertIn("Update server", deploy.NO_LOCAL_TLS_MESSAGE)
+        self.assertNotIn("setup-tailscale", deploy.NO_LOCAL_TLS_MESSAGE)
 
 
 if __name__ == "__main__":

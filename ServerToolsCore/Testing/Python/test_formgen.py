@@ -206,6 +206,42 @@ class ChoiceWidgetTest(unittest.TestCase):
         self.assertEqual(self.combo.toolTip(), "Format of the preview file")
 
 
+class DeviceChoiceTest(unittest.TestCase):
+    """A server on a Mac declares `mps` next to `cuda` and `cpu` for the
+    `device` argument. formgen renders whatever options the schema carries, so
+    the value needs no client change: pinned here so that stays true."""
+
+    SCHEMA = {
+        "device": {
+            "type": "choice", "types": ["choice"], "required": False,
+            "description": "Where the model runs", "server_selectable": None,
+            "choices": {"cuda": False, "cpu": False, "mps": True}, "initial": "mps",
+        },
+    }
+
+    def setUp(self):
+        self.widgets = formgen.build(self.SCHEMA, qt.QFormLayout())
+        self.combo = self.widgets["device"]
+
+    def test_mps_is_an_option_in_declaration_order(self):
+        self.assertEqual([self.combo.itemText(i) for i in range(self.combo.count)],
+                         ["cuda", "cpu", "mps"])
+
+    def test_mps_is_preselected_when_the_server_says_so_and_is_sent_as_is(self):
+        self.assertEqual(self.combo.currentText, "mps")
+        data = ToolServerClient._stringify(formgen.collect(self.widgets))
+        self.assertEqual(data["device"], "mps")
+
+    def test_any_option_can_be_picked(self):
+        self.combo.setCurrentText("cpu")
+        self.assertEqual(formgen.collect(self.widgets)["device"], "cpu")
+        self.combo.setCurrentText("mps")
+        self.assertEqual(formgen.collect(self.widgets)["device"], "mps")
+
+    def test_the_field_is_shown_unless_the_deployment_hides_it(self):
+        self.assertTrue(formgen.is_visible(self.SCHEMA["device"], {}))
+        self.assertFalse(formgen.is_visible(dict(self.SCHEMA["device"], hidden=True), {}))
+
 class MultiChoiceWidgetTest(unittest.TestCase):
     """`"multichoice"`: one QCheckBox per option, in declaration order, each
     starting at its declared boolean."""

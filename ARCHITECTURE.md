@@ -1747,8 +1747,30 @@ server with no restart. The URL it saves is the `public_url` server_ctl.py
 reports (`deploy.client_url`: `PUBLIC_URL` from the deployment's `.env`, else
 the `tailscale serve` address), never the local listener, whose self-signed
 certificate the client refuses; with no public URL it saves nothing and names
-the ways to get one (`setup-tailscale.sh`, or `PUBLIC_URL` behind a reverse
-proxy or a server certificate).
+the ways to get one (`tailscale serve` set up by hand, or `PUBLIC_URL` behind
+a reverse proxy or a server certificate). A native server on a Mac is the exception:
+`https://127.0.0.1:<port>`, see "Native server on a Mac" below.
+
+### Native server on a Mac
+
+On Apple silicon (`deploy.prefer_native()`, true also from a Rosetta Slicer)
+`LocalServerDeployment` drives `server_ctl.py --native`: `clone()`,
+`clone_tools()` (SADT-VISOR, beside the install folder), `install_tools()`,
+`up()`. The bind is fixed to `127.0.0.1`. HTTPS is kept by pinning out of band
+(`tls.py` rule 3): `SlicerCloudLib/local_cert.py` makes an ECDSA P-256
+certificate (SAN: 127.0.0.1 and ::1; CA:FALSE; one year, renewed at
+30 days) and its key in `~/.slicercloud/tls/`; `tls.pinned_certificate()` and
+`client._PinnedLoopbackAdapter` make the client verify those three hosts
+against that file alone. Contract with `server_ctl.py` (VISOR-serve):
+
+- `up` and `update` receive `--tls-cert <path> --tls-key <path>`; the server
+  must pass them to uvicorn (`--ssl-certfile`, `--ssl-keyfile`) and refuse to
+  combine them with a bind other than 127.0.0.1;
+- `up`, `update` and `status` report `"tls": {"enabled": true, "cert": <path>}`
+  and `url` as `https://127.0.0.1:<port>`; its own health check must trust
+  that certificate file;
+- the panel saves a URL only when `tls.enabled` is true and the pin exists
+  (`deploy.local_client_url`).
 
 ### Which branch gets deployed
 
@@ -2156,12 +2178,12 @@ This confirms the four success criteria from the brief:
   one does not repaint it until the user leaves and re-enters the module (or
   reopens Slicer). `design.tokens()` itself always reflects the current mode;
   only the "when do we re-apply the stylesheet" question is coarse.
-- **`SlicerCloud` requires a public address, even for a server on this
-  machine**: the generated deployment publishes port 8000 on `127.0.0.1` with
-  a self-signed certificate, which the client refuses, so the panel configures
-  the deployment's `public_url` -- `tailscale serve`'s address, or
-  `PUBLIC_URL` behind a reverse proxy or a server certificate -- and nothing
-  when there is none.
+- **`SlicerCloud` requires a public address for a Docker server, even on this
+  machine**: the Docker deployment publishes port 8000 on `127.0.0.1` with no
+  certificate the client accepts, so the panel configures the deployment's
+  `public_url` -- `tailscale serve`'s address, or `PUBLIC_URL` behind a reverse
+  proxy or a server certificate -- and nothing when there is none. The one
+  local exception is the native server on an Apple-silicon Mac (next section).
 - **The panel cannot deploy to a *remote* host**: it drives a clone on the
   machine Slicer runs on. Standing a server up on the lab GPU box is the same
   `scripts/setup-server.sh` over ssh, and then this panel is only used for its

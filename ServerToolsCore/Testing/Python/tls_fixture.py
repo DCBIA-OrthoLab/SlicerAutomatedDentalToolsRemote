@@ -66,6 +66,25 @@ def serve_tls(server):
     return server
 
 
+def make_self_signed(directory, name, sans="IP:127.0.0.1,IP:::1"):
+    """A self-signed leaf certificate and its key in `directory`, as
+    `<name>.crt` and `<name>.key`; returns both paths. Used as a PIN, which is
+    why it is not issued by the throwaway CA above."""
+    cert, key = (os.path.join(directory, name + ext) for ext in (".crt", ".key"))
+    _openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+             "-keyout", key, "-out", cert, "-days", "2", "-subj", "/CN=pinned test server",
+             "-addext", f"subjectAltName={sans}", "-addext", "basicConstraints=critical,CA:FALSE")
+    return cert, key
+
+
+def serve_tls_with(server, cert, key):
+    """`serve_tls`, with the given certificate and key instead of the CA-issued one."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+    return server
+
+
 def trust_test_ca(testcase):
     """For this test only, make the client trust the throwaway CA, by
     replacing the one function that names the trusted authorities."""

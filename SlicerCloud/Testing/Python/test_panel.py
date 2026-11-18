@@ -25,6 +25,7 @@ import sys
 import types
 import getpass
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", ".."))                      # SlicerCloud/
@@ -273,7 +274,9 @@ class SyncJob:
 class FakeDeployment:
     """Answers like a machine with docker present and nothing installed."""
 
-    def __init__(self, install_dir=None, repo_url=None, branch=None, **_kwargs):
+    def __init__(self, install_dir=None, repo_url=None, branch=None, **kwargs):
+        self.tools_repo_url = kwargs.get("tools_repo_url")
+        self.tools_branch = kwargs.get("tools_branch")
         self.install_dir = install_dir
         self.repo_url = repo_url
         self.branch = branch
@@ -332,6 +335,11 @@ class PanelTestCase(unittest.TestCase):
         SyncJob.defer = False
         self._realJob = SlicerCloud.BackgroundJob
         self._realDeployment = SlicerCloud.LocalServerDeployment
+        # The panel tests describe the Docker path; on an Apple-silicon runner
+        # the native backend would otherwise be chosen (and the bind fixed).
+        patcher = mock.patch.object(SlicerCloud.deploy, "is_apple_silicon", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         SlicerCloud.BackgroundJob = SyncJob
         SlicerCloud.LocalServerDeployment = FakeDeployment
 
@@ -472,6 +480,36 @@ class TestChangingTheInstallFolder(PanelTestCase):
         self.assertEqual(_QSettings.store["SlicerCloud/InstallDir"], "/tmp/remembered")
 
 
+class TestToolsRepository(PanelTestCase):
+    """The native server's tools repository and branch: Advanced fields that
+    are remembered like the others and travel to the deployment."""
+
+    def test_the_defaults_are_the_compiled_in_ones(self):
+        from SlicerCloudLib import deploy
+        widget = self.panel()
+        self.assertEqual(widget.toolsRepoUrlEdit.text, deploy.DEFAULT_TOOLS_REPO_URL)
+        self.assertEqual(widget.deployment().tools_repo_url, deploy.DEFAULT_TOOLS_REPO_URL)
+        self.assertEqual(widget.deployment().tools_branch, deploy.DEFAULT_TOOLS_BRANCH)
+
+    def test_a_new_url_rebuilds_the_deployment_and_is_remembered(self):
+        widget = self.panel()
+        first = widget.deployment()
+        widget.toolsRepoUrlEdit.text = "  https://example.org/fork/SADT-VISOR.git "
+        self.assertIsNot(widget.deployment(), first)
+        self.assertEqual(widget.deployment().tools_repo_url, "https://example.org/fork/SADT-VISOR.git")
+        widget._saveSettings()
+        self.assertEqual(_QSettings.store["SlicerCloud/ToolsRepoUrl"],
+                         "https://example.org/fork/SADT-VISOR.git")
+        reopened = self.panel()
+        self.assertEqual(reopened.toolsRepoUrlEdit.text, "https://example.org/fork/SADT-VISOR.git")
+
+    def test_an_emptied_field_falls_back_to_the_default(self):
+        from SlicerCloudLib import deploy
+        widget = self.panel()
+        widget.toolsRepoUrlEdit.text = "   "
+        self.assertEqual(widget.deployment().tools_repo_url, deploy.DEFAULT_TOOLS_REPO_URL)
+
+
 class TestServerUrlIsHttpsOnly(PanelTestCase):
     """The URL an install hands back becomes every module's server, so the
     rules apply here too: never http://, loopback included, and only the
@@ -519,6 +557,97 @@ class TestServerUrlIsHttpsOnly(PanelTestCase):
         self.assertNotIn("ServerTools/ServerUrl", _QSettings.store)
         self.assertTrue(any("no public address yet" in text and "PUBLIC_URL" in text
                             for text in DIALOGS["warning"]))
+
+
+class NativeFake(FakeDeployment):
+    """The native server on an Apple-silicon Mac: no Docker, a pinned URL."""
+
+    native = True
+    reported = {"url": "https://127.0.0.1:8000", "token": "t", "healthy": True,
+                "tls": {"enabled": True}}
+
+    def status(self, check_remote=False, progress_cb=None):
+        status = FakeDeployment.status(self)
+        status["docker"] = {"available": False, "version": None, "daemon": False,
+                            "error": "not used by the native backend"}
+        status["compose"] = {"available": False, "version": None}
+        status["gpu"] = {"nvidia_runtime": False, "nvidia_smi": False, "gpu_access": "mps"}
+        return status
+
+    def clone_tools(self, progress_cb=None):
+        self.calls.append("clone_tools")
+
+    def install_tools(self, progress_cb=None, **_kwargs):
+        self.calls.append("install_tools")
+
+    def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+        self.calls.append(("up", port, bind))
+        return dict(self.reported)
+
+
+class TestNativeServerPanel(PanelTestCase):
+    """A Mac with Apple silicon: no Docker step, https://127.0.0.1 pinned."""
+
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        import tempfile
+        import shutil
+        from ServerToolsCoreLib import tls
+        from SlicerCloudLib import local_cert
+        self.work = tempfile.mkdtemp(prefix="panel_native_")
+        self.addCleanup(shutil.rmtree, self.work, True)
+        pin_dir = os.path.join(self.work, "tls")
+        patcher = mock.patch.object(tls, "local_tls_dir", return_value=pin_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.local_cert = local_cert
+        self.pin_dir = pin_dir
+        mock.patch.object(SlicerCloud.deploy, "is_apple_silicon", return_value=True).start()
+        self.addCleanup(mock.patch.stopall)
+        client = SlicerCloud.get_client()
+        self.addCleanup(client.configure, server_url=client.server_url, token=client.token)
+        SlicerCloud.LocalServerDeployment = NativeFake
+
+    def installed(self):
+        widget = self.panel()
+        widget.useServerCheck.checked = True
+        widget.onInstall()
+        return widget
+
+    def test_install_is_clone_tools_build_then_start_without_any_docker_step(self):
+        self.local_cert.ensure_local_certificate(self.pin_dir)
+        widget = self.installed()
+        self.assertEqual(widget.deployment().calls,
+                         ["clone", "clone_tools", "install_tools", ("up", 8000, "127.0.0.1")])
+        self.assertEqual(DIALOGS["error"], [])
+
+    def test_the_client_is_pointed_at_the_pinned_local_address(self):
+        self.local_cert.ensure_local_certificate(self.pin_dir)
+        self.installed()
+        self.assertEqual(SlicerCloud.get_client().server_url, "https://127.0.0.1:8000")
+        self.assertEqual(_QSettings.store["ServerTools/ServerUrl"], "https://127.0.0.1:8000")
+
+    def test_no_pinned_certificate_means_nothing_is_saved_and_the_panel_says_why(self):
+        before = SlicerCloud.get_client().server_url
+        self.installed()
+        self.assertEqual(SlicerCloud.get_client().server_url, before)
+        self.assertNotIn("ServerTools/ServerUrl", _QSettings.store)
+        self.assertTrue(any("serves HTTPS" in text for text in DIALOGS["warning"]))
+        self.assertFalse(any("no public address" in text for text in DIALOGS["warning"]))
+
+    def test_the_bind_is_fixed_to_this_computer(self):
+        widget = self.panel()
+        self.assertFalse(widget.bindCombo.isEnabled())
+        for index in range(widget.bindCombo.count):
+            widget.bindCombo.setCurrentIndex(index)
+            self.assertEqual(widget.selectedBind(), "127.0.0.1")
+
+    def test_the_status_rows_describe_this_backend(self):
+        widget = self.panel()
+        self.assertIn("not needed", widget._statusRows["docker"].text)
+        self.assertIn("Apple GPU", widget._statusRows["gpu"].text)
+        self.assertNotIn("Docker is missing", widget.hintLabel.text)
+        self.assertIn("Install and start", widget.hintLabel.text)
 
 
 class TestDockerMissing(PanelTestCase):
@@ -590,11 +719,11 @@ class TestNetworkAccess(PanelTestCase):
             self.assertFalse(address.startswith(("172.17.", "172.18.", "172.19.")),
                              f"{address} is a docker bridge")
 
-    def test_choosing_a_lan_address_warns_that_no_other_machine_can_verify_it(self):
+    def test_choosing_a_lan_address_warns_that_a_publicly_signed_address_is_needed(self):
         widget = self.panel()
         self._select(widget, "192.168.1.20")
         self.assertEqual(len(DIALOGS["warning"]), 1)
-        self.assertIn("cannot verify it", DIALOGS["warning"][0])
+        self.assertIn("publicly-signed", DIALOGS["warning"][0])
 
     def test_a_vpn_address_is_not_presented_as_the_same_risk(self):
         """Tailscale/WireGuard encrypt the link, so this one is informative
