@@ -846,11 +846,81 @@ class LocalServerDeployment:
         """
         args = ["update"] + self._native_args(bind) + self._tls_args(progress_cb) + [
             "--branch", self.branch]
+        tools_args = self._tools_branch_args(progress_cb)
+        args += tools_args
         if bind is not None:
             args += ["--bind", bind]
         if force:
             args.append("--force")
-        return self.run_ctl(args, progress_cb)
+        try:
+            return self.run_ctl(args, progress_cb)
+        except DeploymentError as exc:
+            if self.native:
+                raise DeploymentError(self._explain_native_update_error(str(exc), bool(tools_args))) from None
+            raise
+
+    def _tools_branch_args(self, progress_cb=None) -> list:
+        """`--tools-branch B [--tools-url U]` for a native `update`; empty for Docker.
+
+        `update --native` puts the tools checkout on the branch asked for, so
+        the Tools branch field means something after the first clone, the way
+        the Branch field does. The URL is only sent when it is not the default
+        one: the server then fetches from `origin` and never has to compare.
+
+        A server installed before those options existed would die on an
+        argparse error. So this asks it (`update --help`) first. Only a
+        non-default choice is an error there: sending nothing leaves the tools
+        where they are, which is all an older server could ever do, but
+        dropping a branch the user typed would be a silent lie.
+        """
+        if not self.native:
+            return []
+        wanted = ["--tools-branch", self.tools_branch]
+        if self.tools_repo_url != DEFAULT_TOOLS_REPO_URL:
+            wanted += ["--tools-url", self.tools_repo_url]
+        if self._ctl_publishes("--tools-branch"):
+            return wanted
+        if self.tools_branch == DEFAULT_TOOLS_BRANCH and self.tools_repo_url == DEFAULT_TOOLS_REPO_URL:
+            _emit(progress_cb, "This server cannot switch the tools branch (it is older than that option); "
+                               "leaving the tools checkout as it is.")
+            return []
+        raise DeploymentError(
+            f"This server is too old to switch the tools to branch '{self.tools_branch}'"
+            f"{'' if self.tools_repo_url == DEFAULT_TOOLS_REPO_URL else ' of ' + self.tools_repo_url}: "
+            f"its server_ctl.py has no --tools-branch option. The tools were not switched and the running "
+            f"server was not touched. Update the server code first (Branch field, then Update server "
+            f"with the Tools branch set back to '{DEFAULT_TOOLS_BRANCH}'), then ask for that branch again.")
+
+    def _ctl_publishes(self, option: str) -> bool:
+        """Whether `server_ctl.py update --help` lists `option`. False when it cannot be asked."""
+        if not self.is_cloned:
+            return False
+        try:
+            done = subprocess.run(
+                [self.python, self.script_path, "update", "--help"], cwd=self.install_dir,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+                **_subprocess_kwargs())
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return done.returncode == 0 and option in done.stdout
+
+    @staticmethod
+    def _explain_native_update_error(message: str, asked_tools_branch: bool) -> str:
+        """Say what state the server is in, which the bare message of server_ctl.py does not.
+
+        The server refuses a tools-branch switch (dirty tree, diverged branch,
+        unknown branch...) before it stops anything, so a refusal means the old
+        server is still serving. The one error that says the opposite is its
+        failed relaunch. Any other message is passed on untouched: its timing
+        is not known.
+        """
+        if "old native server was stopped" in message:
+            return (message + "\n\nThe previous server was stopped and the new one is not running: "
+                              "nothing is serving now.")
+        refused = message.startswith(("Tools checkout ", "--tools-branch ", "--tools-url "))
+        if asked_tools_branch and refused:
+            return message + "\n\nNothing was changed and the server that was running is still running."
+        return message
 
     def down(self, progress_cb=None) -> dict:
         return self.run_ctl(["down"] + self._native_args(), progress_cb)

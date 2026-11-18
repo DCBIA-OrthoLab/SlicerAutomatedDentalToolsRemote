@@ -628,7 +628,7 @@ class TestNativeCommands(NativeCase):
 
     def test_update_carries_the_certificate_too(self):
         d = self.native()
-        with self.capture(d):
+        with self.capture(d), self.publishes():
             d.update(force=True)
         args = self.captured[0]
         self.assertEqual(args[:4], ["update", "--native", "--tools-dir", self.tools])
@@ -636,6 +636,100 @@ class TestNativeCommands(NativeCase):
         self.assertIn("--tls-key", args)
         self.assertEqual(args[args.index("--branch") + 1], deploy.DEFAULT_BRANCH)
         self.assertEqual(args[-1], "--force")
+
+    def publishes(self, supported=True):
+        return mock.patch.object(deploy.LocalServerDeployment, "_ctl_publishes", return_value=supported)
+
+    def test_update_names_the_tools_branch(self):
+        d = self.native(tools_branch="update")
+        with self.capture(d), self.publishes():
+            d.update(force=True)
+        args = self.captured[0]
+        i = args.index("--tools-branch")
+        self.assertEqual(args[i:i + 2], ["--tools-branch", "update"])
+        self.assertNotIn("--tools-url", args)
+        self.assertEqual(args[-1], "--force")
+
+    def test_update_names_the_tools_url_only_when_it_is_not_the_default(self):
+        url = "https://github.com/someone/SADT-VISOR.git"
+        d = self.native(tools_branch="dev", tools_repo_url=url)
+        with self.capture(d), self.publishes():
+            d.update()
+        args = self.captured[0]
+        self.assertEqual(args[args.index("--tools-branch"):][:4], ["--tools-branch", "dev", "--tools-url", url])
+        d = self.native()
+        with self.capture(d), self.publishes():
+            d.update()
+        self.assertEqual(self.captured[1][self.captured[1].index("--tools-branch") + 1], deploy.DEFAULT_TOOLS_BRANCH)
+        self.assertNotIn("--tools-url", self.captured[1])
+
+    def test_an_older_server_is_not_sent_options_it_does_not_know(self):
+        d = self.native()
+        with self.capture(d), self.publishes(False):
+            d.update()
+        self.assertNotIn("--tools-branch", self.captured[0])
+        self.assertNotIn("--tools-url", self.captured[0])
+
+    def test_an_older_server_refuses_a_chosen_branch_in_plain_words(self):
+        for kwargs in ({"tools_branch": "update"},
+                       {"tools_repo_url": "https://example.org/x/SADT-VISOR.git"}):
+            d = self.native(**kwargs)
+            with self.capture(d), self.publishes(False), self.assertRaises(DeploymentError) as caught:
+                d.update()
+            self.assertIn("too old", str(caught.exception))
+            self.assertIn("not touched", str(caught.exception))
+            self.assertEqual(self.captured, [])
+
+    def test_the_help_probe_reads_what_the_installed_server_publishes(self):
+        with_option = "import sys\nprint('usage: update [--tools-branch B]' if 'update' in sys.argv else '')\n"
+        _write_fake_ctl(self.install_dir, with_option)
+        self.assertTrue(self.native()._ctl_publishes("--tools-branch"))
+        _write_fake_ctl(self.install_dir, "print('usage: update [--force]')\n")
+        self.assertFalse(self.native()._ctl_publishes("--tools-branch"))
+        _write_fake_ctl(self.install_dir, "import sys\nsys.exit(2)\n")
+        self.assertFalse(self.native()._ctl_publishes("--tools-branch"))
+
+    def test_a_refused_switch_is_shown_as_is_and_says_the_old_server_runs(self):
+        refusal = ("Tools checkout /x/SADT-VISOR: it is on 'main' and 'update' was asked for, but the "
+                   "tree has uncommitted changes. Commit or discard them, then update again.")
+        d = self.native(tools_branch="update")
+        with self.publishes(), mock.patch.object(d, "run_ctl", side_effect=DeploymentError(refusal)), \
+                self.assertRaises(DeploymentError) as caught:
+            d.update()
+        message = str(caught.exception)
+        self.assertTrue(message.startswith(refusal))
+        self.assertIn("still running", message)
+        self.assertNotIn("nothing is serving", message)
+
+    def test_a_failed_relaunch_says_the_old_server_is_stopped(self):
+        stopped = ("The old native server was stopped, and the new one did not start (X: y). "
+                   "Nothing is serving now.")
+        d = self.native()
+        with self.publishes(), mock.patch.object(d, "run_ctl", side_effect=DeploymentError(stopped)), \
+                self.assertRaises(DeploymentError) as caught:
+            d.update()
+        message = str(caught.exception)
+        self.assertTrue(message.startswith(stopped))
+        self.assertIn("was stopped and the new one is not running", message)
+        self.assertNotIn("still running", message)
+
+    def test_other_update_errors_are_passed_on_untouched(self):
+        d = self.native()
+        with self.publishes(), mock.patch.object(d, "run_ctl", side_effect=DeploymentError("boom")), \
+                self.assertRaises(DeploymentError) as caught:
+            d.update()
+        self.assertEqual(str(caught.exception), "boom")
+
+    def test_docker_update_argv_is_what_it_was_before(self):
+        d = self.deployment(native=False, tools_branch="update",
+                            tools_repo_url="https://example.org/x/SADT-VISOR.git")
+        with self.capture(d), mock.patch.object(deploy.subprocess, "run") as run:
+            d.update()
+            d.update(force=True, bind=deploy.BIND_LOCALHOST)
+        run.assert_not_called()
+        self.assertEqual(self.captured[0], ["update", "--branch", deploy.DEFAULT_BRANCH])
+        self.assertEqual(self.captured[1], ["update", "--branch", deploy.DEFAULT_BRANCH,
+                                            "--bind", "127.0.0.1", "--force"])
 
     def test_install_tools_is_native_only_and_names_each_tool(self):
         d = self.native()

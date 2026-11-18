@@ -1795,6 +1795,19 @@ docker nor a free port, and those are precisely what a user may be updating in
 order to fix — refusing to switch branch because port 8000 is busy is the tool
 getting in its own way.
 
+On the native backend the same holds for the tools checkout: `update()` sends
+`--tools-branch <Tools branch>` on every update, and `--tools-url <Tools
+repository>` only when it differs from `DEFAULT_TOOLS_REPO_URL`. `server_ctl.py`
+switches the checkout before it stops anything and refuses, with nothing lost,
+on a dirty tree, a diverged branch or an unknown branch. The panel shows that
+refusal verbatim and adds that the server that was running is still running;
+the one error saying the old server was stopped (the relaunch failed) gets the
+opposite line. Before sending the options, `update()` runs `server_ctl.py update
+--help`: a server too old to list `--tools-branch` is sent nothing when the
+fields hold the defaults, and is refused in plain words when they do not (the
+alternative, an argparse error, or silently ignoring the branch the user typed).
+Docker updates are unchanged.
+
 ### Lifecycle: the container outlives Slicer unless told otherwise
 
 `docker compose up -d` is detached, so nothing about the container is tied to
