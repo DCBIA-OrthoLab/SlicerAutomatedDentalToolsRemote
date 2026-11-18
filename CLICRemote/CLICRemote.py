@@ -38,7 +38,7 @@ class CLICRemote(ScriptedLoadableModule):
         certainty; the value used is recorded with every result.
         See more information in <a href="https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools">documentation</a>.
         """)
-        self.parent.acknowledgementText = ""
+        self.parent.acknowledgementText = _("This module was supported by NIDCR R01 024450.")
 
 
 class CLICRemoteWidget(ServerToolWidgetBase):

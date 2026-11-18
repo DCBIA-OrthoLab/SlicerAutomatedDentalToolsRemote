@@ -44,7 +44,9 @@ def load_overrides() -> dict:
         try:
             overrides["server_url"] = checked_server_url(saved)
         except ValueError as exc:
-            logger.error("The saved server URL was ignored: %s", exc)
+            # A warning, not an error: nothing failed, Slicer starts and the
+            # settings panel shows the URL to fix.
+            logger.warning("The saved server URL was ignored: %s", exc)
     if settings.contains(_KEY_API_TOKEN):
         overrides["token"] = str(settings.value(_KEY_API_TOKEN))
     # `verify_tls` is deliberately NOT read back. It was a saved setting until

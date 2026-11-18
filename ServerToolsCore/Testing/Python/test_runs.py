@@ -768,6 +768,185 @@ class RunQueueTest(unittest.TestCase):
         self.assertTrue(stale.deleted, "the old buttons were left in the layout")
 
 
+class RunNarrativeTest(RunQueueTest):
+    """The run's story in the console, one line per step.
+
+    The panel's progress line is replaced on every event, so by the end of a
+    chain -- AREG driving Crown_Seg, ALI_CBCT, ALI_IOS -- nothing on screen
+    says what happened. The console keeps one line per step, in blue, and one
+    at the end saying how it went and how long it took.
+
+    A RunQueueTest for its panel and fake jobs; the tests it inherits are
+    blanked right after the class, so they run once, there.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.shown = []
+        self._show = base_widget.console.show
+        base_widget.console.show = lambda text, color: self.shown.append((text, color)) or True
+
+    def tearDown(self):
+        base_widget.console.show = self._show
+        super().tearDown()
+
+    def _lines(self):
+        return [text for text, _color in self.shown]
+
+    def test_each_new_step_is_written_once(self):
+        self._apply()
+        job = _Job.started[0]
+        job.emit(seq=1, message="labelling the crowns", fraction=0.1)
+        job.emit(seq=2, message="labelling the crowns", fraction=0.2)
+        job.emit(seq=3, message="predicting CBCT landmarks", fraction=0.3)
+
+        steps = [line for line in self._lines() if "labelling" in line or "predicting" in line]
+        self.assertEqual(len(steps), 2, steps)
+        self.assertNotIn("%", steps[0], "a percentage is the bar's, not a step")
+        self.assertTrue(all(color == base_widget.console.STEP for _t, color in self.shown))
+
+    def test_the_next_scan_of_a_cohort_is_not_a_new_step(self):
+        self._apply()
+        job = _Job.started[0]
+        job.emit(seq=1, message="scan 1 of 12")
+        job.emit(seq=2, message="scan 2 of 12")
+
+        self.assertEqual(sum("scan" in line for line in self._lines()), 1)
+
+    def test_a_nested_tool_is_named_on_its_step(self):
+        self._apply()
+        job = _Job.started[0]
+        job.emit(seq=0, depth=1, call="1", tool="ALI_CBCT", edge="open")
+        job.emit(seq=1, depth=1, call="1", message="placing landmarks")
+
+        self.assertIn("ALI_CBCT: ", self._lines()[-1])
+
+    def test_a_line_names_the_tool_and_the_time(self):
+        self._apply()
+        _Job.started[0].emit(seq=1, message="merging")
+
+        line = self._lines()[-1]
+        self.assertTrue(line.startswith("[{}]".format(self.panel.TOOL_NAME)), line)
+        self.assertRegex(line, r"\d\d:\d\d:\d\d")
+
+    def test_a_finished_run_says_so_in_green_with_its_duration(self):
+        self._apply()
+        _Job.started[0].succeed()
+
+        text, color = self.shown[-1]
+        self.assertIn("Finished", text)
+        self.assertRegex(text, r"\(\d+ s\)")
+        self.assertEqual(color, base_widget.console.OUTPUT)
+
+    def test_a_failed_run_says_why_in_red(self):
+        self._apply()
+        _Job.started[0].fail(ServerToolError("the GPU ran out of memory"))
+
+        text, color = self.shown[-1]
+        self.assertIn("Failed: the GPU ran out of memory", text)
+        self.assertEqual(color, base_widget.console.ERROR)
+
+    def test_a_cancelled_run_is_not_a_failure(self):
+        self._apply()
+        _Job.started[0].fail(RunCancelled("cancelled"))
+
+        text, color = self.shown[-1]
+        self.assertIn("Cancelled", text)
+        self.assertNotEqual(color, base_widget.console.ERROR)
+
+    def test_a_metric_is_dark_blue_and_says_so(self):
+        """A residual or a volume: there to be read when it matters, and set
+        apart so it can be skipped when it does not."""
+        self._apply()
+        _Job.started[0].log(level="metric", message="arch U: landmark fit 1.28 mm")
+
+        text, color = self.shown[-1]
+        self.assertIn("METRIC", text)
+        self.assertIn("landmark fit 1.28 mm", text)
+        self.assertEqual(color, base_widget.console.METRIC)
+
+    def test_a_run_reads_as_steps_then_numbers_then_outcome(self):
+        """Blank lines between the paragraphs of a run, so the metrics and the
+        outcome are not lost in one column of text."""
+        self.panel._lastConsoleKind = "line"  # something came before this run
+        self._apply()
+        job = _Job.started[0]
+        job.emit(seq=1, message="registering")
+        job.log(seq=2, level="metric", message="landmark fit: 1.28 mm")
+        job.log(seq=3, level="metric", message="final: 93%")
+        job.emit(seq=4, message="writing")
+        job.succeed()
+
+        shape = ["" if text == "" else ("M" if "METRIC" in text else "L")
+                 for text in self._lines()]
+        self.assertEqual(shape, ["", "L", "", "M", "M", "", "L", "", "L"])
+
+    def test_a_sub_call_is_its_own_paragraph(self):
+        """AREG driving Crown_Seg, then ALI_IOS: each sub-call set off by a
+        blank line, entering and leaving it."""
+        self._apply()
+        job = _Job.started[0]
+        job.emit(seq=1, message="labelling the crowns")
+        job.emit(seq=2, depth=1, call="1", tool="Crown_Seg", edge="open")
+        job.emit(seq=3, depth=1, call="1", message="mesh 1 of 2")
+        job.log(seq=4, depth=1, source="Crown_Seg", message="2 meshes labelled")
+        job.emit(seq=5, depth=0, message="predicting landmarks")
+
+        shape = ["" if text == "" else "L" for text in self._lines()]
+        self.assertEqual(shape, ["L", "", "L", "L", "", "L"])
+
+    def test_the_console_carries_no_dash_and_no_arrow(self):
+        self._apply()
+        job = _Job.started[0]
+        job.emit(seq=1, depth=1, call="1", tool="ALI_CBCT", edge="open")
+        job.emit(seq=2, depth=1, call="1", message="placing landmarks", fraction=0.3)
+
+        line = self._lines()[-1]
+        self.assertNotIn("\u2014", line)
+        self.assertNotIn("\u2192", line)
+        self.assertIn("ALI_CBCT: placing landmarks", line)
+
+    def test_the_panel_says_the_run_finished_instead_of_its_last_step(self):
+        """It used to keep "Extracting results... 2:30 elapsed" for good."""
+        self._apply()
+        _Job.started[0].report("Extracting results...")
+        _Job.started[0].succeed()
+        self.assertRegex(self.phases[-1], r"^Finished in \d+:\d\d$")
+
+    def test_the_panel_says_a_run_failed_or_was_cancelled(self):
+        self._apply()
+        _Job.started[0].fail(ServerToolError("no"))
+        self.assertTrue(self.phases[-1].startswith("Failed after "))
+        self._apply()
+        _Job.started[-1].fail(RunCancelled("cancelled"))
+        self.assertTrue(self.phases[-1].startswith("Cancelled after "))
+
+    def test_nothing_is_written_to_the_log_file(self):
+        """A step can name what the tool works on; the log file travels."""
+        self._apply()
+        with self.assertNoLogs(level="DEBUG"):
+            _Job.started[0].emit(seq=1, message="merging")
+
+
+# Not callable, so the loader skips them: they already run in RunQueueTest.
+for _name in dir(RunQueueTest):
+    if _name.startswith("test_") and _name not in RunNarrativeTest.__dict__:
+        setattr(RunNarrativeTest, _name, None)
+
+
+class StepKeyTest(unittest.TestCase):
+    def test_numbers_do_not_make_a_new_step(self):
+        self.assertEqual(base_widget.step_key("scan 3 of 12"), base_widget.step_key("scan 4 of 12"))
+
+    def test_words_do(self):
+        self.assertNotEqual(base_widget.step_key("segmenting"), base_widget.step_key("merging"))
+
+    def test_durations_read_like_a_person_would_say_them(self):
+        self.assertEqual(base_widget.format_duration(48), "48 s")
+        self.assertEqual(base_widget.format_duration(298), "4 min 58 s")
+        self.assertEqual(base_widget.format_duration(3720), "1 h 02 min")
+
+
 class LogLineFormatTest(unittest.TestCase):
     """`HH:MM:SS  [source]  LEVEL  message`, the console's one line shape."""
 

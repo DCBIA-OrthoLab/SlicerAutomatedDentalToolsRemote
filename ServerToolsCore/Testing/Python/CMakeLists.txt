@@ -26,9 +26,10 @@ add_test(
 
 # test_tls.py: https:// only, certifi's bundle on every request, no redirect
 # and no plain HTTP, partly against a real TLS server on 127.0.0.1 whose
-# certificate a throwaway CA issued (tls_fixture.py, which shells out to
-# `openssl`; only the test trusts that CA, by patching tls.ca_bundle). Same
-# reasoning: requests + stdlib only.
+# certificate a throwaway CA issued (tls_fixture.py, with the `cryptography`
+# package Slicer's Python ships, since the factory's machines have no usable
+# `openssl` program; only the test trusts that CA, by patching tls.ca_bundle).
+# Same reasoning: requests + stdlib only.
 add_test(
   NAME ServerToolsCore_test_tls
   COMMAND ${Python3_EXECUTABLE} -m unittest test_tls
@@ -125,6 +126,15 @@ add_test(
 add_test(
   NAME ServerToolsCore_test_schema_refresh
   COMMAND ${Python3_EXECUTABLE} -m unittest test_schema_refresh
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
+# test_console.py: this extension's warnings printed orange in the Python
+# console, its errors left red, and nothing lost from the application log.
+# Stdlib only: the filter is handed a fake handler and a fake printer.
+add_test(
+  NAME ServerToolsCore_test_console
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_console
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 

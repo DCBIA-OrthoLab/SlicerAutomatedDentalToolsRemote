@@ -131,24 +131,6 @@ class DisplayAREGCBCT(Display):
         if kwds["progress"] == 200 and kwds["updateProgessBar"] == False:
             out = True
         return out
-    
-class DisplayAREGIOSCBCT(Display):
-    def __init__(self, nb_progress) -> None:
-        self.nb_progress_total = nb_progress
-        self.time_log = 0
-        super().__init__()
-
-    def __call__(self, **kwds) -> Tuple[float, str]:
-        self.progress += 1
-        self.progress_bar = self.progress / self.nb_progress_total * 100
-        self.message = f"Scan : {self.progress} / {self.nb_progress_total}"
-        return self.progress_bar, self.message
-
-    def isProgress(self, **kwds) -> bool:
-        out = False
-        if kwds["progress"] == 200 and kwds["updateProgessBar"] == False:
-            out = True
-        return out
 
 
 class DisplayAMASSS(Display):

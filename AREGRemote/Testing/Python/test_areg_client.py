@@ -23,6 +23,7 @@ Usage:
     python3 -m unittest AREGRemote/Testing/Python/test_areg_client.py
 """
 
+import json
 import os
 import shutil
 import sys
@@ -103,7 +104,8 @@ def _load_areg_module():
     return module
 
 
-AREGRemoteWidget = _load_areg_module().AREGRemoteWidget
+_AREG = _load_areg_module()
+AREGRemoteWidget = _AREG.AREGRemoteWidget
 
 
 def _module_source() -> str:
@@ -485,7 +487,10 @@ class DeclarationTest(unittest.TestCase):
         written against a remembered schema is the one thing that can drift out
         of sync with it."""
         self.assertEqual(AREGRemoteWidget.TOOL_NAME, "AREG")
-        self.assertEqual(AREGRemoteWidget.FILE_INPUTS, ServerToolWidgetBase.FILE_INPUTS)
+        # The one exception, and not a repetition: a packaged tool's path takes
+        # a file or a folder, and nothing in the schema can say that the folder
+        # of patient folders is only ever a folder.
+        self.assertEqual(AREGRemoteWidget.FILE_INPUTS, {"patients": "folder_zip"})
         self.assertIsNone(AREGRemoteWidget.RESULT_KIND)
         self.assertTrue(AREGRemoteWidget.AUTO_UI)
 
@@ -496,6 +501,23 @@ class DeclarationTest(unittest.TestCase):
         anything."""
         self.assertFalse(hasattr(AREGRemoteWidget, "TEST_DATA"))
         self.assertNotIn("TEST_DATA", _module_source())
+
+
+class ConsoleNameTest(unittest.TestCase):
+    """The console says which registration is running, not just "AREG"."""
+
+    def _name(self, args):
+        panel = AREGRemoteWidget.__new__(AREGRemoteWidget)
+        return panel.consoleName(types.SimpleNamespace(args=args))
+
+    def test_each_mode_names_the_tool_the_server_routes_it_to(self):
+        self.assertEqual(self._name({"mode": "IOS to CBCT"}), "AREG IOS-CBCT")
+        self.assertEqual(self._name({"mode": "CBCT"}), "AREG CBCT")
+        self.assertEqual(self._name({"mode": "IOS"}), "AREG IOS")
+
+    def test_an_unknown_mode_falls_back_on_the_module(self):
+        self.assertEqual(self._name({"mode": "something new"}), "AREG")
+        self.assertEqual(self._name(None), "AREG")
 
 
 class SchemaDrivenPanelTest(unittest.TestCase):
@@ -703,6 +725,19 @@ class ResultDiscoveryTest(unittest.TestCase):
             {"P1_CB_Reg.nii.gz": "volume", "P1_T2_Upper_Reg.vtk": "model"},
         )
 
+    def test_landmarks_are_markups(self):
+        """An IOS-to-CBCT run with "Moved landmarks" ticked hands back each
+        mesh's moved points and the CBCT's; both belong in the scene beside
+        the meshes, or there is nothing to judge the fit by."""
+        self._write("P1/P1_L_Reg_lm.mrk.json")
+        self._write("P1/P1_CBCT_lm_Pred.mrk.json")
+        self._write("P1/P1_U_Reg_lm.json")
+        self.assertEqual(
+            self._found(),
+            {"P1_L_Reg_lm.mrk.json": "markups", "P1_CBCT_lm_Pred.mrk.json": "markups",
+             "P1_U_Reg_lm.json": "markups"},
+        )
+
     def test_transforms_and_the_report_are_not_loaded(self):
         """Loading a .tfm into the scene applies nothing and explains nothing;
         AREG_report.json is not a scene object either. Both must stay out, or
@@ -724,6 +759,79 @@ class ResultDiscoveryTest(unittest.TestCase):
         halve the effective load cap and load the same file twice."""
         self._write("CB/P1_CB_Reg.nii.gz")
         self.assertEqual(len(AREGRemoteWidget._findResults(self.dir)), 1)
+
+
+class _Display:
+    def __init__(self, selected=(0.26666, 0.67451, 0.39216)):
+        self.color, self.selected = None, None
+        self._file_selected = selected
+
+    def GetSelectedColor(self):
+        return self.selected or self._file_selected
+
+    def SetColor(self, *rgb):
+        self.color = rgb
+
+    def SetSelectedColor(self, *rgb):
+        self.selected = rgb
+
+
+class _Node:
+    def __init__(self, name):
+        self.name, self.display = name, _Display()
+
+    def GetName(self):
+        return self.name
+
+    def GetDisplayNode(self):
+        return self.display
+
+
+class ResultColorTest(unittest.TestCase):
+    def test_the_cbct_is_rendered_in_3d(self):
+        """The CBCT is what every arch was registered onto: without a
+        rendering the 3D view showed the meshes floating on nothing."""
+        self.assertEqual(AREGRemoteWidget.VOLUME_RENDERING, "CT-AAA")
+
+    def test_each_landmark_set_and_each_mesh_gets_its_own_colour(self):
+        """All markups arrived in Slicer's default colour, so the orientation,
+        CBCT and moved landmarks were one cloud, and both arches one grey."""
+        markups = [_Node(name) for name in ("U_lm", "CBCT_lm", "L_lm", "Or_lm")]
+        models = [_Node("U"), _Node("L")]
+        opened = [("markups", node) for node in markups] + [("model", node) for node in models]
+        AREGRemoteWidget._colorResults(opened + [("volume", object()), ("markups", None)])
+
+        markup_colors = [node.display.selected for node in markups]
+        self.assertEqual(len(set(markup_colors)), len(markups))
+        self.assertEqual([node.display.color for node in markups], markup_colors)
+        self.assertEqual(len({node.display.color for node in models}), len(models))
+        self.assertTrue(all(node.display.selected is None for node in models))
+
+    def test_a_file_keeps_its_colour_from_one_run_to_the_next(self):
+        """By name, not by load order: the lower arch is the same colour every time."""
+        first = [_Node("L"), _Node("U")]
+        second = [_Node("U"), _Node("L")]
+        AREGRemoteWidget._colorResults([("model", node) for node in first])
+        AREGRemoteWidget._colorResults([("model", node) for node in second])
+        self.assertEqual(first[0].display.color, second[1].display.color)
+
+    def test_a_colour_set_in_the_landmark_file_is_kept(self):
+        """Consistent with every other module: a `.mrk.json` that names its own
+        colour shows in it here too."""
+        chosen, default, plain = _Node("A_lm"), _Node("B_lm"), _Node("C_lm")
+        chosen.display = _Display(selected=(0.1, 0.2, 0.9))
+        plain.display = _Display(selected=(1.0, 0.5000076, 0.5000076))
+        AREGRemoteWidget._colorResults([("markups", n) for n in (chosen, default, plain)])
+        self.assertIsNone(chosen.display.selected)
+        self.assertIsNone(chosen.display.color)
+        self.assertIsNotNone(default.display.selected)
+        self.assertIsNotNone(plain.display.selected)
+
+    def test_a_node_that_cannot_be_coloured_does_not_stop_the_others(self):
+        broken, fine = _Node("A"), _Node("B")
+        broken.display.SetColor = None
+        AREGRemoteWidget._colorResults([("model", broken), ("model", fine)])
+        self.assertIsNotNone(fine.display.color)
 
 # ---------------------------------------------------------------------------
 # What Apply waits for
@@ -902,5 +1010,174 @@ class PrepareInputFilesTest(unittest.TestCase):
         self.assertTrue(all(os.path.exists(path) for path in files.values()))
 
 
+
+class _PathWidget:
+    """An input row holding a local path, or an open volume."""
+
+    def __init__(self, path="", volume=""):
+        self.currentPath, self._volume = path, volume
+
+    def volume_name(self):
+        return self._volume
+
+
+class IntraoralCbctPairingTest(unittest.TestCase):
+    """One CBCT file beside a folder of intraoral scans sends only that
+    patient's scans at that timepoint, mirroring how the server pairs them."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.ios = os.path.join(self.root, "ios")
+        for name in ("P001_T1_U.vtk", "P001_T1_L.vtk", "P001_T2_U.vtk",
+                     "P001_T2_L.vtk", "P002_T1_U.vtk", "notes.txt"):
+            self._touch(os.path.join(self.ios, name))
+        self.cbct = self._touch(os.path.join(self.root, "cbct", "P_0001_T1.nii.gz"))
+
+    @staticmethod
+    def _touch(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        return path
+
+    def test_a_name_gives_its_patient_and_timepoint(self):
+        self.assertEqual(_AREG.subject_of("P001_T2_U.vtk"), ("1", "t2"))
+        self.assertEqual(_AREG.subject_of("P_0001_T2.nii.gz"), ("1", "t2"))
+        self.assertEqual(_AREG.subject_of("P1_UpperT2.vtk"), ("1", "t2"))
+        self.assertEqual(_AREG.subject_of("T1/case7_U.vtk"), ("7", "t1"))
+        self.assertEqual(_AREG.subject_of("case7_U.vtk"), ("7", None))
+
+    def test_only_the_patient_and_timepoint_of_the_cbct_are_kept(self):
+        self.assertEqual(
+            _AREG.matching_entries(self.ios, self.cbct, _AREG._SURFACE_EXTENSIONS),
+            ["P001_T1_L.vtk", "P001_T1_U.vtk"])
+
+    def test_a_cbct_naming_no_timepoint_beside_two_is_refused(self):
+        with self.assertRaises(ValueError):
+            _AREG.matching_entries(self.ios, "P_0001.nii.gz", _AREG._SURFACE_EXTENSIONS)
+
+    def test_nothing_matching_is_refused_before_anything_is_sent(self):
+        with self.assertRaises(ValueError):
+            _AREG.matching_entries(self.ios, "P_0009_T1.nii.gz", _AREG._SURFACE_EXTENSIONS)
+
+    def _panel(self, ios, cbct):
+        panel = object.__new__(AREGRemoteWidget)
+        panel._hiddenArgs = set()
+        panel._sceneVolumes = {}
+        panel._inputWidgets = {"ios": ios, "cbct": cbct}
+        zipped = []
+        panel._zipFolder = lambda workspace, arg, folder, entries=None: (
+            zipped.append((arg, folder, entries)) or f"{arg}.zip")
+        return panel, zipped
+
+    def test_the_folder_beside_a_single_cbct_is_narrowed_before_upload(self):
+        panel, zipped = self._panel(_PathWidget(self.ios), _PathWidget(self.cbct))
+        panel._prepareOneInputFile(None, "ios", "file_or_folder")
+        self.assertEqual(zipped, [("ios", self.ios, ["P001_T1_L.vtk", "P001_T1_U.vtk"])])
+
+    def test_two_folders_are_sent_whole(self):
+        cbct_folder = os.path.dirname(self.cbct)
+        panel, zipped = self._panel(_PathWidget(self.ios), _PathWidget(cbct_folder))
+        original = ServerToolWidgetBase._prepareOneInputFile
+        calls = []
+        ServerToolWidgetBase._prepareOneInputFile = (
+            lambda self, workspace, arg, mode, entries=None: calls.append(arg))
+        try:
+            panel._prepareOneInputFile(None, "ios", "file_or_folder")
+        finally:
+            ServerToolWidgetBase._prepareOneInputFile = original
+        self.assertEqual((calls, zipped), (["ios"], []))
+
+    def test_an_open_volume_names_the_patient_the_folder_is_narrowed_to(self):
+        panel, zipped = self._panel(_PathWidget(self.ios), _PathWidget(volume="P_0001_T2"))
+        panel._sceneVolumes = {"P_0001_T2": _Node("P_0001_T2")}
+        panel._prepareOneInputFile(None, "ios", "file_or_folder")
+        self.assertEqual(zipped[0][2], ["P001_T2_L.vtk", "P001_T2_U.vtk"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Stored:
+    def __init__(self, path):
+        self.path = path
+
+    def GetFileName(self):
+        return self.path
+
+
+class _Volume:
+    def __init__(self, path):
+        self.path = path
+
+    def GetName(self):
+        return os.path.basename(self.path)
+
+    def GetStorageNode(self):
+        return _Stored(self.path)
+
+
+class RegisteredPairTest(unittest.TestCase):
+    """A CBCT run ended on one grey scan and an empty 3D view with only the
+    landmarks in it: the base class shows the first scan, and renders one
+    only when there is one."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.shown, self.rendered = [], []
+        util = sys.modules["slicer"].util
+        self.addCleanup(setattr, util, "setSliceViewerLayers",
+                        getattr(util, "setSliceViewerLayers", None))
+        util.setSliceViewerLayers = lambda **kwargs: self.shown.append(kwargs)
+        self.panel = AREGRemoteWidget.__new__(AREGRemoteWidget)
+        self.panel._renderScan = lambda node: self.rendered.append(node)
+
+    def _file(self, relative):
+        path = os.path.join(self.dir, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        return path
+
+    def _scene(self, relative, files):
+        path = self._file(relative)
+        with open(path, "w") as handle:
+            json.dump({"files": files}, handle)
+        return path
+
+    def test_the_t1_is_under_the_registered_t2_in_slices_and_in_3d(self):
+        t1 = _Volume(self._file("T1_Oriented/case_T1_Or.nii.gz"))
+        t2 = _Volume(self._file("CB/case_CB_Reg.nii.gz"))
+        scene = self._scene("CB/case_CB_Reg_scene.json", [
+            {"path": "../T1_Oriented/case_T1_Or.nii.gz", "kind": "volume", "role": "reference"},
+            {"path": "case_CB_Reg.nii.gz", "kind": "volume", "role": "registered"}])
+        self.panel._producedFiles = [t1.path, t2.path, scene]
+
+        self.panel._showRegisteredPair([("volume", t2), ("volume", t1)])
+
+        self.assertEqual(self.shown[-1]["background"], t1)
+        self.assertEqual(self.shown[-1]["foreground"], t2)
+        self.assertEqual(self.shown[-1]["foregroundOpacity"], 0.5)
+        self.assertEqual(self.rendered, [t1, t2])
+
+    def test_an_oriented_t1_the_scene_does_not_name_is_still_the_reference(self):
+        """Oriented first, the T1 travels under T1_Oriented/ whether or not
+        "T1 scan" was ticked; the scene only names it when it was."""
+        t1 = _Volume(self._file("T1_Oriented/case_T1_Or.nii.gz"))
+        t2 = _Volume(self._file("CB/case_CB_Reg.nii.gz"))
+        scene = self._scene("CB/case_CB_Reg_scene.json", [
+            {"path": "case_CB_Reg.nii.gz", "kind": "volume", "role": "registered"}])
+        self.panel._producedFiles = [t1.path, t2.path, scene]
+
+        self.panel._showRegisteredPair([("volume", t2), ("volume", t1)])
+
+        self.assertEqual(self.shown[-1]["background"], t1)
+        self.assertEqual(self.shown[-1]["foreground"], t2)
+
+    def test_without_a_scene_nothing_is_guessed(self):
+        t2 = _Volume(self._file("CB/case_CB_Reg.nii.gz"))
+        self.panel._producedFiles = [t2.path]
+        self.panel._showRegisteredPair([("volume", t2)])
+        self.assertEqual(self.shown, [])
+        self.assertEqual(self.rendered, [])

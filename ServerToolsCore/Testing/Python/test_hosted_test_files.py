@@ -1319,13 +1319,59 @@ class LoadResultsTest(unittest.TestCase):
 
         self.assertEqual(_util.loaded, [])
 
-    def test_a_cohort_is_refused_rather_than_flooding_the_scene(self):
+    def test_a_cohort_is_not_loaded_into_the_scene_at_once(self):
         self.panel._producedFiles = [
-            "/out/p{:02d}/scan.nii.gz".format(i)
+            "/out/run/p{:02d}/scan.nii.gz".format(i)
             for i in range(ServerToolWidgetBase.MAX_RESULTS_TO_LOAD + 1)]
+        opened = []
+        self.panel._openReviewer = lambda folder, on_continue, **kw: opened.append(
+            (folder, on_continue)) or True
         self.panel._loadResults()
 
         self.assertEqual(_util.loaded, [])
+        self.assertEqual(opened, [(os.path.normpath("/out/run"), None)],
+                         "a cohort is handed to VISU, opened on this run's folder")
+        self.assertEqual(_util.infos, [])
+
+    def test_two_patients_open_in_visu_however_few_their_files(self):
+        """Two cases in one scene put two CBCTs on top of each other."""
+        self.panel._producedFiles = [
+            "/out/run/P1/scene.json", "/out/run/P1/scan.nii.gz",
+            "/out/run/P2/scene.json", "/out/run/P2/scan.nii.gz"]
+        opened = []
+        self.panel._openReviewer = lambda folder, on_continue, **kw: opened.append(
+            folder) or True
+        self.panel._loadResults()
+
+        self.assertEqual(_util.loaded, [])
+        self.assertEqual(opened, [os.path.normpath("/out/run")])
+
+    def test_a_t1_and_a_t2_of_one_patient_are_one_patient(self):
+        """Counted as patients, not timepoints: one patient stays in the scene."""
+        self.panel._producedFiles = [
+            "/out/run/P001_T1/scene.json", "/out/run/P001_T1/scan.nii.gz",
+            "/out/run/P001_T2/scene.json", "/out/run/P001_T2/scan.nii.gz"]
+        self.panel._openReviewer = lambda *a, **kw: self.fail("one patient is not sent to VISU")
+        self.panel._loadResults()
+
+        self.assertEqual(len(_util.loaded), 2)
+
+    def test_one_patient_is_loaded_into_the_scene(self):
+        self.panel._producedFiles = ["/out/P1/scene.json", "/out/P1/scan.nii.gz"]
+        self.panel._openReviewer = lambda *a, **kw: self.fail("one case is not sent to VISU")
+        self.panel._loadResults()
+
+        self.assertEqual(len(_util.loaded), 1)
+
+    def test_a_cohort_is_still_reported_when_visu_cannot_open(self):
+        self.panel._producedFiles = [
+            "/out/p{:02d}/scan.nii.gz".format(i)
+            for i in range(ServerToolWidgetBase.MAX_RESULTS_TO_LOAD + 1)]
+        self.panel._openReviewer = lambda folder, on_continue, **kw: False
+        self.panel._loadResults()
+
+        self.assertEqual(_util.loaded, [])
+        self.assertEqual(len(_util.infos), 1)
 
 
 

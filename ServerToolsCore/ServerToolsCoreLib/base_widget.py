@@ -27,7 +27,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
-from . import (config, design, digest, formgen, is_file_type, is_log_event,
+from . import (config, console, design, digest, formgen, is_file_type, is_log_event,
                new_run_id, slicer_io, testfile_entries)
 from .errors import RunCancelled, ServerToolError, plain_text
 from .worker import BackgroundJob
@@ -58,11 +58,14 @@ _INTERMEDIATE_DIRNAME = "intermediate"
 # checkpoint holds a copy of a step's output for a reader to correct, and the
 # run is still going to write its real answer beside it.
 _CHECKPOINT_DIRNAME = "quality_control"
+# Where a stopped run's archive puts each step's output: `intermediate/<NN>_<Tool>/`.
+_STEPS_DIRNAME = "intermediate"
 
 # How a level reads in the console. Fixed English words rather than translated
 # ones: they are a column a reader scans for "ERROR", and a fixed width keeps
 # the messages after them aligned.
-_LOG_LEVEL_WORDS = {"debug": "DEBUG", "info": "INFO", "warning": "WARNING", "error": "ERROR"}
+_LOG_LEVEL_WORDS = {"debug": "DEBUG", "info": "INFO", "warning": "WARNING", "error": "ERROR",
+                    "metric": "METRIC"}
 
 
 def format_run_log_line(event, prefix: str = "", now=None) -> str:
@@ -94,6 +97,31 @@ def format_run_log_line(event, prefix: str = "", now=None) -> str:
     return "  ".join(parts)
 
 
+_DIGITS = re.compile(r"\d+")
+
+
+def step_key(text: str) -> str:
+    """What makes two step lines "the same step" for the console narrative.
+
+    Numbers are blanked, so "scan 3 of 12" follows "scan 2 of 12" on the panel
+    without adding a console line per scan: the console tells the run's story
+    one step at a time, the panel keeps the live count.
+    """
+    return _DIGITS.sub("#", text or "").strip()
+
+
+def format_duration(seconds: float) -> str:
+    """`seconds` the way the end-of-run line says it: "48 s", "4 min 58 s"."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return "{} s".format(seconds)
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return "{} min {:02d} s".format(minutes, seconds)
+    hours, minutes = divmod(minutes, 60)
+    return "{} h {:02d} min".format(hours, minutes)
+
+
 # Result kinds drawn by their own display node rather than by a slice
 # layer. A volume is not one: it is shown by being put in a layer, and
 # its display node governs window/level, not whether it appears.
@@ -115,6 +143,48 @@ def _safe_name(name: str) -> str:
     """A single, harmless path component for a hosted entry's name."""
     cleaned = _UNSAFE_NAME_CHARACTERS.sub("_", os.path.basename(name)).strip("._-")
     return cleaned or "test_file"
+
+
+def _process_is_running(pid: int) -> bool:
+    """Is process `pid` alive? Asks the system and changes nothing.
+
+    Not `os.kill(pid, 0)` on Windows: there signal 0 is CTRL_C_EVENT, so the
+    call sends a console Ctrl+C instead of probing, and fails for any process
+    outside this console -- which read as "dead" and let the sweep delete the
+    test files of a Slicer that was still running.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        process_query_limited_information = 0x1000
+        still_active = 259
+        error_access_denied = 5
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            # Denied means it exists, under another account; anything else
+            # (an invalid parameter) means there is no such process.
+            return ctypes.get_last_error() == error_access_denied
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def _merged_report(first, second):
@@ -161,6 +231,11 @@ class _CohortView:
         self.rows = rows  # {run number: (label, bar)}, the batches listed
         self.cohort = cohort
         self.remainder = remainder  # the "+ N more" line, or None
+
+
+# Marks a batch of a PAIRED cohort: `(PAIRED_BATCH, {argument: [entries]},
+# patient count)`, where an ordinary batch is `(argument, [entries])`.
+PAIRED_BATCH = "__paired__"
 
 
 def _batch_dirname(index) -> str:
@@ -260,18 +335,29 @@ class _Run:
         # observable at all.
         self.cohort = cohort
         self.cohort_index = cohort_index
+        # The files and folders the reader chose for this run, as they are on
+        # this machine. A stop hands them to the reviewer beside what the steps
+        # wrote: a step that writes only landmarks leaves its scan behind, and
+        # this side is the only one that has it.
+        self.inputs = ()
         # Entries in this batch -- top-level ones, so a per-patient folder
         # counts as the one patient it is. 0 for a run that was not divided.
         self.scan_count = scan_count
         self.job = None
         self.phase = ""
         self.started_at = None  # None while the run is still queued
+        # The step the console last narrated, as `step_key` reads it, so a
+        # step is written once however many progress events repeat it.
+        self.narrated_step = None
         # The checkpoint this run is stopped at, or None. A stopped run holds
         # no thread and no card -- the server is keeping its work for it while
         # somebody reads what it produced -- but it is emphatically not over,
         # and `running` answers True for it so the admission pump never starts
         # a second copy of a run that is merely waiting on a person.
         self.paused = None
+        # The folder the reviewer was opened on at the last stop, so
+        # withdrawing a paused run can take its review down with it.
+        self.review_folder = None
         # What the checkpoint folder held the moment it was unpacked, as
         # {relative path: digest}. It is what "the reader changed this file"
         # is measured against -- see `_corrections` -- and it is replaced on
@@ -346,6 +432,29 @@ class _Run:
         if self.workspace:
             self.workspace.__exit__(None, None, None)
             self.workspace = None
+
+
+# A timepoint word in a case's name: `P001_T1` and `P001_T2` are one patient.
+_TIMEPOINT_WORD = re.compile(r"(?i)(^|[_\-.\s])T[0-9](?=$|[_\-.\s])")
+
+
+def _patients_of(paths) -> set:
+    """The patients a run's results cover, read off its `scene.json` files.
+
+    One `scene.json` per case is the tools' convention (VISU's
+    `index.SCENE_SUFFIX`): `<case>/scene.json`, or `<case>_scene.json` when
+    several share a folder. The case is that name with its timepoint removed.
+    """
+    patients = set()
+    for path in paths:
+        name = os.path.basename(path)
+        if not name.endswith("scene.json"):
+            continue
+        case = name[: -len("scene.json")].rstrip("_-. ")
+        if not case:
+            case = os.path.basename(os.path.dirname(path))
+        patients.add(_TIMEPOINT_WORD.sub("", case).strip("_-. ").lower())
+    return patients
 
 
 class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
@@ -436,6 +545,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._formWidget = None  # the schema-driven part, replaced wholesale on a rebuild
         self.applyButton = None
         self.cancelButton = None
+        self.reviewButton = None
         self.uiWidget = None
         self._progressLabel = None
         self._progressBar = None  # determinate, and only while a tool reports a fraction
@@ -484,6 +594,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyButton = design.primary_button(_("Apply"))
         self.cancelButton = design.danger_button(_("Cancel"))
         self.cancelButton.setVisible(False)
+        # Shown only while a run of this panel waits at a checkpoint: the
+        # reader may have wandered off VISU, and this is the way back to the
+        # one place the run can go on from.
+        self.reviewButton = design.secondary_button(_("Review the paused run in VISU"))
+        self.reviewButton.setVisible(False)
+        self.reviewButton.connect("clicked()", self._goToReview)
+        rootLayout.addWidget(self.reviewButton)
         rootLayout.addWidget(self.applyButton)
         rootLayout.addWidget(self.cancelButton)
 
@@ -577,8 +694,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # says so -- and a user who downloaded a 648 MB cohort once and did not
         # come back would keep it for good. Opening any tool is now enough.
         self._sweepLeftoverTestFiles()
-        self._refreshSchema()
-        self._refreshServerSelectables()
+        # A server that could not be reached for the schema will not answer
+        # for the hosted files a moment later either; asking anyway only adds
+        # a second warning about the same outage.
+        if self._refreshSchema() is not False:
+            self._refreshServerSelectables()
         self._refreshSceneVolumes()
         self._refreshServerStatus()
 
@@ -971,9 +1091,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # other argument; `layout` is the fallback for one that names none.
         section = formgen.section_of(spec)
         target = self._sectionLayouts.get(section, layout)
-        labelWidget = (
+        labelWidget = design.fit_row_label(
             design.required_label(label)
-            if spec.get("required")
+            if formgen.may_be_required(spec)
             else design.optional_label(label)
         )
 
@@ -1083,8 +1203,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             widget.setCurrentIndex(entries.index(previous))
         return choices
 
-    def _refreshSchema(self) -> None:
+    def _refreshSchema(self) -> "bool | None":
         """Rebuild the form when the SERVER's schema has changed under it.
+
+        Returns False when the server could not be reached, so `enter()` does
+        not ask it for anything else; None when there was nothing to compare.
 
         The schema is read once, at `setup()`. A panel built while the server
         offered an older version of this tool then keeps that form for the
@@ -1105,18 +1228,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         it.
         """
         if self._schema is None:
-            return
+            return None
         try:
             schema = self.client.get_tool_schema(self.TOOL_NAME, force_refresh=True)
         except ServerToolError as exc:
             logger.warning("Could not re-read the schema for '%s': %s",
                            self.TOOL_NAME, exc)
-            return
+            return False
         if schema == self._schema:
-            return
+            return True
         logger.info("'%s': the server's schema changed; rebuilding the panel",
                     self.TOOL_NAME)
         self._buildForm(force_refresh=True)
+        return True
 
     def _refreshServerSelectables(self) -> None:
         """Re-read the hosted-file lists and update the dropdowns in place.
@@ -1288,12 +1412,18 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         each batch is what keeps a tool matching landmarks or masks to scans by
         patient name working -- it can still find the patient it is looking at.
         """
-        axis, entries = batch if batch else (None, None)
+        if batch and batch[0] == PAIRED_BATCH:
+            # A paired batch: every paired argument is packed from ITS entries
+            # of the same patients (`_pairedBatches`).
+            per_argument = batch[1]
+        else:
+            axis, entries = batch if batch else (None, None)
+            per_argument = {axis: entries} if axis else {}
         files = {}
         for arg_name, mode in self._inputModes.items():
             path = self._prepareOneInputFile(
                 workspace, arg_name, mode,
-                entries=entries if arg_name == axis else None,
+                entries=per_argument.get(arg_name),
             )
             if path is not None:
                 files[arg_name] = path
@@ -1325,7 +1455,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     extension = candidate
                     break
             return slicer_io.export_node(
-                node, workspace.file(f"{self.TOOL_NAME}_{arg_name}{extension}")
+                node, self._sceneUploadPath(workspace, arg_name, node, extension)
             )
         # Already satisfied by a MODEL the server hosts: nothing to upload,
         # collectArgs sends its name instead (see _serverSideSelections). A
@@ -1360,8 +1490,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             node = widget.currentNode()
             if node is None:
                 return None
-            return slicer_io.export_volume(node, workspace.file(f"{self.TOOL_NAME}_{arg_name}.nii.gz"))
+            return slicer_io.export_volume(
+                node, self._sceneUploadPath(workspace, arg_name, node, ".nii.gz"))
         return None
+
+    def _sceneUploadPath(self, workspace, arg_name: str, node, extension: str) -> str:
+        """Where a scene node is written before it is sent: under its own name.
+
+        The server reads the patient and the jaw off the file name -- AREG IOS
+        to CBCT pairs a surface with its CBCT by the patient's number and tells
+        an upper arch from a lower one by `U`/`L`. Written as `AREG_ios.vtk`,
+        a node picked from the scene carried neither, and the run stopped with
+        "no patient has both an intraoral scan and a CBCT". One folder per
+        argument, so two nodes sharing a name cannot overwrite each other.
+        """
+        name = slicer_io.upload_name(node.GetName(), extension) or f"{self.TOOL_NAME}_{arg_name}"
+        folder = workspace.file(arg_name)
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, name + extension)
 
     def _zipFolder(self, workspace: slicer_io.TempWorkspace, arg_name: str, folder: str,
                    entries=None) -> str:
@@ -1394,13 +1540,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         a zip signature: .xlsx/.docx/.ods are themselves zip containers
         (OOXML), so that would "extract" a result spreadsheet into raw XML
         parts instead of keeping it as the file it is."""
-        if slicer_io.is_extractable_archive(result.path):
+        extracted = getattr(result, "extracted", None)
+        if extracted is not None:
+            # Unpacked already, on the job's worker thread, where a result
+            # archive expanding far beyond its own size (label volumes
+            # compress ~100x) freezes nothing (see `_unpackedOnWorker`).
             resultDir = os.path.dirname(result.path)
-            # Unpacking runs on the main thread and a result archive can expand
-            # far beyond its own size (label volumes compress ~100x), so say so
-            # before starting rather than letting the panel look frozen again.
-            # processEvents is what actually paints it: without it the label is
-            # only repainted once the (blocking) extraction is already done.
+            self._producedFiles = list(extracted)
+            self._producedRoot = resultDir
+            self._mergeRunReport(resultDir)
+            self._announce(_("Results saved to {path}").format(path=resultDir))
+        elif slicer_io.is_extractable_archive(result.path):
+            resultDir = os.path.dirname(result.path)
+            # Reached when the worker could not unpack it, or for a result
+            # that never went through one. Unpacking here runs on the main
+            # thread, so say so before starting rather than letting the panel
+            # look frozen again. processEvents is what actually paints it:
+            # without it the label is only repainted once the (blocking)
+            # extraction is already done.
             self._showPhase(_("Extracting results..."))
             slicer.app.processEvents()
             try:
@@ -1593,14 +1750,31 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 _("{tool}: no result file found to load.").format(tool=self.TOOL_NAME), 5000)
             return
 
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
+        # Two patients loaded into one scene put two CBCTs on top of each
+        # other. Counted as PATIENTS, not cases: a T1 and a T2 of one patient
+        # are two `scene.json` and still one patient to look at.
+        patients = _patients_of(self._producedFiles)
+        if len(patients) >= 2 or len(found) > self.MAX_RESULTS_TO_LOAD:
+            # Several cases, or too many files for the scene at once: that is
+            # what VISU is for. It opens one case at a time, each with what its
+            # `scene.json` lists.
+            # The folder handed over is the narrowest one holding what THIS run
+            # produced, so earlier runs beside it in the output folder are not
+            # offered as cases unless they share it.
+            folder = os.path.commonpath([os.path.dirname(path) for path, _kind in found])
+            if self._openReviewer(folder, None):
+                slicer.util.showStatusMessage(
+                    _("{tool}: {count} result files, opened in VISU one case at a time.").format(
+                        tool=self.TOOL_NAME, count=len(found)), 8000)
+                return
             slicer.util.infoDisplay(plain_text(
                 _("{count} result files were produced - too many to load at once.\n"
                   "They are all saved in {path}.").format(
-                      count=len(found), path=os.path.dirname(found[0][0]))
+                      count=len(found), path=folder)
             ))
             return
 
+        self._hideScene()
         failed = []
         opened = []
         for path, kind in found:
@@ -1676,6 +1850,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.warning("Could not render %s in 3D: %s", self.VOLUME_RENDERING, exc)
 
     @staticmethod
+    def _hideScene() -> None:
+        """Hide everything already in the scene before the results go in.
+
+        The results landed on top of the inputs, the pauses' reviews and every
+        earlier run, so a finished run read as a cluttered scene where what it
+        had just produced was the hard part to find. See `slicer_io.hide_scene`.
+        """
+        slicer_io.hide_scene()
+
+    @staticmethod
     def _makeVisible(kind: str, node) -> None:
         """Switch a self-displaying result's display node on.
 
@@ -1715,15 +1899,27 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         The directory name is the server's (`runner.INTERMEDIATE_DIRNAME`), and
         this side cannot import it: written down, and pinned by a test naming
         the same string.
+
+        Any FOLDER of the path counts, not only the first: a tool that sorts
+        its chain's outputs by patient returns them under
+        `<patient>/intermediate/<NN>_<tool>/`. The file's own name never does,
+        so a scan merely called `intermediate_scan` is still a result.
         """
         if not self._producedRoot:
             return False
         try:
-            relative = os.path.relpath(path, self._producedRoot)
+            # Both resolved: the archive's members come back as real paths
+            # (`slicer_io.unzip_folder`), and an output folder reached through
+            # a symlink -- ~/Documents moved to another disk -- made every one
+            # of them look outside it, so nothing was filtered at all.
+            relative = os.path.relpath(os.path.realpath(path),
+                                       os.path.realpath(self._producedRoot))
         except ValueError:  # different drive on Windows; not ours then
             return False
-        first = relative.replace("\\", "/").split("/")[0]
-        return first == _INTERMEDIATE_DIRNAME
+        folders = relative.replace("\\", "/").split("/")[:-1]
+        if folders[:1] == [".."]:
+            return False  # outside the output folder: not the server's layout
+        return _INTERMEDIATE_DIRNAME in folders
 
     def _suggestOutputFolder(self) -> None:
         """Fill the output folder in, so Apply works on a panel nobody set up.
@@ -1756,10 +1952,51 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         if self.resultKind == "save_as":
             canApply = canApply and bool(self._outputFolderWidget and self._outputFolderWidget.currentPath)
-        self.applyButton.enabled = canApply
+        # One run at a time per panel. A second Apply used to queue behind the
+        # first, and with a run paused for review that read as the panel
+        # having ignored the reader -- or started a run on half-checked data.
+        # Disabled rather than hidden, and the tooltip says why: a greyed
+        # button with no reason is a question nobody can answer.
+        busy = self._busyReason()
+        self.applyButton.enabled = canApply and not busy
+        self.applyButton.toolTip = busy
+
+    def _pausedRun(self):
+        """The first run of this panel waiting at a checkpoint, or None."""
+        return next((run for run in self._runs if run.paused is not None), None)
+
+    def _busyReason(self) -> str:
+        """Why Apply is refused right now, in a sentence; "" when it is not.
+
+        The batches of one cohort are one Apply, so they never block each
+        other: they are already running when this is asked.
+        """
+        if not getattr(self, "_runs", None):
+            return ""
+        paused = self._pausedRun()
+        if paused is not None:
+            step = getattr(paused.paused, "stopped_after", "") or _("a checkpoint")
+            return _("Run {number} is paused after {step} and waits for your review "
+                     "in VISU. Continue or cancel it before starting another.").format(
+                         number=paused.number, step=step)
+        return _("Run {number} is still in progress. Wait for it to finish, or "
+                 "cancel it, before starting another.").format(number=self._runs[0].number)
+
+    def _goToReview(self) -> None:
+        """Back to VISU, where the paused run is waiting."""
+        try:
+            slicer.util.selectModule(self.REVIEW_MODULE)
+        except Exception as exc:  # noqa: BLE001 - a missing module is reported, not raised
+            logger.warning("Could not open %s: %s", self.REVIEW_MODULE, exc)
 
     def _inputReady(self) -> bool:
         arguments = (self._schema or {}).get("arguments", {})
+        # What a `required_when` is read against: the same controlling values
+        # the visibility pass reads.
+        controlling = formgen.controlling_arguments(arguments)
+        values = formgen.collect(
+            {name: self._argWidgets[name] for name in controlling if name in self._argWidgets}
+        )
         for arg_name, mode in self._inputModes.items():
             # A file input hidden by its `visible_when` is not uploaded either
             # (see _prepareOneInputFile), so it cannot be what Apply waits for.
@@ -1773,7 +2010,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # its `mgl_landmarks` exists only to REUSE landmarks you already
             # have, since the server predicts them otherwise, and requiring it
             # made the ordinary run the one you could not launch.
-            if not arguments.get(arg_name, {}).get("required", True):
+            spec = arguments.get(arg_name)
+            if spec is not None and not formgen.is_required(spec, values):
                 continue
             widget = self._inputWidgets.get(arg_name)
             if mode == "volume_node":
@@ -1815,7 +2053,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """
         try:
             args = self.collectArgs()
-            batches = self._cohortBatches()
+            batches = self._cohortBatches(args)
         except Exception as exc:
             slicer.util.errorDisplay(plain_text(str(exc)))
             return
@@ -1843,13 +2081,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay(plain_text(str(exc)))
             return
 
-        sizes = [len(batch[1]) for batch in batches] if batches[0] else []
+        # Patients for a paired batch, entries for an ordinary one: what the
+        # cohort's "N of M" counts.
+        sizes = ([batch[2] if batch[0] == PAIRED_BATCH else len(batch[1]) for batch in batches]
+                 if batches[0] else [])
         cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
         if cohort:
             # Asked once per cohort, when it is queued: whether this
             # workstation's batches may run side by side is the server
             # operator's decision, and it can change between two cohorts.
-            self._batchPolicy = self.client.batch_policy()
+            client = getattr(self, "client", None)
+            self._batchPolicy = client.batch_policy() if client is not None else None
         chosen = (self._outputFolderWidget.currentPath
                   if self._outputFolderWidget else None)
         if cohort:
@@ -1875,6 +2117,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                             path=outputDir, error=exc)))
                     return
             self._runsStarted += 1
+            inputs = self._reviewInputs(files)
             self._runs.append(_Run(
                 self._runsStarted,
                 self._runLabel(files, index, cohort.total if cohort else None),
@@ -1884,11 +2127,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 cohort=cohort, cohort_index=index if cohort else None,
                 scan_count=sizes[index - 1] if sizes else 0,
             ))
+            self._runs[-1].inputs = inputs
         self._pumpRuns()
 
-    def _cohortBatches(self) -> list:
+    def _cohortBatches(self, args=None) -> list:
         """How to divide this run's inputs: `[(axis, [entries]), ...]`, or
         `[None]` for a cohort that travels whole.
+
+        A tool whose inputs are PAIRED publishes `paired_batch` instead, and is
+        divided by `_pairedBatches` -- every batch the same patients in every
+        paired folder.
 
         The server decides IF and HOW MUCH (its `GET /tools` `batch` field, and
         see its conventions.py for why a tool pairing two folders is never
@@ -1901,6 +2149,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # getattr throughout: this runs before anything else reads the panel's
         # state, so it must hold for a panel whose form was never built -- a
         # server that was down at setup(), or a widget under test.
+        paired = self._pairedPlan(args)
+        if paired:
+            return self._pairedBatches(paired, args)
         plan = (getattr(self, "_schema", None) or {}).get("batch")
         axis = (plan or {}).get("axis")
         if not axis:
@@ -1941,6 +2192,135 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             plan.get("max_mb"), plan.get("max_files"),
         )
         return [(axis, entries) for entries in batches]
+
+    # ---- paired cohorts ------------------------------------------------
+    def _pairedPlan(self, args):
+        """`{axes, max_mb, max_files}` when this tool pairs its inputs, for the
+        mode chosen when it is a facade; else None."""
+        plan = (getattr(self, "_schema", None) or {}).get("paired_batch")
+        if not plan:
+            return None
+        if "modes" in plan:
+            mode = (args or {}).get(plan.get("by") or "mode")
+            return (plan.get("modes") or {}).get(mode)
+        return plan
+
+    def _pairedFolders(self, axes):
+        """`{axis: local folder}` when every paired axis is a folder on this
+        machine that this panel packs itself; else None (the cohort travels
+        whole, as it always did)."""
+        prepare = getattr(self, "prepareInputFiles", None)
+        if getattr(prepare, "__func__", None) is not ServerToolWidgetBase.prepareInputFiles:
+            return None
+        if not getattr(self, "_outputFolderWidget", None):
+            return None
+        widgets = getattr(self, "_inputWidgets", None) or {}
+        hidden = getattr(self, "_hiddenArgs", None) or ()
+        folders = {}
+        for axis in axes:
+            widget = widgets.get(axis)
+            if not widget or axis in hidden:
+                return None
+            for attribute in ("volume_name", "server_name"):
+                reader = getattr(widget, attribute, None)
+                if reader and reader():
+                    return None
+            folder = getattr(widget, "currentPath", "")
+            if not folder or not os.path.isdir(folder):
+                return None
+            folders[axis] = folder
+        return folders
+
+    def _pairedBatches(self, plan, args) -> list:
+        """Divide a paired cohort by PATIENT, as the tool itself pairs them.
+
+        The tool is asked (by name only -- nothing is uploaded) which files go
+        together; patients are then packed into batches by size, counting
+        every paired folder, and each batch packs each folder from its own
+        entries for those patients. Whatever the tool pairs with nobody is
+        reported here and left out, as a whole run would leave it out.
+
+        Never a batch of ONE patient when there are several: the server unpacks
+        an archive holding a single folder by stepping into it, which would
+        strip a patient's own folder name, and a few tools treat a lone patient
+        differently from the same patient among others.
+        """
+        axes = plan.get("axes") or []
+        folders = self._pairedFolders(axes)
+        if not folders:
+            return [None]
+        names = {axis: slicer_io.list_files(folder) for axis, folder in folders.items()}
+        mode_argument = {}
+        full = (getattr(self, "_schema", None) or {}).get("paired_batch") or {}
+        if "modes" in full:
+            key = full.get("by") or "mode"
+            mode_argument = {key: (args or {}).get(key)}
+        try:
+            answer = self.client.pairs(self.TOOL_NAME, names, mode_argument)
+        except ServerToolError as exc:
+            # Sending the cohort whole is what every client did before this
+            # existed, and it is never wrong -- only slower to upload.
+            logger.warning("'%s': the server could not pair the inputs (%s); sending the cohort whole.",
+                           self.TOOL_NAME, exc)
+            return [None]
+        groups = answer.get("groups") or []
+        unpaired = {axis: keys for axis, keys in (answer.get("unpaired") or {}).items() if keys}
+        if unpaired:
+            lines = [f"{len(keys)} in '{axis}' only: {', '.join(keys[:5])}{' ...' if len(keys) > 5 else ''}"
+                     for axis, keys in unpaired.items()]
+            slicer.util.warningDisplay(
+                _("Some patients have no partner in the other folder and will not be "
+                  "processed, as in a run of the whole cohort:\n\n") + "\n".join(lines),
+                windowTitle=self.TOOL_NAME)
+        if len(groups) < 2:
+            return [None]
+
+        max_bytes = int((plan.get("max_mb") or 0) * 1024 * 1024)
+        max_patients = int(plan.get("max_files") or 0)
+        sized = []
+        for group in groups:
+            entries = group.get("entries") or {}
+            size = sum(slicer_io.entry_size(os.path.join(folders[axis], entry))
+                       for axis, found in entries.items() for entry in found)
+            sized.append((group, size))
+        batches, current, current_bytes = [], [], 0
+        for group, size in sized:
+            full_now = current and (
+                (max_patients > 0 and len(current) >= max_patients)
+                or (max_bytes > 0 and current_bytes + size > max_bytes))
+            if full_now:
+                batches.append(current)
+                current, current_bytes = [], 0
+            current.append(group)
+            current_bytes += size
+        if current:
+            batches.append(current)
+        # No lone patient: fold a one-patient batch into its neighbour.
+        index = 0
+        while len(batches) > 1 and index < len(batches):
+            if len(batches[index]) == 1:
+                neighbour = index - 1 if index > 0 else index + 1
+                batches[neighbour] = (batches[neighbour] + batches[index]
+                                      if neighbour < index else batches[index] + batches[neighbour])
+                del batches[index]
+                index = 0
+                continue
+            index += 1
+        if len(batches) < 2:
+            return [None]
+
+        shared = answer.get("shared") or {}
+        result = []
+        for batch in batches:
+            per_axis = {axis: set(shared.get(axis) or []) for axis in axes}
+            for group in batch:
+                for axis, found in (group.get("entries") or {}).items():
+                    per_axis.setdefault(axis, set()).update(found)
+            result.append((PAIRED_BATCH, {axis: sorted(found) for axis, found in per_axis.items()},
+                           sum(len(group.get("keys") or [group.get("key")]) for group in batch)))
+        logger.info("'%s': %d paired patients sent as %d batches (<= %s MB, <= %s patients each)",
+                    self.TOOL_NAME, len(groups), len(result), plan.get("max_mb"), plan.get("max_files"))
+        return result
 
     def _runLabel(self, files: dict, index=None, total=None) -> str:
         """Name a run after what it was given, so several lines of progress read.
@@ -2008,7 +2388,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # exactly what must not be introduced: BackgroundJob's queue plus
             # its main-thread timer is the one place Qt is touched from.
             # _onJobProgress tells the two apart by type.
-            return self.client.run(
+            result = self.client.run(
                 self.TOOL_NAME,
                 args=run.args,
                 files=run.files,
@@ -2020,6 +2400,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 batch=({"id": run.cohort.batch_id, "index": run.cohort_index,
                         "total": run.cohort.total} if run.cohort else None),
             )
+            return self._unpackedOnWorker(run, result, progress_cb)
 
         run.phase = _("Sending request...")
         run.started_at = time.monotonic()
@@ -2063,11 +2444,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         unplugged or gone.
         """
         server_ids = [run.run_id for run in runs if run.started_at is not None]
+        reviews = [run.review_folder for run in runs
+                   if run.paused is not None and getattr(run, "review_folder", None)]
         for run in runs:
             run.cancel()
             if run in self._runs:
                 self._runs.remove(run)
         self._requestServerCancel(server_ids)
+        for folder in reviews:
+            self._closeReviewer(folder)
         if not self._runs:
             self._stopElapsedTimer()
         # Admission frees up as these leave, exactly as when one finishes: a
@@ -2105,6 +2490,37 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         threading.Thread(target=cancel_all, name="sadt-run-cancel", daemon=True).start()
 
+    def _unpackedOnWorker(self, run, result, progress_cb):
+        """Do what a delivery costs on disk HERE, on the job's worker thread,
+        and hand the result to `on_success` with it done.
+
+        Unpacking the answer -- a checkpoint for review, a "save_as" archive
+        -- and digesting what a reader is about to correct used to run in
+        `on_success`, which is the Qt main thread: 1.45 s of a frozen Slicer
+        for a 500 MB checkpoint, a cohort's worth for every batch. Nothing
+        here touches the scene or a widget, which is the one thing a worker
+        may not do (see worker.py).
+
+        Best effort: a failure is left for the main thread to meet again in
+        `_unpackCheckpoint` / `_handleSaveAsResult`, which already turn a bad
+        archive into what the panel says about one.
+        """
+        checkpoint = getattr(result, "checkpoint", None)
+        try:
+            if checkpoint is not None:
+                if checkpoint.path and run.output_dir:
+                    checkpoint.unpacked = self._unpackCheckpointFiles(run, checkpoint)
+            elif (self.resultKind == "save_as" and getattr(result, "path", None)
+                    and slicer_io.is_extractable_archive(result.path)):
+                progress_cb(_("Extracting results..."))
+                result.extracted = slicer_io.unzip_folder(
+                    result.path, os.path.dirname(result.path))
+                os.remove(result.path)
+        except Exception as exc:  # noqa: BLE001 - the main thread reports it
+            logger.warning("Could not unpack the answer of run %d on its worker: %s",
+                           run.number, exc)
+        return result
+
     def _onJobSuccess(self, run, result) -> None:
         if getattr(result, "checkpoint", None) is not None:
             # The run has not finished: it stopped where it was asked to and
@@ -2114,6 +2530,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             run.job = None
             self._reviewCheckpoint(run, result.checkpoint)
             return
+        self._narrateEnd(run, _("Finished"), console.OUTPUT)
         self._finishRun(run)
         self._countBatch(run)
         # Which run `handleResult` is handling. It takes only the result -- the
@@ -2139,6 +2556,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # the next Apply somewhere the current cohort is still writing.
         if not run.cohort:
             self._suggestOutputFolder()
+        self._showOutcome(run, _("Finished"))
+
+    def _showOutcome(self, run, outcome: str, finished: bool = True) -> None:
+        """Leave how the run ended on the panel, once nothing else is running.
+
+        Hiding the progress line at the end left whatever it said last --
+        "Extracting results... 2:30 elapsed" -- whenever a late message put it
+        back, and said nothing either way about whether the run had finished.
+        """
+        if self._runs:
+            return
+        if run.started_at is not None:
+            elapsed = int(time.monotonic() - run.started_at)
+            template = (_("{outcome} in {minutes}:{seconds:02d}") if finished
+                        else _("{outcome} after {minutes}:{seconds:02d}"))
+            outcome = template.format(
+                outcome=outcome, minutes=elapsed // 60, seconds=elapsed % 60)
+        self._showPhase(outcome)
 
     def _finishCohort(self, run) -> None:
         """Put a divided cohort back in one folder, once its last batch has
@@ -2260,6 +2695,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""
+        if isinstance(exc, RunCancelled):
+            self._narrateEnd(run, _("Cancelled"), console.STEP)
+        else:
+            self._narrateEnd(run, _("Failed: {reason}").format(
+                reason=plain_text(str(exc))), console.ERROR)
         self._finishRun(run)
         self._countBatch(run, succeeded=False)
         # A cohort whose last batch failed still has the earlier ones to put
@@ -2276,7 +2716,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.info("Run %d of '%s' was cancelled", run.number, self.TOOL_NAME)
             slicer.util.showStatusMessage(
                 _("Run {number} cancelled.").format(number=run.number), 3000)
+            self._showOutcome(run, _("Cancelled"), finished=False)
             return
+        self._showOutcome(run, _("Failed"), finished=False)
         slicer.util.errorDisplay(plain_text(str(exc)))
 
     # ------------------------------------------------------------------
@@ -2300,15 +2742,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         run.clear_server_progress()
         run.phase = _("Stopped after {step} — waiting for your review").format(
             step=checkpoint.stopped_after or _("a checkpoint"))
+        self._narrateStep(run)
         self._syncRunControls()
 
         folder = self._unpackCheckpoint(run, checkpoint)
+        run.review_folder = folder
         opened = folder is not None and self._openReviewer(
             folder, lambda reviewed, run=run: self._onReviewed(run, reviewed),
             rewind=self._previousCorrectableStep(run),
             origin={"tool": self.TOOL_NAME,
                     "step": checkpoint.stopped_after or "",
-                    "run": run.number})
+                    "run": run.number},
+            inputs=run.inputs,
+            focus=self._focusFolder(folder, checkpoint) if folder else None)
         if opened:
             return
         # Nothing to look at, or nowhere to look at it. The run is PAUSED on
@@ -2368,7 +2814,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return None
 
     def _openReviewer(self, folder: str, on_continue, rewind=None,
-                      origin=None) -> bool:
+                      origin=None, inputs=(), focus=None) -> bool:
         """Hand `folder` to the review module. False when it could not be.
 
         `rewind` is where flagged patients may be sent BACK to, or None. The
@@ -2378,15 +2824,78 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         `origin` says which run is waiting, so the reviewer can tell a reader
         who pressed Apply in a tool panel and found themselves somewhere else
         where they are.
+
+        `inputs` are the run's own files, which the reviewer uses only to put
+        landmarks that came back alone on the scan they were placed on.
+
+        `focus` is the folder of the step that stopped, which the reviewer
+        shows first (see `_focusFolder`).
         """
         try:
             module = importlib.import_module(self.REVIEW_MODULE)
             return bool(module.open_for_review(folder, on_continue, rewind=rewind,
-                                               origin=origin))
+                                               origin=origin, inputs=tuple(inputs or ()),
+                                               focus=focus))
         except Exception as exc:  # noqa: BLE001 - reported, never raised
             logger.warning("Could not open '%s' on %s: %s",
                            self.REVIEW_MODULE, folder, exc)
             return False
+
+    def _closeReviewer(self, folder: str) -> bool:
+        """End the review of `folder` in the review module, when it has one.
+
+        A run withdrawn while it waited left the reviewer saying it was
+        paused, with a Continue that would resume nothing.
+        """
+        try:
+            module = importlib.import_module(self.REVIEW_MODULE)
+            end = getattr(module, "end_review", None)
+            return bool(end(folder)) if end is not None else False
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            logger.warning("Could not end the review of %s in '%s': %s",
+                           folder, self.REVIEW_MODULE, exc)
+            return False
+
+    def _focusFolder(self, folder: str, checkpoint):
+        """Where the step this run stopped after wrote its files, or None.
+
+        The last of `produced` is the step that just ran. A stop INSIDE a
+        callee (`ASO/ALI_CBCT`) is one level further: the callee's own
+        `intermediate/<NN>_ALI_CBCT/` under the outer step's folder.
+        """
+        produced = list(getattr(checkpoint, "produced", None) or ())
+        if not produced:
+            return None
+        path = self._checkpointSlots(folder, produced).get(produced[-1])
+        if not path:
+            return None
+        stop = getattr(checkpoint, "stopped_after", "") or ""
+        if "/" in stop:
+            inner = stop.rsplit("/", 1)[-1]
+            nested = os.path.join(path, _STEPS_DIRNAME)
+            if os.path.isdir(nested):
+                for name in sorted(os.listdir(nested)):
+                    if name.partition("_")[2] == inner:
+                        return os.path.join(nested, name)
+        return path
+
+    def _reviewInputs(self, files: dict) -> tuple:
+        """Where this run's inputs are on this machine, for a reviewer.
+
+        The folder or file the reader picked, not the archive built from it:
+        unpacking a cohort a second time to show one patient's scan is gigabytes
+        for nothing. A scene node has no file of its own, so its export -- in
+        `files`, alive as long as the run -- stands for it.
+        """
+        found = []
+        widgets = getattr(self, "_inputWidgets", None) or {}
+        for arg_name, path in (files or {}).items():
+            widget = widgets.get(arg_name)
+            chosen = getattr(widget, "currentPath", "") or ""
+            location = chosen if chosen and os.path.exists(chosen) else path
+            if location and os.path.exists(location) and location not in found:
+                found.append(location)
+        return tuple(found)
 
     @staticmethod
     def _checkpointFolderName(run, checkpoint) -> str:
@@ -2442,10 +2951,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         that step produced this time, and files the previous pass left would
         otherwise read as part of it.
 
-        The digest of everything unpacked is taken here, before the reader can
-        touch any of it, and that timing is the whole mechanism: it is the only
-        moment at which the folder is known to hold exactly what the server
-        produced.
+        The digest of everything unpacked is taken as it is unpacked, before
+        the reader can touch any of it, and that timing is the whole mechanism:
+        it is the only moment at which the folder is known to hold exactly what
+        the server produced.
         """
         # Cleared first, so a checkpoint that fails to unpack cannot leave the
         # PREVIOUS one's baseline in place -- against which every file of a
@@ -2453,19 +2962,32 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         run.checkpoint_digests = {}
         if not checkpoint.path or not run.output_dir:
             return None
+        # Done already on the job's worker thread, in the normal case (see
+        # `_unpackedOnWorker`); here only for a checkpoint that did not go
+        # through one, or that the worker failed to unpack.
+        unpacked = getattr(checkpoint, "unpacked", None)
+        if unpacked is None:
+            try:
+                unpacked = self._unpackCheckpointFiles(run, checkpoint)
+            except Exception as exc:  # noqa: BLE001 - a bad archive is not a crash
+                logger.warning("Could not unpack the checkpoint of run %d: %s",
+                               run.number, exc)
+                return None
+        folder, run.checkpoint_digests = unpacked
+        return folder
+
+    def _unpackCheckpointFiles(self, run, checkpoint) -> tuple:
+        """`(folder, digests)`: the checkpoint unpacked where its review goes,
+        and the digest of every file in it. Disk work only -- no widget, no
+        scene, nothing of `run` changed -- so the job's worker thread runs it.
+        Raises on an archive that cannot be unpacked."""
         folder = os.path.join(run.output_dir, _CHECKPOINT_DIRNAME,
                               self._checkpointFolderName(run, checkpoint))
-        try:
-            shutil.rmtree(folder, ignore_errors=True)
-            os.makedirs(folder, exist_ok=True)
-            slicer_io.unzip_folder(checkpoint.path, folder)
-            os.remove(checkpoint.path)
-        except Exception as exc:  # noqa: BLE001 - a bad archive is not a crash
-            logger.warning("Could not unpack the checkpoint of run %d: %s",
-                           run.number, exc)
-            return None
-        run.checkpoint_digests = digest.digest_tree(folder)
-        return folder
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder, exist_ok=True)
+        slicer_io.unzip_folder(checkpoint.path, folder)
+        os.remove(checkpoint.path)
+        return folder, digest.digest_tree(folder)
 
     @staticmethod
     def _checkpointSlots(folder: str, produced) -> dict:
@@ -2477,11 +2999,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         `01_X/` and `02_Y/`. Answered here rather than anywhere the difference
         could be read as a step that went missing.
         """
-        slots = {name: os.path.join(folder, name) for name in produced
-                 if os.path.isdir(os.path.join(folder, name))}
-        if not slots and len(produced) == 1 and os.path.isdir(folder):
+        # The steps sit under `intermediate/` in what the server sends today
+        # (`intermediate/01_ASO/`, `intermediate/02_Crown_Seg/`), and at the
+        # top in what it sent before. Looked for in both: found in neither,
+        # every correction a reader made was silently dropped, and the run
+        # carried on with the landmark they had just moved.
+        for root in (os.path.join(folder, _STEPS_DIRNAME), folder):
+            slots = {name: os.path.join(root, name) for name in produced
+                     if os.path.isdir(os.path.join(root, name))}
+            if slots:
+                return slots
+        if len(produced) == 1 and os.path.isdir(folder):
             return {produced[0]: folder}
-        return slots
+        return {}
 
     def _onReviewed(self, run, reviewed) -> None:
         """The reader pressed Continue, or asked to go back a step.
@@ -2577,14 +3107,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                      if rewind_to else _("Carrying the run on..."))
 
         def task(progress_cb):
-            return self.client.resume_run(
+            result = self.client.resume_run(
                 self.TOOL_NAME,
                 checkpoint.run_id,
                 corrections=corrections,
                 output_dir=run.output_dir,
                 progress_cb=progress_cb,
                 rewind_to=rewind_to,
+                # The same callback a first attempt gets, so the steps after
+                # the review are narrated like the ones before it.
+                event_cb=progress_cb,
+                cancel_event=run.cancel_event,
             )
+            return self._unpackedOnWorker(run, result, progress_cb)
 
         run.job = BackgroundJob(
             task,
@@ -2627,6 +3162,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # response" comes after "packaging" -- so the older half is dropped
         # rather than left on the panel beside the newer one.
         run.clear_server_progress()
+        self._narrateStep(run)
         self._renderProgress()
 
     def _onRunEvent(self, run, event) -> None:
@@ -2647,6 +3183,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Only below the root: the tool the user asked for is already named by
         # the panel it is running in.
         run.nested_tool = run.call_tools.get(call) if run.depth and call else None
+        # Not for a call's open or close marker: it names the sub-tool and says
+        # nothing it is doing, and the sub-tool's first real step follows it.
+        if not event.get("edge"):
+            self._narrateStep(run)
         self._renderProgress()
 
     def _onRunLog(self, run, event) -> None:
@@ -2659,14 +3199,111 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         Prefixed with this panel's tool, since every panel prints to the same
         console.
         """
-        prefix = ""
-        if len(self._runs) > 1:
-            # Named the way the run's own progress line names it, so a reader
-            # can match the two: "Batch 2" inside a cohort, "Run 7" otherwise.
-            prefix = (_("Batch {index}").format(index=run.cohort_index)
-                      if run.cohort_index else
-                      _("Run {number}").format(number=run.number))
-        print("[{}] {}".format(self.TOOL_NAME, format_run_log_line(event, prefix)))
+        line = "[{}] {}".format(self.consoleName(run),
+                                format_run_log_line(event, self._runPrefix(run)))
+        level = event.get("level")
+        color = {"warning": console.WARNING, "error": console.ERROR,
+                 "metric": console.METRIC}.get(level, console.OUTPUT)
+        self._consoleBreak("metric" if level == "metric" else "line",
+                           section=event.get("source"))
+        # `print` as the fallback only: what it writes is also copied into
+        # Slicer's log file, which is exactly where this line must not go.
+        if not console.show(line, color):
+            print(line)
+
+    def _consoleBreak(self, kind: str, section=None) -> None:
+        """A blank line where the console's story changes paragraph.
+
+        Before a run's first line and its last, and around a block of metrics,
+        so a run reads as steps, then its numbers, then its outcome, instead of
+        one undifferentiated column. `kind` is what is about to be written:
+        "start", "line", "metric" or "end". `section` is the sub-tool a line
+        comes from, None for the tool itself: entering or leaving a sub-call
+        starts a paragraph too.
+        """
+        previous = self.__dict__.get("_lastConsoleKind")
+        if previous is not None and (
+                kind in ("start", "end")
+                or (kind == "metric") != (previous == "metric")
+                or section != self.__dict__.get("_lastConsoleSection")):
+            console.show("", console.OUTPUT)
+        self._lastConsoleKind = "line" if kind in ("start", "end") else kind
+        self._lastConsoleSection = section
+
+    def consoleName(self, run) -> str:
+        """The name a run's console lines carry: the tool, by default.
+
+        A module whose one tool routes to several on the server -- AREG sends
+        an "IOS to CBCT" run to AREG_IOSCBCT -- overrides this with the one
+        actually running, which is the name a reader of the console needs.
+        """
+        return self.TOOL_NAME
+
+    def _runPrefix(self, run) -> str:
+        """"Batch 2" or "Run 7" when several runs share the console, else "".
+
+        Named the way the run's own progress line names it, so a reader can
+        match the two.
+        """
+        if len(self._runs) <= 1:
+            return ""
+        return (_("Batch {index}").format(index=run.cohort_index)
+                if run.cohort_index else
+                _("Run {number}").format(number=run.number))
+
+    def _narrate(self, run, text: str, color: str) -> None:
+        """One line of the run's story in the console: `[TOOL] HH:MM:SS  text`.
+
+        Through `console.show` and never `print` or `logging`: a step can name
+        what the tool is working on, and the console is read by the person who
+        started the run, on their own workstation, while Slicer's log file is
+        sent around when something goes wrong.
+        """
+        parts = ["[{}]".format(self.consoleName(run))]
+        prefix = self._runPrefix(run)
+        if prefix:
+            parts.append(prefix + ":")
+        parts.append(time.strftime("%H:%M:%S"))
+        parts.append(text)
+        console.show("  ".join(parts), color)
+
+    def _consoleStepText(self, run) -> str:
+        """The step for the console: what is happening, and in which sub-tool.
+
+        Plainer than the panel's line: no phase word when the tool said what it
+        is doing, no dash, no arrows. A sub-call is named instead, and set off
+        by a blank line (see `_consoleBreak`), which is what makes a chain read.
+        """
+        if not run.server_phase:
+            return (run.phase or "").replace(" — ", ": ")
+        text = run.server_message or self._phaseLabel(run.server_phase)
+        if run.depth and run.nested_tool:
+            text = "{}: {}".format(run.nested_tool, text)
+        return text
+
+    def _narrateStep(self, run) -> None:
+        """Write the step the run is at, once, when it changes.
+
+        The same words as the panel's progress line, without the percentage: a
+        bar moving from 35 % to 36 % is not a new step, and neither is the next
+        scan of a cohort (see `step_key`).
+        """
+        text = self._consoleStepText(run)
+        key = step_key(text)
+        if not key or key == run.narrated_step:
+            return
+        self._consoleBreak("start" if run.narrated_step is None else "line",
+                           section=run.nested_tool if run.depth else None)
+        run.narrated_step = key
+        self._narrate(run, text, console.STEP)
+
+    def _narrateEnd(self, run, outcome: str, color: str) -> None:
+        """The run's last console line: what happened and how long it took."""
+        if run.started_at is not None:
+            outcome = "{} ({})".format(
+                outcome, format_duration(time.monotonic() - run.started_at))
+        self._consoleBreak("end")
+        self._narrate(run, outcome, color)
 
     def _finishRun(self, run) -> None:
         run.job = None
@@ -2681,7 +3318,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._checkCanApply()
 
     def _syncRunControls(self) -> None:
-        """Apply stays visible whatever is running: clicking it queues another."""
+        """Apply stays visible whatever is running, disabled while a run is in
+        flight (see `_checkCanApply`)."""
+        review = getattr(self, "reviewButton", None)
+        if review is not None:
+            review.setVisible(self._pausedRun() is not None)
         if self.cancelButton is not None:
             self.cancelButton.setVisible(bool(self._runs))
             if self._cohortInFlight() is not None:
@@ -2691,6 +3332,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     _("Cancel all") if len(self._runs) > 1 else _("Cancel"))
         if self.applyButton is not None:
             self.applyButton.setVisible(True)
+            # A run starting or ending changes whether Apply may be pressed.
+            # Only on a built panel: the form it reads is made by setup().
+            if hasattr(self, "_argWidgets"):
+                self._checkCanApply()
         self._rebuildRunCancelButtons()
         self._renderProgress()
 
@@ -3031,7 +3676,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return _("Run {number} ({label}): {line}").format(
             number=run.number, label=run.label, line=line)
 
-    def _runPhaseText(self, run) -> str:
+    def _runPhaseText(self, run, with_fraction: bool = True) -> str:
         """What this run is doing, in one phrase, from whichever side knows.
 
         The server's word wins while the server is the one working: it is the
@@ -3046,7 +3691,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         parts = [self._phaseLabel(run.server_phase)]
         if run.server_message:
             parts.append(run.server_message)
-        if run.fraction is not None:
+        if with_fraction and run.fraction is not None:
             parts.append("{:.0%}".format(run.fraction))
         text = " — ".join(part for part in parts if part)
         if run.depth:
@@ -3232,20 +3877,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _ownerIsAlive(cls, path: str) -> bool:
         """Is the Slicer that created this directory still running?
 
-        `os.kill(pid, 0)` asks the kernel and changes nothing. An unreadable or
-        nonsensical mark counts as dead: the worst case is deleting a cohort
-        someone would have re-downloaded, against a disk that fills up for good.
+        An unreadable or nonsensical mark counts as dead: the worst case is
+        deleting a cohort someone would have re-downloaded, against a disk that
+        fills up for good.
         """
         try:
             with open(os.path.join(path, cls.OWNER_FILE)) as handle:
                 pid = int(handle.read().strip())
         except (OSError, ValueError):
             return False
-        try:
-            os.kill(pid, 0)
-        except (OSError, ProcessLookupError):
-            return False
-        return True
+        return _process_is_running(pid)
 
     def _removeOwnTestFiles(self) -> None:
         """Drop this session's downloaded test files when the panel goes away.

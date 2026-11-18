@@ -176,7 +176,7 @@ class VISU(ScriptedLoadableModule):
         only one of them is right. The panel names the scan it used and whether it found it
         beside the points or had to assume.
         """)
-        self.parent.acknowledgementText = ""
+        self.parent.acknowledgementText = _("This module was supported by NIDCR R01 024450.")
 
 
 class SceneLoader:
@@ -384,6 +384,19 @@ class SceneLoader:
             logger.warning("Could not set the views up: %s", exc)
 
     @staticmethod
+    def show_in_3d(segmentation) -> None:
+        """Give a segmentation its surface, which is what the 3D view draws.
+
+        Opened from a labelmap it holds voxels only, and Slicer builds the
+        closed surface on demand -- so without asking, the mask was in the
+        slices and the 3D view stayed empty.
+        """
+        try:
+            segmentation.CreateClosedSurfaceRepresentation()
+        except Exception as exc:  # noqa: BLE001 - the slices still show it
+            logger.warning("Could not build the 3D surface of %s: %s", segmentation.GetName(), exc)
+
+    @staticmethod
     def _set_layers(background, label, fit: bool) -> None:
         """Put the scan in the slice views, through the SCENE.
 
@@ -488,7 +501,8 @@ def hosted_choices(found) -> tuple:
     return sorted(entries, key=lambda entry: entry["name"]), offered
 
 
-def open_for_review(folder: str, on_continue, rewind=None, origin=None) -> bool:
+def open_for_review(folder: str, on_continue, rewind=None, origin=None, inputs=(),
+                    focus=None) -> bool:
     """Bring this module up on `folder`, with a Continue that calls back.
 
     Here rather than in the caller, and it is the only reason this function
@@ -508,8 +522,24 @@ def open_for_review(folder: str, on_continue, rewind=None, origin=None) -> bool:
     except Exception as exc:  # noqa: BLE001 - reported to the caller, not raised
         logger.warning("Could not open VISU on %s: %s", folder, exc)
         return False
-    widget.openForReview(folder, on_continue, rewind=rewind, origin=origin)
+    widget.openForReview(folder, on_continue, rewind=rewind, origin=origin, inputs=inputs,
+                         focus=focus)
     return True
+
+
+def end_review(folder: str) -> bool:
+    """Take the pause banner down if VISU is still showing `folder`'s review.
+
+    For a run withdrawn while it waited: its Continue would resume nothing,
+    and the banner went on saying a run was paused after the run was gone.
+    False when the panel cannot be reached or shows another review.
+    """
+    try:
+        widget = slicer.modules.visu.widgetRepresentation().self()
+    except Exception as exc:  # noqa: BLE001 - a banner is never worth a failure
+        logger.warning("Could not reach VISU to end the review of %s: %s", folder, exc)
+        return False
+    return widget.endReview(folder)
 
 
 class VISUWidget(ScriptedLoadableModuleWidget):
@@ -608,9 +638,19 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # pressed Apply in ASO and landed here needs to be told that is where
         # they are: without it the panel is a folder browser that appeared,
         # and nothing says which run is waiting on them.
-        self.originLabel = design.hint_label("")
-        self.originLabel.setVisible(False)
-        self.panel.addWidget(self.originLabel)
+        #
+        # A banner rather than a hint line: a stopped run waiting on the reader
+        # is the one fact on this panel that must not be read past.
+        self.originBanner, self.originLabel, self.originDetail = design.review_banner()
+        self.originBanner.setVisible(False)
+        self.panel.addWidget(self.originBanner)
+        # What a stop shows by default is what its LAST step wrote. This brings
+        # back everything the earlier steps left too, for a reader who wants to
+        # compare.
+        self.earlierStepsCheck = qt.QCheckBox(_("Also show what the earlier steps produced"))
+        self.earlierStepsCheck.setVisible(False)
+        self.earlierStepsCheck.toggled.connect(lambda _on: self.onIndex())
+        self.panel.addWidget(self.earlierStepsCheck)
 
         self.folderBox = ctk.ctkCollapsibleButton()
         box = self.folderBox
@@ -885,7 +925,17 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         folder = self.folderInput.currentPath
         # Everything the folder holds. `self.cases` is the ticked view of it,
         # so unticking a cohort costs a filter rather than another walk.
-        self._allCases = index.build([(SOURCE, folder)] if folder else [])
+        supported, supports = getattr(self, "_supports", ("", ()))
+        supports = supports if folder and folder == supported else ()
+        focused, focus = getattr(self, "_focus", ("", None))
+        if not (folder and folder == focused) or self.earlierStepsCheck.isChecked():
+            focus = None
+        sources = [(SOURCE, folder)] if folder else []
+        self._allCases = index.build(sources, supports=supports, focus=focus)
+        if focus and not self._allCases:
+            # The step wrote nothing a viewer can show -- a report, a
+            # transform -- so the earlier steps are all there is to look at.
+            self._allCases = index.build(sources, supports=supports)
         self._offerFolders()
         self.cases = self._ticked()
         self.position = 0
@@ -1031,17 +1081,21 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # Hidden rather than disabled: a greyed control still reads as
         # something that could be used, and there is nothing to decide here.
         self.folderBox.setVisible(not opened_by_a_run)
-        self.originLabel.setVisible(opened_by_a_run)
+        self.originBanner.setVisible(opened_by_a_run)
         if not opened_by_a_run:
+            self.earlierStepsCheck.setVisible(False)
             return
         tool = self._origin.get("tool") or _("a tool")
         step = self._origin.get("step") or ""
         number = self._origin.get("run")
         where = "{} / {}".format(tool, step) if step else tool
         self.originLabel.text = (
-            _("Reviewing run {number} of {where}. It is waiting for you.")
-            .format(number=number, where=where) if number
-            else _("Reviewing {where}. It is waiting for you.").format(where=where))
+            _("Run {number} of {tool} is paused after {step}").format(
+                number=number, tool=tool, step=step or _("a checkpoint")) if number
+            else _("{where} is paused").format(where=where))
+        self.originDetail.text = _(
+            "It waits for you. Check what this step produced, correct it if it "
+            "needs it, then press Continue below.")
 
     def _goingBack(self) -> bool:
         """Whether the hand-back button would go BACKWARDS if pressed now.
@@ -1352,6 +1406,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.scene.clear()
         if not self.views:
             return
+        # What VISU did not load is hidden too: the input scan a panel had
+        # rendered, an earlier run's results. A pause after ASO showed the
+        # oriented CBCT on top of the original, two volumes in one place.
+        slicer_io.hide_scene()
         position = max(0, self.viewCombo.currentIndex)
         view = self.views[min(position, len(self.views) - 1)]
 
@@ -1370,10 +1428,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._anchorNode = anchor_node
         on_a_scan = anchor is not None and anchor.kind == index.VOLUME
         masks = [o for o in overlays if o.kind == index.LABELMAP]
-        # One mask can be the volume's label layer. Several cannot, so they
-        # all become segmentations rather than one being shown and the rest
-        # loaded invisibly -- which reads as a viewer that lost them.
-        stack = on_a_scan and len(masks) > 1
+        # Masks on a scan become segmentations, one as much as several: a
+        # label layer is drawn in the slices only, and at an AMASSS stop the
+        # reader judged a segmentation with an empty 3D view. Several could
+        # never be label layers anyway, a volume having one.
+        stack = on_a_scan and bool(masks)
 
         label_node = None
         points = []
@@ -1382,10 +1441,12 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         for artifact in self.cases[self.position].of_kind(index.TRANSFORM):
             self.scene.load(artifact)
         for overlay in overlays:
-            node = self.scene.load(overlay, opened_as=SEGMENTATION if
-                                   (stack and overlay.kind == index.LABELMAP) else "")
+            as_segmentation = stack and overlay.kind == index.LABELMAP
+            node = self.scene.load(overlay, opened_as=SEGMENTATION if as_segmentation else "")
             if node is None:
                 continue
+            if as_segmentation:
+                SceneLoader.show_in_3d(node)
             if overlay.kind == index.LABELMAP and not stack and label_node is None:
                 label_node = node
             if overlay.kind == index.MODEL and on_a_scan:
@@ -1620,7 +1681,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
     # -- opened by somebody else ---------------------------------------------
 
     def openForReview(self, folder: str, on_continue=None, rewind=None,
-                      origin=None) -> None:
+                      origin=None, inputs=(), focus=None) -> None:
         """Show `folder`, and give the caller a way to be told when to carry on.
 
         This is the whole of what VISU learns about the thing that opened it.
@@ -1640,7 +1701,14 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         """
         self._continue = on_continue
         self._rewind = rewind
+        # The run's own files, for landmarks a step handed back without their
+        # scan. Tied to THIS folder: repointing the picker drops them.
+        self._supports = (folder, tuple(inputs or ()))
+        # What the step that stopped wrote, shown first (see `index.build`).
+        self._focus = (folder, focus or None)
         self._showOrigin(origin)
+        self.earlierStepsCheck.setVisible(bool(focus))
+        self.earlierStepsCheck.setChecked(False)
         self.continueButton.setVisible(on_continue is not None)
         self._syncHandBack()
         # Reviewing this folder starts now, whatever an earlier pass over it
@@ -1654,6 +1722,27 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             # under one output directory. Indexing again is what puts the
             # files the first resume produced on screen.
             self.onIndex()
+
+    def endReview(self, folder=None) -> bool:
+        """Leave review mode: no banner, no Continue, the folder picker back.
+
+        Called when the reader hands the review back and when the run is
+        withdrawn. Without it the banner kept saying which run was paused and
+        where after that run had resumed and finished. `folder` limits it to
+        that review, so withdrawing one run never ends another's.
+        """
+        reviewing = self._supports[0] if getattr(self, "_supports", None) else None
+        if folder is not None and folder != reviewing:
+            return False
+        self._continue = None
+        self._rewind = None
+        self._supports = (None, ())
+        self._focus = (None, None)
+        self._showOrigin(None)
+        self.earlierStepsCheck.setVisible(False)
+        self.continueButton.setVisible(False)
+        self._syncHandBack()
+        return True
 
     def reviewed(self, rewind_to=None) -> dict:
         """What this pass produced, for whoever asked for it.
@@ -1700,8 +1789,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # Read BEFORE the button is hidden and while the flags are still
         # standing: this is the one place the two destinations part company.
         backwards = self._rewind.get("slot") if self._goingBack() else None
-        self.continueButton.setVisible(False)
-        handler(self.reviewed(rewind_to=backwards))
+        reviewed = self.reviewed(rewind_to=backwards)
+        # Before the handler: a run that stops again reopens the review from
+        # inside it, and that new review must not be ended behind it.
+        self.endReview()
+        handler(reviewed)
 
     # -- leaving -----------------------------------------------------------
 

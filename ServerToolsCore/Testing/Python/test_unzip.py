@@ -72,7 +72,12 @@ class UnzipFolderTest(unittest.TestCase):
         outside = os.path.join(self.work, "outside")
         os.makedirs(outside)
         os.makedirs(self.dest)
-        os.symlink(outside, os.path.join(self.dest, "sub"))
+        try:
+            os.symlink(outside, os.path.join(self.dest, "sub"))
+        except OSError as exc:
+            # Windows without Developer Mode or the symlink privilege: the
+            # fixture cannot be built, which says nothing about the unzip.
+            self.skipTest(f"cannot create a symlink here: {exc}")
         self._zip([("sub/escaped.txt", b"x")])
         with self.assertRaises(ServerToolError):
             slicer_io.unzip_folder(self.archive, self.dest)

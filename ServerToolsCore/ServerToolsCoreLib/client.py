@@ -23,7 +23,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -131,7 +131,9 @@ _RUN_LOGS_QUERY = {"logs": "user"}
 # The contract's four levels. Anything else a server or a tool sends reads as
 # "info": a level is only ever used to pick a colour, so an unknown one must
 # degrade to the plain line rather than to no line at all.
-RUN_LOG_LEVELS = ("debug", "info", "warning", "error")
+# "metric" is a number the user may want and can skip -- a residual, a volume --
+# printed in its own colour; an older server never sends it.
+RUN_LOG_LEVELS = ("debug", "info", "warning", "error", "metric")
 
 # A tool name as the server publishes one (`source` on a log line, `tool` on a
 # nested call's marker). Held to an identifier on this side too, because it is
@@ -705,6 +707,9 @@ class RunCheckpoint:
     stopped_after: str
     produced: tuple = ()
     path: Optional[str] = None
+    # `(folder, digests)` once a panel's worker thread has unpacked `path` for
+    # review (base_widget._unpackedOnWorker), so the main thread does not.
+    unpacked: Optional[tuple] = None
 
 
 @dataclass
@@ -718,6 +723,10 @@ class ToolResult:
     # on `resume_run`. A caller that has never heard of this reads None and
     # behaves exactly as it always did.
     checkpoint: Optional[RunCheckpoint] = None
+    # Every file written, once a panel's worker thread has unpacked the
+    # archive at `path` -- which is then gone -- into the folder holding it
+    # (base_widget._unpackedOnWorker). None: nothing was unpacked yet.
+    extracted: Optional[list] = None
 
 
 def checked_server_url(server_url: str) -> str:
@@ -736,6 +745,13 @@ def checked_server_url(server_url: str) -> str:
     into a message.
     """
     return tls.require_https(server_url)
+
+
+def _never_resolves(server_url: str) -> bool:
+    """True for a host under `.invalid`, which RFC 6761 reserves so that it
+    never resolves: the placeholder a client has until a server is set."""
+    host = (urlsplit(server_url).hostname or "").rstrip(".").lower()
+    return host == "invalid" or host.endswith(".invalid")
 
 
 class ToolServerClient:
@@ -807,6 +823,13 @@ class ToolServerClient:
     # ------------------------------------------------------------------
 
     def health(self) -> bool:
+        # The placeholder URL (config.SERVER_URL) names a host that can never
+        # resolve, so asking is pointless -- and harmful: the check runs on a
+        # daemon thread, and one still waiting on the resolver when Slicer
+        # quits logs its failure into Slicer's log handler while the
+        # application is being destroyed, which crashes Slicer on exit.
+        if _never_resolves(self._server_url):
+            return False
         try:
             response = self._session.get(
                 f"{self._server_url}/health", timeout=_HEALTH_CHECK_TIMEOUT, verify=tls.ca_bundle()
@@ -815,6 +838,34 @@ class ToolServerClient:
         except (requests.RequestException, ValueError) as exc:
             logger.debug("Health check failed: %s", exc)
             return False
+
+    def pairs(self, tool_name: str, inputs: dict, arguments: Optional[dict] = None) -> dict:
+        """Ask the server which of these file NAMES go together, for splitting a
+        cohort whose inputs are paired (`paired_batch` in GET /tools).
+
+        `inputs` is `{argument: [relative file path, ...]}`. Names only: nothing
+        is uploaded. The answer is the tool's own pairing --
+        `{"groups": [{"key", "entries": {argument: [entry]}}], "shared":
+        {argument: [entry]}, "unpaired": {argument: [key]}}` -- so this client
+        never re-implements how a tool pairs its files.
+        """
+        try:
+            response = self._session.post(
+                f"{self._server_url}/tools/{tool_name}/pairs",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"inputs": inputs, "arguments": arguments or {}},
+                timeout=self._timeout, verify=self._verify_tls,
+            )
+        except requests.RequestException as exc:
+            raise ServerToolError(f"Could not ask the server how to pair the inputs: {exc}")
+        if not response.ok:
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = None
+            raise ServerToolError(detail or f"The server answered {response.status_code} "
+                                            f"when asked how to pair the inputs.")
+        return response.json()
 
     def batch_policy(self) -> Optional[dict]:
         """How the server will run this workstation's cohort batches, or None.
@@ -1145,7 +1196,10 @@ class ToolServerClient:
         self._raise_if_cancelled(cancel_event, tool_name)
 
         if progress_cb:
-            progress_cb(f"Sending '{tool_name}' request...")
+            # Not the tool's name: a module's tool can be a router (AREG sends
+            # an "IOS to CBCT" run to AREG_IOSCBCT), and naming the router read
+            # as a step of its own. What is happening is the request leaving.
+            progress_cb("Sending the request to the server...")
 
         post_headers = {**headers, **_RESULT_DELIVERY_HEADER}
         if detached:
@@ -1293,7 +1347,7 @@ class ToolServerClient:
             response.close()
         raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
 
-    def _start_watcher(self, run_id, event_cb, watch_stop, cancel_event):
+    def _start_watcher(self, run_id, event_cb, watch_stop, cancel_event, after_seq=-1):
         """The second connection, on its own daemon thread, or None.
 
         None whenever there is nothing to watch (no id) or nobody to tell (no
@@ -1307,7 +1361,7 @@ class ToolServerClient:
 
         def watch():
             try:
-                self.watch_run(run_id, event_cb, stop_event=stop)
+                self.watch_run(run_id, event_cb, stop_event=stop, after_seq=after_seq)
             except Exception:
                 # Never propagates, and never fails a run. This thread exists
                 # to make a wait legible; a run that completed must not be
@@ -1320,7 +1374,8 @@ class ToolServerClient:
         thread.start()
         return thread
 
-    def watch_run(self, run_id: str, on_event: Callable[[dict], None], stop_event=None) -> bool:
+    def watch_run(self, run_id: str, on_event: Callable[[dict], None], stop_event=None,
+                  after_seq: int = -1) -> bool:
         """Stream a run's progress events, calling `on_event` for each.
 
         Blocks until the run reaches a terminal state, until `stop_event` is
@@ -1345,6 +1400,11 @@ class ToolServerClient:
           ("a watcher that attaches late is never behind"), so `seq` is what
           keeps a reconnect from re-announcing an hour of progress.
 
+        `after_seq` skips what an earlier watcher of the same run already
+        delivered: a run carried on after a review keeps its id and its event
+        file, and replaying it from the start would announce everything before
+        the stop a second time.
+
         Nothing here is ever fatal to a run. It raises only what the caller
         chooses to let escape; `_start_watcher` lets nothing.
         """
@@ -1357,8 +1417,10 @@ class ToolServerClient:
             "Accept-Encoding": "identity",
         }
         started = time.monotonic()
-        delivered_seq = -1
+        delivered_seq = after_seq
         delivered_any = False
+        # Where this run's stream has got to, for the watcher of its resume.
+        seen = self.__dict__.setdefault("_delivered_seq", {})
 
         def stopped() -> bool:
             return stop_event is not None and stop_event.is_set()
@@ -1437,6 +1499,7 @@ class ToolServerClient:
                         if event is None or event["seq"] <= delivered_seq:
                             continue
                         delivered_seq = event["seq"]
+                        seen[run_id] = delivered_seq
                         delivered_any = True
                         on_event(event)
                         # A log line never ends the watch, whatever state a
@@ -1497,8 +1560,16 @@ class ToolServerClient:
         output_dir: Optional[str] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
         rewind_to: Optional[str] = None,
+        event_cb: Optional[Callable[[dict], None]] = None,
+        cancel_event=None,
     ) -> ToolResult:
         """Carry a stopped run on: POST /runs/{id}/resume.
+
+        `event_cb` and `cancel_event` are `run`'s: the steps after a review
+        report their progress and their log lines exactly as the ones before
+        it did. Without a watcher here the panel went silent at the first stop,
+        and whatever the tool said after it -- a registration's residuals,
+        computed last -- never reached the person who started the run.
 
         `rewind_to` sends it BACKWARDS instead: the run is armed again at a
         checkpoint it already cleared and stops there, with that step's
@@ -1530,6 +1601,22 @@ class ToolServerClient:
             progress_cb(
                 f"Taking '{tool_name}' back to {rewind_to}..." if rewind_to
                 else f"Sending your corrections to '{tool_name}'...")
+
+        watch_stop = threading.Event()
+        watcher = self._start_watcher(
+            run_id, event_cb, watch_stop, cancel_event,
+            after_seq=self.__dict__.get("_delivered_seq", {}).get(run_id, -1))
+        try:
+            return self._resume_request(tool_name, run_id, url, headers, schema,
+                                        corrections, output_dir, progress_cb, rewind_to)
+        finally:
+            watch_stop.set()
+            if watcher is not None:
+                watcher.join(timeout=0.5)
+
+    def _resume_request(self, tool_name, run_id, url, headers, schema, corrections,
+                        output_dir, progress_cb, rewind_to) -> ToolResult:
+        """The resume POST itself and its answer; see `resume_run`."""
 
         # Straight multipart, with no /uploads staging: the server reads this
         # body as a form and has no reference field for it. A correction is a

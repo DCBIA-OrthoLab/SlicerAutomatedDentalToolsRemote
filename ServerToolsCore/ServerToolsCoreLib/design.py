@@ -723,6 +723,46 @@ def section_title(text: str, explained: bool = False) -> qt.QLabel:
     return label
 
 
+# The widest a form row's label may grow before it wraps. A QFormLayout's
+# label column is as wide as its longest label, so one long label ("Standardise
+# the CBCT orientation (Frankfurt)") pushed every field of its section to the
+# side, file pickers included. Wrapped, it costs a second line instead.
+ROW_LABEL_MAX_WIDTH = 350
+
+
+def fit_row_label(label: qt.QLabel) -> qt.QLabel:
+    """Let a row's label wrap past ROW_LABEL_MAX_WIDTH instead of widening
+    the column. Returns the label, so a call site can wrap it inline.
+
+    Only a label longer than the cap is made to wrap. A wrapping QLabel is
+    laid out at whatever width it is given, and a form gives a label its own
+    minimum rather than the column's width; setting that minimum from a
+    measurement put "Mode *" on two lines the moment the measurement fell a
+    pixel short. A label that fits is left alone, and Qt sizes it from the
+    font it actually draws with.
+    """
+    if _one_line_width(label) > ROW_LABEL_MAX_WIDTH:
+        label.setWordWrap(True)
+        label.setMinimumWidth(ROW_LABEL_MAX_WIDTH)
+        label.setMaximumWidth(ROW_LABEL_MAX_WIDTH)
+    return label
+
+
+def _one_line_width(label: qt.QLabel) -> int:
+    """The label's text on one line, at the weight `section_title` draws it
+    in. Measured on a demi-bold copy of the font, because the stylesheet's
+    weight is not on `label.font` until the label is shown.
+
+    0 when the binding cannot measure: a label left on one line is the
+    panel as it was, never a broken one."""
+    try:
+        font = qt.QFont(label.font)
+        font.setWeight(qt.QFont.DemiBold)
+        return qt.QFontMetrics(font).horizontalAdvance(label.text)
+    except (AttributeError, TypeError):
+        return 0
+
+
 def required_label(text: str, explained: bool = False) -> qt.QLabel:
     return section_title(f"{text} *", explained)
 
@@ -797,6 +837,36 @@ def table_frame():
     return frame
 
 
+def review_banner():
+    """The band at the top of a viewer a paused run opened: `(frame, title, detail)`.
+
+    A tinted block with the primary colour down its edge, because it states
+    the one thing a reader must not miss -- a run is stopped and waits on
+    them -- and a muted hint line saying it was read past. The title names the
+    tool and the step; the detail says what to do.
+    """
+    t = tokens()
+    frame = qt.QFrame()
+    frame.setObjectName("reviewBanner")
+    frame.setStyleSheet(
+        f"#reviewBanner {{ background-color: {t['ACCENT_SOFT']};"
+        f" border-left: 4px solid {t['PRIMARY']}; border-radius: {RADIUS_LG}px;"
+        f" padding: {SPACING_SM}px; }}"
+    )
+    column = qt.QVBoxLayout(frame)
+    column.setContentsMargins(SPACING_SM, SPACING_SM, SPACING_SM, SPACING_SM)
+    column.setSpacing(SPACING_XS)
+    title = _plain_label("")
+    title.setWordWrap(True)
+    title.setStyleSheet(f"color: {t['TEXT']}; font-weight: 700;")
+    detail = _plain_label("")
+    detail.setWordWrap(True)
+    detail.setStyleSheet(f"color: {t['TEXT']};")
+    column.addWidget(title)
+    column.addWidget(detail)
+    return frame, title, detail
+
+
 def hint_label(text: str) -> qt.QLabel:
     """A wrapped, muted, smaller label for explanatory text a module writes
     itself -- VISU's origin line, Slicer Cloud's per-tool summary.
@@ -833,7 +903,6 @@ def value_field(text: str):
     this row (see `FileOrFolderInput`), and a box a clinician can type a path
     into which is then ignored is worse than no box.
     """
-    t = tokens()
     field = qt.QLineEdit(text)
     field.setReadOnly(True)
     # Shown from the START: a path is longest on its left and a file name is

@@ -235,7 +235,6 @@ except ImportError:
     sys.modules["requests"] = _requests
 
 import SlicerCloud  # noqa: E402
-from SlicerCloudLib.deploy import DeploymentError  # noqa: E402
 
 
 class SyncJob:

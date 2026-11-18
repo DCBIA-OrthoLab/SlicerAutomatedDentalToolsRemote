@@ -313,7 +313,10 @@ class _Reviewer:
         self.available = True
         self.on_continue = None
 
-    def open_for_review(self, folder, on_continue, rewind=None, origin=None):
+    def open_for_review(self, folder, on_continue, rewind=None, origin=None, inputs=(),
+                        focus=None):
+        self.inputs = tuple(inputs)
+        self.focus = focus
         self.rewind = rewind
         self.origin = dict(origin or {})
         self.opened.append(folder)
@@ -335,11 +338,12 @@ class _RecordingClient:
         raise AssertionError("the stub job never invokes its target")
 
     def resume_run(self, tool_name, run_id, corrections=None, output_dir=None,
-                   progress_cb=None, rewind_to=None):
+                   progress_cb=None, rewind_to=None, event_cb=None, cancel_event=None):
         self.resumed.append({"tool": tool_name, "run_id": run_id,
                              "corrections": dict(corrections or {}),
                              "output_dir": output_dir,
-                             "rewind_to": rewind_to})
+                             "rewind_to": rewind_to,
+                             "event_cb": event_cb, "cancel_event": cancel_event})
         return ToolResult(kind="text", text="carried on")
 
     def cancel_run(self, run_id):
@@ -514,6 +518,17 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(zipfile.is_zipfile(sent["corrections"]["01_ALI_CBCT"]))
         self.assertIsNone(run.paused, "the run is going again")
 
+    def test_the_steps_after_the_review_are_still_watched(self):
+        """A registration computes its residuals after the last stop. Resumed
+        without a watcher, the panel went quiet and they never reached the
+        console."""
+        run, _job = self._stopped()
+        self.reviewer.press_continue(flagged=set(), written=set())
+
+        sent = self._collectResume()
+        self.assertIsNotNone(sent["event_cb"], "progress and log lines keep arriving")
+        self.assertIs(sent["cancel_event"], run.cancel_event)
+
     def test_a_reader_who_changed_nothing_sends_nothing_back(self):
         """A step is a cohort's worth of scans. Re-uploading every one of them
         on behalf of somebody who only looked is the expensive half."""
@@ -672,6 +687,22 @@ class PanelTest(unittest.TestCase):
 
         self.assertEqual(sorted(self._collectResume()["corrections"]), ["02_ASO"])
 
+    def test_a_correction_is_sent_from_the_tree_the_server_sends_today(self):
+        """The archive puts each step under `intermediate/`. Looked for at the
+        top only, no step was found and a moved landmark never went back:
+        the run carried on with the point the reader had just corrected."""
+        self._stopped(produced=("01_ASO", "04_ALI_CBCT"), steps={
+            os.path.join("intermediate", "01_ASO"): {"p1_Or.nii.gz": "volume"},
+            os.path.join("intermediate", "04_ALI_CBCT"): {"p1_Or_lm_Pred.mrk.json": "{}"}})
+        self._edit(os.path.join("intermediate", "04_ALI_CBCT", "p1_Or_lm_Pred.mrk.json"),
+                   "corrected")
+
+        self.reviewer.press_continue(written={"p1"})
+
+        sent = self._collectResume()["corrections"]
+        self.assertEqual(sorted(sent), ["04_ALI_CBCT"])
+        self.assertEqual(self._members(sent["04_ALI_CBCT"]), ["p1_Or_lm_Pred.mrk.json"])
+
     def test_a_second_checkpoint_diffs_against_what_the_first_resume_produced(self):
         """One folder is reviewed twice, and the baseline is retaken on every
         unpack. Keeping the first one would resend every correction of round
@@ -793,6 +824,72 @@ class PanelTest(unittest.TestCase):
             RunCheckpoint(run_id="r", stopped_after="ALI_CBCT",
                           produced=(), path=None)).startswith("run_03"))
 
+    def test_the_reviewer_is_pointed_at_the_step_that_stopped(self):
+        """A stop shows what its last step wrote first: Crown_Seg's meshes,
+        not the CBCT ASO oriented two steps earlier."""
+        self._stopped(produced=("01_ASO", "02_Crown_Seg"), stopped_after="Crown_Seg", steps={
+            os.path.join("intermediate", "01_ASO"): {"p1_Or.nii.gz": "volume"},
+            os.path.join("intermediate", "02_Crown_Seg"): {"p1_U_Seg.vtk": "mesh"}})
+        self.assertTrue(self.reviewer.focus.endswith(
+            os.path.join("intermediate", "02_Crown_Seg")))
+
+    def test_a_stop_inside_a_callee_points_at_the_callee_s_folder(self):
+        self._stopped(produced=("01_ASO",), stopped_after="ASO/ALI_CBCT", steps={
+            os.path.join("intermediate", "01_ASO", "intermediate", "01_ALI_CBCT"):
+                {"p1_lm_Pred.mrk.json": "{}"}})
+        self.assertTrue(self.reviewer.focus.endswith(
+            os.path.join("01_ASO", "intermediate", "01_ALI_CBCT")))
+
+    def test_a_paused_run_refuses_a_second_apply_and_says_why(self):
+        """One run at a time: a second Apply on top of a run waiting for review
+        started work on data nobody had finished checking."""
+        self._stopped()
+        reason = self.panel._busyReason()
+        self.assertIn("paused after ALI_CBCT", reason)
+        self.assertIn("VISU", reason)
+
+    def test_cancelling_a_paused_run_takes_its_review_down(self):
+        """The banner kept saying the run was paused after it was withdrawn,
+        with a Continue that would have resumed nothing."""
+        closed = []
+        self.panel._closeReviewer = closed.append
+        run, _job = self._stopped()
+        self.panel._cancelRun(run)
+        self.assertEqual(closed, [self.reviewer.opened[-1]])
+
+    def test_cancelling_a_run_that_never_paused_leaves_the_reviewer_alone(self):
+        closed = []
+        self.panel._closeReviewer = closed.append
+        self._apply()
+        self.panel._cancelRun(self.panel._runs[0])
+        self.assertEqual(closed, [])
+
+    def test_a_running_run_refuses_a_second_apply_too(self):
+        self._apply()
+        self.assertIn("still in progress", self.panel._busyReason())
+
+    def test_an_idle_panel_has_nothing_to_refuse(self):
+        self.assertEqual(self.panel._busyReason(), "")
+
+    def test_the_way_back_to_the_review_shows_only_while_a_run_is_paused(self):
+        self.panel.reviewButton = qt.QPushButton("Review")
+        self.panel._syncRunControls()
+        self.assertFalse(self.panel.reviewButton.isVisible())
+        self._stopped()
+        self.panel._syncRunControls()
+        self.assertTrue(self.panel.reviewButton.isVisible())
+
+    def test_the_reviewer_is_handed_the_run_s_own_inputs(self):
+        """A step that writes only landmarks leaves its scan behind: ALI_IOS
+        hands back points on a mesh the caller sent. The panel is the one
+        side that has it, so it passes what exists on this machine along."""
+        scan = os.path.join(self.work, "p1.nii.gz")
+        open(scan, "w").close()
+        self.panel.prepareInputFiles = lambda workspace: {
+            "t1": scan, "t2": os.path.join(self.work, "gone.nii.gz")}
+        self._stopped()
+        self.assertEqual(self.reviewer.inputs, (scan,))
+
     def test_a_nested_stop_name_is_one_folder_rather_than_two(self):
         # `ASO/ALI_CBCT` is a legal stop name. Nested, one stop's folder would
         # sit INSIDE another's, which is the mixing this exists to prevent.
@@ -878,6 +975,65 @@ class PanelTest(unittest.TestCase):
 
         self.assertEqual(self.handled, ["done"])
 
+    # -- the disk work of a delivery is the worker's, not Qt's -----------
+
+    def _deliveredOnAWorker(self, answer):
+        """Apply, let the job's target run on a thread of its own, the way
+        BackgroundJob runs it, then deliver on THIS thread, the main one.
+        Returns the unzip and digest calls made here, which is what freezes
+        the panel: 1.45 s for a 500 MB checkpoint."""
+        main, made = threading.get_ident(), []
+
+        def spy(name, real):
+            def recorded(*args, **kwargs):
+                if threading.get_ident() == main:
+                    made.append(name)
+                return real(*args, **kwargs)
+            return recorded
+
+        self.client.run = lambda tool_name, **kwargs: answer
+        job = self._apply()
+        self.panel._runs[0].output_dir = self.work
+        with mock.patch.object(base_widget.slicer_io, "unzip_folder",
+                               spy("unzip_folder", base_widget.slicer_io.unzip_folder)), \
+                mock.patch.object(base_widget.digest, "digest_tree",
+                                  spy("digest_tree", base_widget.digest.digest_tree)):
+            delivered = []
+            worker = threading.Thread(target=lambda: delivered.append(job.collect()))
+            worker.start()
+            worker.join(30)
+            self.assertFalse(worker.is_alive(), "the job's target never returned")
+            job.succeed(delivered[0])
+        return made
+
+    def test_a_checkpoint_is_unpacked_and_digested_off_the_main_thread(self):
+        made = self._deliveredOnAWorker(self._checkpoint())
+
+        self.assertEqual(made, [])
+        run = self.panel._runs[0]
+        self.assertEqual(self.reviewer.opened, [self._reviewed()])
+        self.assertTrue(os.path.isfile(
+            os.path.join(self._reviewed(), "01_ALI_CBCT", "p1_lm_Pred.mrk.json")))
+        self.assertEqual(sorted(run.checkpoint_digests),
+                         [os.path.join("01_ALI_CBCT", "p1_lm_Pred.mrk.json")])
+
+    def test_a_result_archive_is_unpacked_off_the_main_thread(self):
+        archive = os.path.join(self.work, "AREG_output.zip")
+        with open(archive, "wb") as handle:
+            handle.write(_zip_bytes({"p1/p1_lm_Pred.mrk.json": "{}"}))
+        del self.panel.handleResult  # the base class's own: "save_as" unpacks
+        self.panel.RESULT_KIND = "save_as"
+        self.panel._schema = {}
+
+        made = self._deliveredOnAWorker(ToolResult(kind="file", path=archive))
+
+        self.assertEqual(made, [])
+        landed = os.path.realpath(os.path.join(self.work, "p1", "p1_lm_Pred.mrk.json"))
+        self.assertTrue(os.path.isfile(landed))
+        self.assertFalse(os.path.exists(archive))
+        self.assertEqual(self.panel._producedFiles, [landed])
+        self.assertEqual(self.panel._producedRoot, self.work)
+
 
 class ReviewModuleTest(unittest.TestCase):
     """The seam between the two halves, which is a NAME and a function.
@@ -903,7 +1059,7 @@ class ReviewModuleTest(unittest.TestCase):
         self.assertEqual(len(entry), 1,
                          "the review module must offer open_for_review()")
         self.assertEqual([arg.arg for arg in entry[0].args.args],
-                         ["folder", "on_continue", "rewind", "origin"],
+                         ["folder", "on_continue", "rewind", "origin", "inputs", "focus"],
                          "the seam is a signature, so a change to it is a "
                          "change to what both modules agree on")
 

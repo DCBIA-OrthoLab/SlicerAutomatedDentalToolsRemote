@@ -27,6 +27,18 @@ def plain_text(text) -> str:
     return f"<qt><p style='white-space: pre-wrap'>{escaped}</p></qt>"
 
 
+def preformatted_text(text) -> str:
+    """`text` as Qt will show it in a monospaced block, every space kept.
+
+    For a folder tree: Qt shows a plain-text tooltip in the proportional UI
+    font and collapses runs of spaces, so the indentation that IS a tree came
+    out flat. Escaped first, exactly as `plain_text` escapes, so whatever the
+    server sent is still inert -- only the `<pre>` around it is markup.
+    """
+    text = "" if text is None else str(text)
+    return f"<qt><pre>{html.escape(text)}</pre></qt>"
+
+
 class ServerToolError(Exception):
     """A presentable failure while talking to the tool server."""
 
