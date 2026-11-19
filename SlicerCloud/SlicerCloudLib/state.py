@@ -60,6 +60,21 @@ def _port_of(url):
         return None
 
 
+def configured_remote(client_url) -> bool:
+    """The client is set to a server that is NOT on this machine: the one thing
+    that must not be replaced without asking. Unset (the `.invalid` placeholder),
+    empty, malformed and loopback addresses are not."""
+    if not client_url:
+        return False
+    try:
+        host = (urlsplit(str(client_url)).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if not host or host == "invalid" or host.endswith(".invalid"):
+        return False
+    return host not in tls.LOCAL_PIN_HOSTS and host != "localhost"
+
+
 def client_target(status, client_url, backend=None) -> str:
     """Whether the address every module uses is THIS server, another one, or none.
 
@@ -160,6 +175,7 @@ TRY_PORT = "try_port"
 SWITCH_BACK = "switch_back"
 LOGS = "logs"
 REFRESH = "refresh"
+CHECK_UPDATE = "check_update"
 GPU = "gpu"
 CANCEL = "cancel"
 
@@ -193,13 +209,13 @@ def actions(state: ServerState, gpu_fixable: bool = False, can_switch_back: bool
         shown |= {TRY_PORT, REFRESH, LOGS}
     elif kind == State.INSTALLED_STOPPED:
         primary = INSTALL
-        shown |= {INSTALL, REFRESH, LOGS}
+        shown |= {INSTALL, REFRESH, LOGS, CHECK_UPDATE}
         if flags.update_available:
             shown.add(UPDATE)
     elif kind == State.STARTING:
-        shown |= {STOP, REFRESH, LOGS}
+        shown |= {STOP, REFRESH, LOGS, CHECK_UPDATE}
     elif kind == State.RUNNING:
-        shown |= {STOP, REFRESH, LOGS}
+        shown |= {STOP, REFRESH, LOGS, CHECK_UPDATE}
         if flags.client != CLIENT_HERE:
             primary = USE_HERE
             shown.add(USE_HERE)

@@ -13,6 +13,7 @@ and turning a status dict into something readable. See ARCHITECTURE.md.
 
 import getpass
 import logging
+from urllib.parse import urlsplit
 
 import ctk
 import qt
@@ -25,7 +26,8 @@ from ServerToolsCoreLib.client import checked_server_url
 from ServerToolsCoreLib.settings_qt import notify_uploads_are_not_deidentified, save_overrides
 from ServerToolsCoreLib.errors import plain_text
 from ServerToolsCoreLib.worker import BackgroundJob
-from SlicerCloudLib import deploy
+from SlicerCloudLib import backends, deploy
+from SlicerCloudLib import state as serverState
 from SlicerCloudLib.deploy import (
     DEFAULT_BRANCH,
     DEFAULT_INSTALL_DIR,
@@ -49,6 +51,14 @@ _KEY_SELECTED_TOOLS = f"{_SETTINGS_GROUP}/SelectedTools"
 _KEY_PORT = f"{_SETTINGS_GROUP}/Port"
 _KEY_BIND = f"{_SETTINGS_GROUP}/BindAddress"
 _KEY_STOP_ON_EXIT = f"{_SETTINGS_GROUP}/StopOnExit"
+# The server a module was pointed at before this panel replaced it, so that
+# "Switch back" can restore it. Same sensitivity as ServerTools/ApiToken, which
+# already sits in the same settings file.
+_KEY_PREVIOUS_URL = f"{_SETTINGS_GROUP}/PreviousServerUrl"
+_KEY_PREVIOUS_TOKEN = f"{_SETTINGS_GROUP}/PreviousServerToken"
+# Slicer's own switch (the one that shows Reload & Test): what makes the fields
+# below it count.
+_KEY_DEVELOPER_MODE = "Developer/DeveloperMode"
 
 _DEFAULT_PORT = 8000
 # On by default: the panel manages a server on the user's OWN machine, and a
@@ -62,15 +72,10 @@ _DEFAULT_STOP_ON_EXIT = True
 # unbounded QTextEdit makes the panel crawl long before anyone reads them.
 _LOG_MAX_BLOCKS = 2000
 
-_ROW_LABELS = (
-    ("git", _("Git")),
-    ("docker", _("Docker")),
-    ("compose", _("Docker Compose")),
-    ("gpu", _("GPU")),
-    ("clone", _("Server repository")),
-    ("container", _("Container")),
-    ("health", _("Server")),
-)
+# Every row either backend can show, in an order that keeps each backend's own
+# order. The backend decides which are shown and what they say (checks()); the
+# rest are hidden, so no row ever describes something this machine does not use.
+_ROW_KEYS = ("git", "docker", "compose", "uv", "gpu", "disk", "port", "clone", "container", "health")
 
 
 def useSlicerStartupEnvironment() -> None:
@@ -181,15 +186,7 @@ def _dockerGroupInstructions(installed_just_now: bool = False) -> str:
     ).format(getpass.getuser())
 
 
-def _human(size) -> str:
-    if not size:
-        return "0 B"
-    value = float(size)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024 or unit == "TB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} TB"
+_human = backends.human_size
 
 
 class SlicerCloud(ScriptedLoadableModule):
@@ -250,6 +247,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._jobBlocking = True      # False while a passive status check runs
         self._loadingSettings = False  # True while _loadSettings writes the widgets
         self._buildFailed = False      # setup() could not build the panel
+        self._lastFacts = {}           # what only this machine can say: disk, port
+        self._jobKind = None           # "install", "start" or "work" while a job runs
 
     # ------------------------------------------------------------------
     # Slicer lifecycle
@@ -327,6 +326,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
     def _buildServerBox(self):
         box = ctk.ctkCollapsibleButton()
         box.text = _("Local server")
+        self._serverBox = box
         layout = qt.QVBoxLayout(box)
 
         form = qt.QFormLayout()
@@ -334,37 +334,50 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         self.installDirEdit = ctk.ctkPathLineEdit()
         self.installDirEdit.filters = ctk.ctkPathLineEdit.Dirs
-        self.installDirEdit.setToolTip(
-            _("Where the server repository and its model bundles (up to ~29 GB) are kept. "
-              "Outside the Slicer installation on purpose, so it survives an update.")
-        )
-        form.addRow(design.section_title(_("Install folder")), self.installDirEdit)
+        self._installDirTitle = design.section_title(_("Install folder"))
+        form.addRow(self._installDirTitle, self.installDirEdit)
+        # Once installed the folder is only stated: it holds the server and its
+        # tools, moving it would leave the old copy behind.
+        self.installDirNote = design.hint_label("")
+        layout.addWidget(self.installDirNote)
 
+        # Developer mode only, and IGNORED outside it (deployment(), selectedBind(),
+        # selectedPort()): hiding a field is not enough when its saved value still
+        # decides what gets cloned.
         advanced = ctk.ctkCollapsibleButton()
-        advanced.text = _("Advanced")
+        advanced.text = _("Advanced (developer mode)")
         advanced.collapsed = True
+        self._advanced = advanced
         advancedForm = qt.QFormLayout(advanced)
+        self._toolsRows = []     # shown only for a backend that has a tools checkout
+        self._bindRows = []      # shown only for a backend that lets the user choose
+
+        def addRow(text, widget, group=None):
+            title = design.section_title(text)
+            advancedForm.addRow(title, widget)
+            if group is not None:
+                group.append(title)
+                group.append(widget)
+
         self.repoUrlEdit = qt.QLineEdit()
         self.repoUrlEdit.setToolTip(_("Clone a fork instead of the reference repository."))
-        advancedForm.addRow(design.section_title(_("Repository URL")), self.repoUrlEdit)
+        addRow(_("Repository URL"), self.repoUrlEdit)
         self.branchEdit = qt.QLineEdit()
-        advancedForm.addRow(design.section_title(_("Branch")), self.branchEdit)
-        # Only meaningful for the native server (macOS, Apple silicon), which
-        # builds the tools from their own repository; Docker ignores it.
+        addRow(_("Branch"), self.branchEdit)
         self.toolsRepoUrlEdit = qt.QLineEdit()
-        self.toolsRepoUrlEdit.setToolTip(_("Native server only: the tools repository to clone."))
-        advancedForm.addRow(design.section_title(_("Tools repository URL")), self.toolsRepoUrlEdit)
+        self.toolsRepoUrlEdit.setToolTip(_("The tools repository to clone."))
+        addRow(_("Tools repository URL"), self.toolsRepoUrlEdit, self._toolsRows)
         self.toolsBranchEdit = qt.QLineEdit()
-        self.toolsBranchEdit.setToolTip(_("Native server only: the branch of the tools repository to use."))
-        advancedForm.addRow(design.section_title(_("Tools branch")), self.toolsBranchEdit)
+        self.toolsBranchEdit.setToolTip(_("The branch of the tools repository to use."))
+        addRow(_("Tools branch"), self.toolsBranchEdit, self._toolsRows)
         self.portSpin = qt.QSpinBox()
         self.portSpin.setRange(1024, 65535)
         self.portSpin.setValue(_DEFAULT_PORT)
         self.portSpin.setToolTip(
             _("Host port the server is published on. Change it only if something else already "
-              "holds 8000 — it is remembered, so it only has to be set once.")
+              "holds 8000: it is remembered, so it only has to be set once.")
         )
-        advancedForm.addRow(design.section_title(_("Port")), self.portSpin)
+        addRow(_("Port"), self.portSpin)
 
         # Populated from the machine's real interfaces rather than typed: an
         # address is exactly the kind of thing nobody remembers and everybody
@@ -379,52 +392,50 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             self.bindCombo.addItem(_("{0}  ({1})").format(label, address or _("all addresses")),
                                    address)
             self._bindKinds[address] = kind
-        self.bindCombo.setToolTip(_(
-            "Which machines can reach this server. 'This computer only' is the default and "
-            "keeps it off the network entirely.\n\n"
-            "This client only talks https, and only to a certificate it can verify: a "
-            "publicly-signed one, or, for a server on this very Mac, the certificate "
-            "this panel made for it. To share a Docker server, give it a public address "
-            "with a publicly-signed certificate: `tailscale serve`, or a reverse proxy "
-            "or the server itself with a Let's Encrypt or institutional certificate. "
-            "The native server on a Mac is for this computer only, so this choice is fixed."
-        ))
-        if deploy.prefer_native():
-            self.bindCombo.setEnabled(False)
-        advancedForm.addRow(design.section_title(_("Network access")), self.bindCombo)
+        addRow(_("Network access"), self.bindCombo, self._bindRows)
         self.bindCombo.currentIndexChanged.connect(self._onBindChanged)
+
+        self.useServerCheck = qt.QCheckBox(
+            _("Point every Automated Dental Tools module at this server once it is up")
+        )
+        self.useServerCheck.setChecked(True)
+        self.useServerCheck.setToolTip(
+            _("Saves this server's address and API key as the extension's settings: the same "
+              "thing the Server Tools Settings module edits. Outside developer mode this "
+              "always happens.")
+        )
+        advancedForm.addRow(self.useServerCheck)
         layout.addWidget(advanced)
 
         checks = qt.QGridLayout()
         checks.setColumnStretch(1, 1)
         layout.addLayout(checks)
-        for row, (key, label) in enumerate(_ROW_LABELS):
-            name = design.section_title(label)
+        self._statusNames = {}
+        for row, key in enumerate(_ROW_KEYS):
+            name = design.section_title(key)
             value = qt.QLabel(_("checking..."))
             value.setWordWrap(True)
             checks.addWidget(name, row, 0)
             checks.addWidget(value, row, 1)
+            self._statusNames[key] = name
             self._statusRows[key] = value
 
         self.hintLabel = design.hint_label("")
         layout.addWidget(self.hintLabel)
 
+        # Which of these is on screen is the server's state (_applyActions): the
+        # others are hidden, not greyed. The install button is one button whose
+        # text follows the state: install, start, or the fix for what is missing.
         buttons = qt.QHBoxLayout()
         layout.addLayout(buttons)
         self.installButton = design.primary_button(_("Install and start"))
-        self.installButton.setToolTip(
-            _("Clone the server repository if needed, then start its container and wait for it "
-              "to answer. Safe to run again: an existing install is reused and its API key kept.")
-        )
         self.updateButton = design.primary_button(_("Update server"))
-        self.updateButton.setToolTip(
-            _("Fetch the remote, fast-forward the clone if it has fallen behind, and relaunch "
-              "the container. Does nothing when the clone is current and the server is answering.")
-        )
+        self.useButton = design.primary_button(_("Use this server"))
+        self.portButton = design.primary_button(_("Try another port"))
         self.stopButton = design.danger_button(_("Stop"))
-        buttons.addWidget(self.installButton)
-        buttons.addWidget(self.updateButton)
-        buttons.addWidget(self.stopButton)
+        for button in (self.installButton, self.updateButton, self.useButton, self.portButton,
+                       self.stopButton):
+            buttons.addWidget(button)
 
         secondary = qt.QHBoxLayout()
         layout.addLayout(secondary)
@@ -432,50 +443,34 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.checkUpdateButton = design.link_button(_("Check for updates"))
         self.checkUpdateButton.setToolTip(_("Fetch the remote to see whether the clone is behind."))
         self.showLogsButton = design.link_button(_("Server logs"))
-        # Shown by _renderStatus only when this machine has a card docker cannot
-        # reach — a permanently visible button for a problem almost nobody has
-        # reads as one more thing to understand before pressing Install.
+        self.switchBackButton = design.link_button(_("Switch back"))
+        self.switchBackButton.setToolTip(_(
+            "Point every module at the server they used before this one."))
         self.gpuButton = design.link_button(_("Enable GPU support"))
         self.gpuButton.setToolTip(_(
             "This machine has an NVIDIA card that Docker cannot reach, so the server would "
             "run on the CPU. Installs the NVIDIA Container Toolkit if needed and registers it "
             "with Docker. Needs your password, and restarts Docker."
         ))
-        self.gpuButton.setVisible(False)
-        secondary.addWidget(self.refreshButton)
-        secondary.addWidget(self.checkUpdateButton)
-        secondary.addWidget(self.showLogsButton)
-        secondary.addWidget(self.gpuButton)
+        for button in (self.refreshButton, self.checkUpdateButton, self.showLogsButton,
+                       self.switchBackButton, self.gpuButton):
+            secondary.addWidget(button)
         secondary.addStretch(1)
-
-        self.useServerCheck = qt.QCheckBox(
-            _("Point every Automated Dental Tools module at this server once it is up")
-        )
-        self.useServerCheck.setChecked(True)
-        self.useServerCheck.setToolTip(
-            _("Saves this server's address and API key as the extension's settings — the same "
-              "thing the Server Tools Settings module edits.")
-        )
-        layout.addWidget(self.useServerCheck)
+        self.gpuButton.setVisible(False)
+        self.switchBackButton.setVisible(False)
 
         self.stopOnExitCheck = qt.QCheckBox(_("Stop the server when Slicer closes"))
-        self.stopOnExitCheck.setToolTip(_(
-            "Leaves nothing running in the background once you are done. Idle, the container "
-            "costs about 220 MB of memory and no CPU or GPU — but after a run it keeps the "
-            "loaded models resident until it is restarted.\n\n"
-            "Restarting is cheap: the container is stopped, not deleted, so its dependencies "
-            "stay installed and a later start takes a few seconds.\n\n"
-            "Turn this OFF if this machine serves other people — closing Slicer would stop "
-            "their server too."
-        ))
         self.stopOnExitCheck.toggled.connect(lambda _checked: self._saveSettings())
         layout.addWidget(self.stopOnExitCheck)
 
-        self.installButton.clicked.connect(self.onInstall)
+        self.installButton.clicked.connect(lambda: self.onInstall())
         self.updateButton.clicked.connect(self.onUpdate)
         self.stopButton.clicked.connect(self.onStop)
+        self.useButton.clicked.connect(self.onUseHere)
+        self.portButton.clicked.connect(self.onTryAnotherPort)
+        self.switchBackButton.clicked.connect(self.onSwitchBack)
         # Wrapped rather than connected directly: `clicked` carries a `checked`
-        # bool, and onRefresh's first parameter is `check_remote` — a direct
+        # bool, and onRefresh's first parameter is `check_remote`: a direct
         # connection would let a widget detail decide whether Refresh hits the
         # network.
         self.refreshButton.clicked.connect(lambda: self.onRefresh())
@@ -584,6 +579,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.stopOnExitCheck.checked = (
             _DEFAULT_STOP_ON_EXIT if raw is None else str(raw).lower() in ("true", "1")
         )
+        self._applyBackendTexts()
+        self._applyDeveloperMode()
 
     def _saveSettings(self) -> None:
         settings = qt.QSettings()
@@ -593,7 +590,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         settings.setValue(_KEY_TOOLS_BRANCH, self.toolsBranchEdit.text.strip())
         settings.setValue(_KEY_TOOLS_REPO_URL, self.toolsRepoUrlEdit.text.strip())
         settings.setValue(_KEY_PORT, self.portSpin.value)
-        settings.setValue(_KEY_BIND, self.selectedBind())
+        settings.setValue(_KEY_BIND, self._comboBind())
         settings.setValue(_KEY_STOP_ON_EXIT, self.stopOnExitCheck.checked)
         settings.setValue(_KEY_SELECTED_TOOLS, ",".join(sorted(self._selectedTools())))
         settings.sync()
@@ -602,14 +599,32 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         raw = qt.QSettings().value(_KEY_SELECTED_TOOLS)
         return {name for name in str(raw or "").split(",") if name}
 
+    def _developerMode(self) -> bool:
+        """Slicer's own developer mode (the setting that shows Reload & Test).
+
+        Read each time, not cached: it can be switched while the panel is open.
+        """
+        raw = qt.QSettings().value(_KEY_DEVELOPER_MODE)
+        return raw is True or str(raw).lower() in ("true", "1")
+
     def deployment(self) -> LocalServerDeployment:
         """Rebuilt whenever the folder/URL/branch fields change, so the object
-        can never describe a different install than the one on screen."""
+        can never describe a different install than the one on screen.
+
+        Outside developer mode the repository, branch, tools repository and
+        tools branch fields are IGNORED, whatever they hold or were saved with:
+        the compiled-in values are used. They are hidden there too, but hiding
+        is not what protects a user from a branch someone typed last month.
+        """
         install_dir = self.installDirEdit.currentPath or DEFAULT_INSTALL_DIR
-        repo_url = self.repoUrlEdit.text.strip() or DEFAULT_REPO_URL
-        branch = self.branchEdit.text.strip() or DEFAULT_BRANCH
-        tools_branch = self.toolsBranchEdit.text.strip() or DEFAULT_TOOLS_BRANCH
-        tools_repo_url = self.toolsRepoUrlEdit.text.strip() or DEFAULT_TOOLS_REPO_URL
+        if self._developerMode():
+            repo_url = self.repoUrlEdit.text.strip() or DEFAULT_REPO_URL
+            branch = self.branchEdit.text.strip() or DEFAULT_BRANCH
+            tools_branch = self.toolsBranchEdit.text.strip() or DEFAULT_TOOLS_BRANCH
+            tools_repo_url = self.toolsRepoUrlEdit.text.strip() or DEFAULT_TOOLS_REPO_URL
+        else:
+            repo_url, branch = DEFAULT_REPO_URL, DEFAULT_BRANCH
+            tools_branch, tools_repo_url = DEFAULT_TOOLS_BRANCH, DEFAULT_TOOLS_REPO_URL
         if (self._deployment is None
                 or self._deployment.install_dir != install_dir
                 or self._deployment.repo_url != repo_url
@@ -621,19 +636,42 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                                                      tools_repo_url=tools_repo_url)
         return self._deployment
 
-    def _isNative(self) -> bool:
-        """The deployment runs the server as a plain process (Apple-silicon Mac)
-        instead of in Docker. Read off the deployment, so a stand-in without the
-        attribute is simply Docker."""
-        return bool(getattr(self.deployment(), "native", False))
+    @property
+    def backend(self):
+        """The backend of the current deployment: chosen once, from the platform,
+        when the deployment was made. The panel never asks the platform itself."""
+        return self.deployment().backend
 
-    def selectedBind(self) -> str:
-        """The address the server should publish on. Never None — the combo
-        always has loopback selected at worst."""
-        if deploy.prefer_native():
-            return deploy.BIND_LOCALHOST     # the native server is local only
+    def selectedPort(self):
+        """The port to pass to `up`, or None to leave it as the server remembers it.
+
+        Outside developer mode the Port field is ignored: sending 8000 on every
+        start would also undo a port chosen by 'Try another port', which the
+        server keeps in its own .env."""
+        return self.portSpin.value if self._developerMode() else None
+
+    def _configure(self) -> bool:
+        """Whether the install points every module at this server: always
+        outside developer mode, the checkbox decides inside it."""
+        return True if not self._developerMode() else bool(self.useServerCheck.checked)
+
+    def _comboBind(self) -> str:
+        """What the Network access combo holds, whether or not it counts."""
         data = self.bindCombo.itemData(self.bindCombo.currentIndex)
         return deploy.BIND_LOCALHOST if data is None else str(data)
+
+    def selectedBind(self) -> str:
+        """The address the server should publish on. Never None.
+
+        A backend with a fixed bind (the native one is local only) answers for
+        itself; outside developer mode the network choice is ignored and the
+        answer is loopback; otherwise the combo always has loopback at worst."""
+        fixed = self.backend.fixed_bind
+        if fixed is not None:
+            return fixed
+        if not self._developerMode():
+            return deploy.BIND_LOCALHOST
+        return self._comboBind()
 
     def _selectBind(self, address: str) -> None:
         """Select a saved address, falling back to loopback when it is gone.
@@ -649,6 +687,59 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 self.bindCombo.setCurrentIndex(index)
                 return
         self.bindCombo.setCurrentIndex(0)
+
+    def _applyBackendTexts(self) -> None:
+        """The words that depend on the backend, set once the deployment (and so
+        the backend) is known: the widgets are built before it is."""
+        if self._buildFailed:
+            return
+        texts = self.backend.texts
+        self._serverBox.text = _(texts.title)
+        self.installDirEdit.setToolTip(_(texts.folder_note))
+        self.installButton.setToolTip(_(texts.install_tooltip))
+        self.updateButton.setToolTip(_(texts.update_tooltip))
+        self.useButton.setText(_(texts.use_label))
+        self.useButton.setToolTip(_(
+            "Point every Automated Dental Tools module at this server, with its address and "
+            "API key: the same thing the Server Tools Settings module edits."))
+        self.stopOnExitCheck.setToolTip(_(texts.stop_on_exit_tooltip))
+        self.bindCombo.setToolTip(_(texts.bind_tooltip))
+        # A fixed bind is not a choice: the row is not shown at all (and the
+        # combo is also disabled, so nothing can change it by accident).
+        self.bindCombo.setEnabled(self.backend.fixed_bind is None)
+
+    def _applyDeveloperMode(self) -> None:
+        """Show the fields that only count in developer mode, and only the ones
+        this backend has. Outside it they are hidden AND ignored (deployment())."""
+        if self._buildFailed:
+            return
+        developer = self._developerMode()
+        backend = self.backend
+        self._advanced.setVisible(developer)
+        for widget in self._toolsRows:
+            widget.setVisible(backend.has_tools_checkout)
+        for widget in self._bindRows:
+            widget.setVisible(backend.fixed_bind is None)
+
+    def _applyInstallFolder(self, current) -> None:
+        """The install folder is chosen once, before the first install, with the
+        free space beside it; afterwards it is stated, not offered. Developer
+        mode keeps it editable."""
+        editable = self._developerMode() or current.kind in (
+            serverState.State.NEEDS_SETUP, serverState.State.NOT_INSTALLED)
+        self.installDirEdit.setVisible(editable)
+        self._installDirTitle.setVisible(editable)
+        folder = self.installDirEdit.currentPath or DEFAULT_INSTALL_DIR
+        if editable:
+            note = _(self.backend.texts.folder_note)
+            free = self._lastFacts.get("disk_free")
+            if free is not None:
+                note += " " + _("{0} free on that disk.").format(_human(free))
+            if current.kind in (serverState.State.NEEDS_SETUP, serverState.State.NOT_INSTALLED):
+                note += " " + _("Choose it now: it is fixed once the install has started.")
+        else:
+            note = _("Installed in {0}.").format(folder)
+        self.installDirNote.setText(note)
 
     def _onBindChanged(self, _index=None) -> None:
         """Warn on the way OUT of loopback, once, before anything is started.
@@ -700,7 +791,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         return self._job is not None and self._jobBlocking
 
     def _setBusy(self, busy: bool, what: str = "", disable: bool = True) -> None:
-        """`disable=False` for a passive job — it narrates without locking the panel.
+        """`disable=False` for a passive job: it narrates without locking the panel.
 
         Greying every button during a *status check* is what made the panel
         feel dead: the check runs on setup() and on every enter(), so the first
@@ -708,16 +799,17 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         reasons nothing on screen explains.
         """
         if disable:
-            for button in (self.installButton, self.updateButton, self.stopButton,
-                           self.downloadButton, self.refreshButton, self.checkUpdateButton,
-                           self.showLogsButton, self.gpuButton):
+            for button in (self.installButton, self.updateButton, self.stopButton, self.useButton,
+                           self.portButton, self.switchBackButton, self.downloadButton,
+                           self.refreshButton, self.checkUpdateButton, self.showLogsButton,
+                           self.gpuButton):
                 button.setEnabled(not busy)
             self.cancelButton.setVisible(busy)
         self._progressLabel.setVisible(busy or bool(what))
         self._progressLabel.setText(what)
 
     def _startJob(self, name: str, task, on_success, refresh_on_error: bool = True,
-                  blocking: bool = True) -> None:
+                  blocking: bool = True, kind: str = "work") -> None:
         if self._buildFailed:
             return
         if self._job is not None:
@@ -731,20 +823,25 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             self._cancelJob()
         self._jobName = name
         self._jobBlocking = blocking
+        self._jobKind = kind if blocking else None
         self._setBusy(True, name, disable=blocking)
         self._log(f"--- {name} ---")
 
         def succeeded(result):
             self._job = None
             self._setBusy(False, disable=blocking)
+            self._applyActions()
             on_success(result)
 
         def failed(exc):
             self._job = None
             self._setBusy(False, disable=blocking)
+            self._applyActions()
             self._onJobError(name, exc, refresh_on_error)
 
         self._job = BackgroundJob(task, on_success=succeeded, on_error=failed, on_progress=self._log)
+        # After the job exists (the state reads it) and before it can finish.
+        self._applyActions()
         self._job.start()
 
     def _cancelJob(self) -> None:
@@ -754,6 +851,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             self._job.cancel()
             self._job = None
         self._setBusy(False)
+        self._applyActions()
 
     def onCancel(self) -> None:
         self._log(_("Cancelling..."))
@@ -798,15 +896,35 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             catalog = deployment.catalog(progress_cb=None) if status.get("cloned") else None
             registered = None
             if status.get("server", {}).get("healthy"):
-                registered = deployment.list_tools(deploy.client_url(status))
-            return status, catalog, registered
+                registered = deployment.list_tools(deployment.backend.client_url(status))
+            return status, catalog, registered, self._hostFacts(deployment, status)
 
         self._startJob(_("Checking the server"), task, self._onRefreshed,
                        refresh_on_error=False, blocking=False)
 
+    @staticmethod
+    def _hostFacts(deployment, status) -> dict:
+        """What only this machine can say, for the grid and the state: free disk
+        space and whether something already holds the server's port. Runs in the
+        worker thread; reads no widget."""
+        try:
+            port = urlsplit(str((status.get("server") or {}).get("url") or "")).port
+        except ValueError:
+            port = None
+        port = port or _DEFAULT_PORT
+        running = bool((status.get("container") or {}).get("running"))
+        return {
+            "disk_free": deploy.free_space(deployment.install_dir),
+            "port": port,
+            # A server that is up holds its own port: nothing to probe.
+            "port_in_use": True if running else deploy.port_in_use(port),
+            "apple_silicon": bool(deployment.backend.native),
+        }
+
     def _onRefreshed(self, result) -> None:
-        status, catalog, registered = result
+        status, catalog, registered, facts = result
         self._lastStatus = status
+        self._lastFacts = facts
         self._registeredTools = registered
         self._renderStatus(status)
         if catalog is not None:
@@ -859,50 +977,42 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 self._log(_("The {0} is on '{1}' (the form asks for '{2}').").format(
                     switch.what, now or switch.current, switch.wanted))
 
-    def onInstall(self) -> None:
+    def onInstall(self, port=None) -> None:
+        """Install, start, or fix what is missing: one button, and the state decides.
+
+        `port` is only given by 'Try another port'.
+        """
         deployment = self.deployment()
-        configure = self.useServerCheck.checked
-        port = self.portSpin.value
-        bind = self.selectedBind()
+        backend = deployment.backend
         self._saveSettings()
 
-        # Handled before the job starts, not inside it: installing Docker needs
-        # a decision and a password prompt, and neither can be asked for from a
+        # Handled before the job starts, not inside it: a remedy needs a decision
+        # (and for Docker a password prompt), and neither can be asked for from a
         # worker thread.
-        docker = (self._lastStatus or {}).get("docker", {})
-        native = self._isNative()
-        if self._lastStatus is not None and not native and not docker.get("daemon"):
-            self._offerDockerInstall(docker)
-            return
-        if native and self._uvMissing(self._lastStatus):
-            slicer.util.errorDisplay(plain_text(self._uvMessage()))
+        if self._lastStatus is not None:
+            current = self._serverState()
+            if current.kind == serverState.State.NEEDS_SETUP:
+                self._offerRemedy(current)
+                return
+        configure = self._configure()
+        if configure and not self._confirmReplacingTheServer():
             return
         switches = self._allowBranchSwitches(deployment)
         if switches is None:
             return
 
+        options = {"port": port if port else self.selectedPort(), "bind": self.selectedBind()}
+        plan = backend.install_plan(self._lastStatus)
+        fresh = not serverState.is_installed(self._lastStatus, backend)
+
         def task(progress_cb):
-            if native:
-                deployment.require_native_support(progress_cb=progress_cb)
-            deployment.clone(progress_cb=progress_cb)
-            if native:
-                # No Docker on a Mac with Apple silicon (it cannot reach the
-                # GPU): the server and the tools are cloned, the tools' Python
-                # environments built (slow once, instant after), then the
-                # server starts on https://127.0.0.1 with the certificate made
-                # for it. Each step is idempotent, so a second press resumes.
-                deployment.clone_tools(progress_cb=progress_cb)
-                deployment.install_tools(progress_cb=progress_cb)
-                return deployment.up(progress_cb=progress_cb, port=port, bind=bind)
-            status = deployment.status(progress_cb=progress_cb)
-            if not status.get("docker", {}).get("daemon"):
-                raise DeploymentError(_(
-                    "Docker is not usable yet: {0}\n\n"
-                    "Install it by running this in a terminal, then log out and back in:\n\n"
-                    "    sudo sh {1}"
-                ).format(status.get("docker", {}).get("error") or _("the daemon did not answer"),
-                         deployment.install_docker_script))
-            return deployment.up(progress_cb=progress_cb, port=port, bind=bind)
+            # Each step is idempotent and the plan leaves out what is already
+            # done, so a second press resumes after a failure or a cancel.
+            result = None
+            for step in plan:
+                progress_cb(f"== {step.label} ==")
+                result = step.run(deployment, progress_cb, options)
+            return result
 
         def done(result):
             self._reportBranchSwitches(deployment, switches)
@@ -911,14 +1021,14 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 slicer.util.showStatusMessage(
                     _("Server already running, address and token registered."), 5000)
             if configure and result.get("token"):
-                url = deploy.client_url(result)
+                url = backend.client_url(result)
                 if url:
-                    self._applyServerSettings(url, result["token"])
+                    self._pointModulesHere(url, result["token"])
                 else:
                     # Nothing is saved rather than an address the client would
                     # refuse: a Docker server needs a public address, a native
                     # one needs to report the pinned certificate it serves.
-                    message = deploy.NO_LOCAL_TLS_MESSAGE if native else deploy.NO_PUBLIC_URL_MESSAGE
+                    message = backend.no_url_message()
                     self._log(_(message))
                     slicer.util.warningDisplay(_(message))
             if result.get("healthy"):
@@ -926,19 +1036,130 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             else:
                 slicer.util.warningDisplay(plain_text(_(
                     "The server was started but {0}/health did not answer in time. It may "
-                    "still be installing its dependencies — check the Log, or press Refresh in "
+                    "still be installing its dependencies: check the Log, or press Refresh in "
                     "a few minutes."
                 ).format(result.get("url") or DEFAULT_SERVER_URL)))
             self.onRefresh()
 
-        self._startJob(_("Installing and starting the server"), task, done)
+        self._startJob(_("Installing and starting the server") if fresh else _("Starting the server"),
+                       task, done, kind="install" if fresh else "start")
 
-    @staticmethod
-    def _uvMissing(status) -> bool:
-        """The native backend builds its Python environments with uv. Only an
-        explicit `uv: null` in the status counts: a server that predates the
-        key must not be reported as missing it."""
-        return bool(status) and "uv" in status and not status["uv"]
+    def _offerRemedy(self, current) -> None:
+        """What the first missing prerequisite asks of the user. Nothing here
+        starts a job: the Docker installer needs a password, the others are
+        instructions only this person can follow on this machine."""
+        check = next((c for c in current.missing if c.remedy), None)
+        if check is None:
+            slicer.util.infoDisplay(plain_text(_("Something this machine needs is missing:\n\n{0}").format(
+                "\n".join(f"  {c.label}: {c.detail}" for c in current.missing))))
+            return
+        key = check.remedy.key
+        if key in ("docker_group", "docker_install"):
+            docker = (self._lastStatus or {}).get("docker", {})
+            reason = None
+            if check.key == "compose":
+                reason = _("Docker Compose is not installed.")
+            self._offerDockerInstall(docker, reason)
+        elif key == "git":
+            slicer.util.infoDisplay(plain_text(_(backends.GIT_MISSING_MESSAGE)))
+        elif key == "uv":
+            slicer.util.infoDisplay(plain_text(self._uvMessage()))
+        else:
+            slicer.util.infoDisplay(plain_text(f"{check.label}: {check.detail}"))
+
+    def confirmReplaceServer(self, text: str) -> bool:
+        """Yes/no question before the modules are moved off a server that is
+        already configured. Its own method so a test (or a different front end)
+        can answer it without a dialog."""
+        return bool(slicer.util.confirmYesNoDisplay(text, _("Use this server?")))
+
+    def _confirmReplacingTheServer(self) -> bool:
+        """Ask before replacing a remote server the modules already use. A lab
+        server is the worst thing to overwrite without a word; nothing is asked
+        when none is set, when the address is on this machine, or when it is
+        already this server."""
+        client = get_client()
+        url = client.server_url
+        if not serverState.configured_remote(url):
+            return True
+        if serverState.client_target(self._lastStatus, url) == serverState.CLIENT_HERE:
+            return True
+        question = _(
+            "Every module currently uses the server at:\n\n  {0}\n\n"
+            "Continue and use the server on this computer instead? The address and key of the "
+            "current server are kept, and 'Switch back' in this panel restores them."
+        ).format(url)
+        if self.confirmReplaceServer(plain_text(question)):
+            return True
+        self._log(_("Not replacing the server in use: nothing was changed."))
+        return False
+
+    def _pointModulesHere(self, url: str, token: str) -> None:
+        """Make this server the one every module uses, keeping the previous
+        remote one so 'Switch back' can restore it."""
+        client = get_client()
+        previous = client.server_url
+        if serverState.configured_remote(previous) and previous != url:
+            settings = qt.QSettings()
+            settings.setValue(_KEY_PREVIOUS_URL, previous)
+            settings.setValue(_KEY_PREVIOUS_TOKEN, client.token)
+            settings.sync()
+        self._applyServerSettings(url, token)
+
+    def onSwitchBack(self) -> None:
+        settings = qt.QSettings()
+        url = str(settings.value(_KEY_PREVIOUS_URL) or "")
+        token = str(settings.value(_KEY_PREVIOUS_TOKEN) or "")
+        if not url:
+            return
+        try:
+            url = checked_server_url(url)
+        except ValueError as exc:
+            self._log(str(exc))
+            slicer.util.errorDisplay(plain_text(str(exc)))
+            return
+        client = get_client()
+        save_overrides(url, token, client.timeout)
+        client.configure(server_url=url, token=token)
+        settings.remove(_KEY_PREVIOUS_URL)
+        settings.remove(_KEY_PREVIOUS_TOKEN)
+        settings.sync()
+        self._log(_("Every module uses {0} again.").format(url))
+        slicer.util.showStatusMessage(_("Switched back to {0}.").format(url), 5000)
+        self._applyActions()
+
+    def onUseHere(self) -> None:
+        """Point every module at the server that is already running here."""
+        deployment = self.deployment()
+        backend = deployment.backend
+        status = self._lastStatus or {}
+        if not self._confirmReplacingTheServer():
+            return
+
+        def task(progress_cb):
+            return deployment.token(progress_cb=progress_cb)
+
+        def done(token):
+            url = backend.client_url(status)
+            if url:
+                self._pointModulesHere(url, token)
+            else:
+                message = backend.no_url_message()
+                self._log(_(message))
+                slicer.util.warningDisplay(_(message))
+            self.onRefresh()
+
+        self._startJob(_("Pointing the modules at this server"), task, done)
+
+    def onTryAnotherPort(self) -> None:
+        """The port is held by another program: start on the first free one. The
+        server remembers it, so this has to be done once."""
+        port = deploy.find_free_port()
+        if port is None:
+            slicer.util.errorDisplay(_("No free port was found between 8001 and 8099."))
+            return
+        self._log(_("Port {0} is free: starting there.").format(port))
+        self.onInstall(port=port)
 
     @staticmethod
     def _uvMessage() -> str:
@@ -949,7 +1170,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             "curl -LsSf https://astral.sh/uv/install.sh | sh), then press the button again."
         )
 
-    def _offerDockerInstall(self, docker: dict) -> None:
+    def _offerDockerInstall(self, docker: dict, reason=None) -> None:
         """Docker is missing or unusable. Offer to fix it, or say exactly how.
 
         The installer is a shell script from the cloned repository run through
@@ -957,7 +1178,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         curl-pipe-to-root started by a button.
         """
         deployment = self.deployment()
-        reason = docker.get("error") or _("Docker is not installed on this machine.")
+        reason = reason or docker.get("error") or _("Docker is not installed on this machine.")
 
         # Checked FIRST, because the remedy is not the one below. Docker is
         # installed and running here — the account simply is not in the
@@ -1076,21 +1297,19 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def onUpdate(self) -> None:
         deployment = self.deployment()
+        backend = deployment.backend
         # Passed on every update, for the same reason the branch is: `update`
         # recreates the container, so anything not restated here goes back to
-        # its default — and the default is loopback. Without this, updating a
+        # its default, and the default is loopback. Without this, updating a
         # server published on a VPN address quietly took it off the network.
         bind = self.selectedBind()
 
-        native = self._isNative()
         switches = self._allowBranchSwitches(deployment)
         if switches is None:
             return
 
         def task(progress_cb):
-            if native:
-                deployment.require_native_support(progress_cb=progress_cb)
-                deployment.clone_tools(progress_cb=progress_cb)
+            backend.before_update(deployment, progress_cb)
             return deployment.update(progress_cb=progress_cb, bind=bind)
 
         def done(result):
@@ -1098,11 +1317,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             summary = _(deploy.describe_update(result))
             self._log(summary)
             slicer.util.showStatusMessage(summary, 5000)
-            if native and result.get("restarted") and not result.get("healthy"):
-                slicer.util.warningDisplay(_(
-                    "The server was relaunched but did not answer in time. Check the Log."
-                ))
-            elif result.get("recreated") and not result.get("healthy"):
+            if (result.get("restarted") or result.get("recreated")) and not result.get("healthy"):
                 slicer.util.warningDisplay(_(
                     "The server was relaunched but did not answer in time. Check the Log."
                 ))
@@ -1192,154 +1407,73 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
     # Rendering
     # ------------------------------------------------------------------
 
+    def _serverState(self):
+        """The server's state, from the last status and what is running now."""
+        job = self._jobKind if self._busyWithWork() else None
+        return serverState.classify(
+            self._lastStatus, self.backend, self._lastFacts, job, get_client().server_url)
+
+    def _applyActions(self) -> None:
+        """Show the buttons the state offers and hide every other one.
+
+        Hidden, not greyed: a greyed 'Start server' beside a running server is
+        the thing this replaced. The install button is one button whose text
+        follows the state. Cancel belongs to _setBusy, which owns it.
+        """
+        if self._buildFailed or not hasattr(self, "useButton"):
+            return
+        backend = self.backend
+        if self._lastStatus is None:
+            # No answer yet: the install button is there and clickable (it must
+            # never wait for a passive check), nothing else is offered.
+            shown = {serverState.INSTALL, serverState.REFRESH}
+            label = _(backend.texts.install_label)
+        else:
+            current = self._serverState()
+            gpu_fixable = any(check.remedy and check.remedy.key == "gpu"
+                              for check in backend.checks(self._lastStatus, self._lastFacts))
+            settings = qt.QSettings()
+            switch_back = bool(str(settings.value(_KEY_PREVIOUS_URL) or ""))
+            shown = set(serverState.actions(current, gpu_fixable, switch_back).shown)
+            label = _(serverState.install_label(current, backend))
+        widgets = {
+            serverState.INSTALL: self.installButton, serverState.UPDATE: self.updateButton,
+            serverState.STOP: self.stopButton, serverState.USE_HERE: self.useButton,
+            serverState.TRY_PORT: self.portButton, serverState.SWITCH_BACK: self.switchBackButton,
+            serverState.LOGS: self.showLogsButton, serverState.REFRESH: self.refreshButton,
+            serverState.CHECK_UPDATE: self.checkUpdateButton, serverState.GPU: self.gpuButton,
+        }
+        for key, widget in widgets.items():
+            widget.setVisible(key in shown)
+        self.installButton.setText(label)
+
     def _renderStatus(self, status: dict) -> None:
         tokens = design.tokens()
+        backend = self.backend
 
-        def paint(key, ok, text):
-            label = self._statusRows[key]
-            label.setText(text)
-            label.setStyleSheet(f"color: {tokens['SUCCESS'] if ok else tokens['TEXT_MUTED']};")
+        # The grid is what the backend says is worth checking on this machine:
+        # Docker and Compose never appear on a Mac that does not use them.
+        rows = {check.key: check for check in backend.checks(status, self._lastFacts)}
+        for key, value in self._statusRows.items():
+            name = self._statusNames[key]
+            check = rows.get(key)
+            name.setVisible(check is not None)
+            value.setVisible(check is not None)
+            if check is None:
+                continue
+            name.setText(_(check.label))
+            value.setText(check.detail)
+            value.setStyleSheet(f"color: {tokens['SUCCESS'] if check.ok else tokens['TEXT_MUTED']};")
 
-        git = status.get("git", {})
-        paint("git", git.get("available"), git.get("version") or _("not installed"))
+        design.update_status_badge(
+            self._statusBadge, bool(status.get("server", {}).get("healthy")))
 
-        native = self._isNative()
-        docker = status.get("docker", {})
-        if native:
-            # The server is a plain process here: Docker would not reach the
-            # Apple GPU, and nothing below asks for it.
-            paint("docker", True, _("not needed: the server runs directly on this Mac"))
-        elif docker.get("daemon"):
-            paint("docker", True, docker.get("version") or _("running"))
-        elif docker.get("needs_group"):
-            # Deliberately short: this is a cell in a status grid, and the full
-            # remedy is six numbered steps. The dialog carries those.
-            paint("docker", False, _("installed, but this account may not use it yet"))
-        elif docker.get("available"):
-            paint("docker", False, _("installed, but: {0}").format(docker.get("error") or "?"))
-        else:
-            paint("docker", False, _("not installed"))
-
-        compose = status.get("compose", {})
-        if native:
-            paint("compose", True, _("not needed"))
-        else:
-            paint("compose", compose.get("available"), compose.get("version") or _("not installed"))
-
-        gpu = status.get("gpu", {})
-        # `gpu_access` names WHICH mechanism answered — an nvidia runtime, or a
-        # CDI device. Absent when the clone predates it, which is why the text
-        # falls back to the runtime wording rather than to "unknown".
-        if native:
-            paint("gpu", True, _("Apple GPU (Metal), used by the server directly"))
-        elif gpu.get("nvidia_runtime"):
-            paint("gpu", True, _("reachable through CDI — the GPU service will be used")
-                  if gpu.get("gpu_access") == "cdi"
-                  else _("nvidia runtime available — the GPU service will be used"))
-        elif gpu.get("nvidia_smi"):
-            paint("gpu", False, _("a card is present but docker cannot reach it — running on CPU"))
-        else:
-            paint("gpu", False, _("no GPU — running on CPU (everything works, slowly)"))
-        # Offered whenever there is a card docker cannot reach. Whether it can
-        # actually be done from here is _offerGpuSetup's business: it either does
-        # it or prints the terminal command, exactly as _offerDockerInstall does.
-        self.gpuButton.setVisible(
-            not native and bool(gpu.get("nvidia_smi")) and not gpu.get("nvidia_runtime"))
-
-        clone = status.get("clone", {})
-        if not status.get("cloned"):
-            paint("clone", False, _("not installed in {0}").format(status.get("repo_root", "")))
-        elif not clone.get("is_git_repo"):
-            paint("clone", False, clone.get("error") or _("not a git clone"))
-        else:
-            if clone.get("branch_mismatch"):
-                paint("clone", False, _(
-                    "on '{0}', but this deployment asks for '{1}' — press 'Update server' "
-                    "to switch it"
-                ).format(clone.get("branch"), clone.get("configured_branch")))
-            else:
-                behind = clone.get("behind") or 0
-                text = _("{0} at {1}, ").format(clone.get("branch"), clone.get("commit"))
-                text += _("{0} commit(s) behind, press Update").format(behind) if behind else _("up to date")
-                if not clone.get("checked_remote"):
-                    text += _(" (as of the last fetch)")
-                if clone.get("dirty"):
-                    text += _(" [local changes]")
-                paint("clone", not behind, text)
-
-        container = status.get("container", {})
-        paint("container", container.get("running"),
-              _("{0}: {1}").format(status.get("service", "?"), container.get("state") or _("not created yet")))
-
-        healthy = status.get("server", {}).get("healthy")
-        url = status.get("server", {}).get("url", DEFAULT_SERVER_URL)
-        paint("health", healthy, _("{0} — {1}").format(url, _("answering") if healthy else _("no answer")))
-        design.update_status_badge(self._statusBadge, bool(healthy))
-
-        self.hintLabel.setText(self._nextStep(status))
-        self.installButton.setText(
-            _("Install and start") if not status.get("cloned") else _("Start server")
-        )
-        self.stopButton.setEnabled(bool(container.get("running")))
-
-    def _nextStep(self, status: dict) -> str:
-        """One sentence naming the single next thing to do. A grid of red rows
-        says what is wrong; it does not say what to press."""
-        if self._isNative():
-            return self._nextNativeStep(status)
-        docker = status.get("docker", {})
-        if not docker.get("available"):
-            return _("Docker is missing. Press 'Install and start' — it will tell you the exact "
-                     "command to run in a terminal.")
-        if docker.get("needs_group"):
-            return _("Docker is installed, but this account may not use it yet. Press "
-                     "'Install and start' — it shows the one command to run, step by step.")
-        if not docker.get("daemon"):
-            return _("Docker is installed but not usable by this account: {0}").format(docker.get("error") or "")
-        if not status.get("cloned"):
-            return _("Nothing installed yet. Press 'Install and start' to clone the server and "
-                     "bring it up.")
-        if (status.get("clone") or {}).get("branch_mismatch"):
-            return _("The clone is on branch '{0}' but this deployment asks for '{1}'. Press "
-                     "'Update server' to switch it.").format(
-                         (status.get("clone") or {}).get("branch"),
-                         (status.get("clone") or {}).get("configured_branch"))
-        if (status.get("clone") or {}).get("behind"):
-            return _("A newer version of the server is available. Press 'Update server'.")
-        if not (status.get("container") or {}).get("running"):
-            return _("The server is installed but not running. Press 'Start server'.")
-        if not status.get("server", {}).get("healthy"):
-            return _("The container is running but not answering yet — it may still be installing "
-                     "dependencies. Check the Log.")
-        # Last, and only once everything else is right: the server WORKS on the
-        # CPU, so this must never displace a step that is actually blocking.
-        gpu = status.get("gpu") or {}
-        if gpu.get("nvidia_smi") and not gpu.get("nvidia_runtime"):
-            return _("The server is up, but on the CPU: this machine has a GPU that Docker "
-                     "cannot reach. Press 'Enable GPU support' to set that up.")
-        return _("The server is up. Pick the tools you need under 'Tool data'.")
-
-    def _nextNativeStep(self, status: dict) -> str:
-        """`_nextStep` for the server that runs directly on this Mac."""
-        if self._uvMissing(status):
-            return _("uv is missing: it builds the tools' Python environments. Install it from "
-                     "https://docs.astral.sh/uv/ first, then press 'Install and start'.")
-        if not status.get("cloned") or not (status.get("tools") or {}).get("present", False):
-            return _("Nothing installed yet. Press 'Install and start' to download the server and "
-                     "the tools and start it. The first time takes a while and several GB of disk.")
-        missing = [name for name, built in ((status.get("tools") or {}).get("venvs") or {}).items()
-                   if not built]
-        if missing:
-            return _("Some tools are not installed yet ({0}). Press 'Start server': it builds "
-                     "them first.").format(", ".join(sorted(missing)))
-        if (status.get("clone") or {}).get("behind"):
-            return _("A newer version of the server is available. Press 'Update server'.")
-        if not (status.get("container") or {}).get("running"):
-            return _("The server is installed but not running. Press 'Start server'.")
-        if not status.get("server", {}).get("healthy"):
-            return _("The server is starting; the first start can take a few minutes. Check the Log.")
-        return _("The server is up on this Mac, over https on this computer only. Pick the tools "
-                 "you need under 'Tool data'.")
+        current = self._serverState()
+        self.hintLabel.setText(_(backend.hint(current.kind, status, self._lastFacts)))
+        self._applyBackendTexts()
+        self._applyDeveloperMode()
+        self._applyInstallFolder(current)
+        self._applyActions()
 
     def _renderCatalog(self, catalog: dict) -> None:
         self._catalog = catalog

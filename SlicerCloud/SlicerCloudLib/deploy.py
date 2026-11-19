@@ -658,12 +658,7 @@ class LocalServerDeployment:
             _emit(progress_cb, f"Already installed in {self.install_dir}.")
             return
         if not shutil.which("git"):
-            raise DeploymentError(
-                "git is not installed. Install it and restart Slicer.\n"
-                "  Debian/Ubuntu: sudo apt-get install -y git\n"
-                "  macOS:         xcode-select --install\n"
-                "  Windows:       https://git-scm.com/download/win"
-            )
+            raise DeploymentError(backends.GIT_MISSING_MESSAGE)
         if os.path.isdir(os.path.join(self.install_dir, ".git")):
             raise DeploymentError(
                 f"{self.install_dir} is a git clone but carries no scripts/server_ctl.py. "

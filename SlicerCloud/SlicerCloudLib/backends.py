@@ -72,6 +72,13 @@ NO_PUBLIC_URL_MESSAGE = (
     "directly with its own public certificate."
 )
 
+GIT_MISSING_MESSAGE = (
+    "git is not installed. Install it and restart Slicer.\n"
+    "  Debian/Ubuntu: sudo apt-get install -y git\n"
+    "  macOS:         xcode-select --install\n"
+    "  Windows:       https://git-scm.com/download/win"
+)
+
 #: A rough figure, said as "about": the tool environments of the native backend
 #: are measured at several hundred MB each, 23 tools. Only ever shown, never
 #: used to refuse anything.
@@ -241,6 +248,9 @@ class Backend:
 
     def require_support(self, deployment, progress_cb=None) -> None:
         """Refuse, before anything is modified, a branch that cannot run here."""
+
+    def before_update(self, deployment, progress_cb=None) -> None:
+        """What an update needs done first, before anything is stopped."""
 
     def managed_repositories(self, deployment) -> list:
         """`(what, path, wanted branch, present)` for each clone this backend manages."""
@@ -443,10 +453,12 @@ class DockerBackend(Backend):
         container = status.get("container") or {}
         health_ok, health_text = self._health_check(status)
         return [
-            Check("git", "Git", git_ok, git_text, None, True),
+            Check("git", "Git", git_ok, git_text, None if git_ok else Remedy("git", "Install git"), True),
             Check("docker", "Docker", docker_ok, docker_text, docker_remedy, True),
             Check("compose", "Docker Compose", bool(compose.get("available")),
-                  compose.get("version") or "not installed", None, True),
+                  compose.get("version") or "not installed",
+                  None if compose.get("available") or not docker.get("available")
+                  else Remedy("docker_install", "Install Docker"), True),
             Check("gpu", "GPU", gpu_ok, gpu_text, gpu_remedy, False),
             Check("clone", "Server repository", clone_ok, clone_text, None, False),
             Check("container", "Container", bool(container.get("running")),
@@ -487,11 +499,11 @@ class DockerBackend(Backend):
         clone = status.get("clone") or {}
         if kind == "needs_setup":
             if not docker.get("available"):
-                return ("Docker is missing. Press 'Install and start': it will tell you the exact "
+                return ("Docker is missing. Press 'Fix: Install Docker': it will tell you the exact "
                         "command to run in a terminal.")
             if docker.get("needs_group"):
                 return ("Docker is installed, but this account may not use it yet. Press "
-                        "'Install and start': it shows the one command to run, step by step.")
+                        "'Fix: Show the steps': it shows the one command to run, step by step.")
             if not docker.get("daemon"):
                 return f"Docker is installed but not usable by this account: {docker.get('error') or ''}"
             return "A tool this server needs is missing. See the list above."
@@ -699,6 +711,10 @@ class NativeBackend(Backend):
         if code != 0:
             raise DeploymentError(self.no_native_message(deployment) + " Nothing was changed.")
 
+    def before_update(self, deployment, progress_cb=None) -> None:
+        deployment.require_native_support(progress_cb=progress_cb)
+        deployment.clone_tools(progress_cb=progress_cb)
+
     def managed_repositories(self, deployment) -> list:
         return Backend.managed_repositories(self, deployment) + [
             ("tools repository", deployment.tools_dir, deployment.tools_branch, deployment.tools_cloned)]
@@ -830,8 +846,10 @@ class NativeBackend(Backend):
         status = status or {}
         clone = status.get("clone") or {}
         if kind == "needs_setup":
-            return ("Something this Mac needs is missing. Press the button below to see how to "
-                    "fix it, then check again.")
+            missing = [check.label for check in self.checks(status, facts)
+                       if check.blocking and not check.ok]
+            return ("This Mac is missing: {0}. Press the button below to see how to fix it, then "
+                    "check again.").format(", ".join(missing) or "something")
         if kind == "not_installed":
             tools = status.get("tools") or {}
             if status.get("cloned") and tools.get("present"):

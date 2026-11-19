@@ -51,8 +51,13 @@ SlicerAutomatedDentalTools/
 │   ├── CMakeLists.txt
 │   ├── SlicerCloud.py                      # the panel (install / update / stop, tool-data picker)
 │   ├── Testing/Python/test_deploy.py       # plain unittest, real subprocesses, no Slicer needed
+│   ├── Testing/Python/test_docker_golden.py # every Docker argv, pinned byte for byte
+│   ├── Testing/Python/test_backends.py     # the two backends behind one interface
+│   ├── Testing/Python/test_state.py        # server state and the buttons each state offers
 │   └── SlicerCloudLib/
 │       ├── __init__.py
+│       ├── backends.py                     # Docker / Native: checks, plan, args, texts. No slicer, no qt.
+│       ├── state.py                        # classify(): the server's state. No slicer, no qt.
 │       └── deploy.py                       # clone + drive scripts/server_ctl.py. No slicer, no qt.
 ├── SurgMovPred/
 │   ├── CMakeLists.txt
@@ -1698,10 +1703,77 @@ often a 12 GB download that would keep coming down the wire.
 
 ### Dependency rule, again
 
-`deploy.py` imports neither `slicer` nor `qt` — subprocess and the standard
-library only, the same rule `client.py` follows and for the same reason: it is
-unit-tested under plain `python3 -m unittest`. `SlicerCloud.py` is the panel
-and may import whatever it likes.
+`deploy.py`, `backends.py` and `state.py` import neither `slicer` nor `qt`:
+subprocess and the standard library only, the same rule `client.py` follows and
+for the same reason: they are unit-tested under plain `python3 -m unittest`.
+`SlicerCloud.py` is the panel and may import whatever it likes.
+
+### Two backends, one interface, and a state that decides the buttons
+
+The panel used to be a grid of rows and a fixed set of buttons, with about
+thirty `if native` spread over `deploy.py` and `SlicerCloud.py`. Each bug found
+in the audit of the native server was one of them forgotten: a "nothing to do"
+after an update that had pulled the tools, three Docker rows on a Mac that has
+none, a Start button beside a running server. It is now three layers:
+
+- **`backends.py`: a backend is chosen once.** `deploy.select_backend()` is the
+  only place that asks the platform (`prefer_native()`: Apple silicon, Rosetta
+  included); `LocalServerDeployment.backend` holds the answer and nothing
+  re-derives it. `DockerBackend` and `NativeBackend` implement the same
+  methods: `subprocess_env`, `common_args`, `start_args`, `update_args`,
+  `probe` (the host before any clone), `checks` (the rows of the status grid,
+  each with its remedy and whether it blocks), `install_plan` (idempotent
+  steps, with what is already done left out), `client_url`, `hint`, `texts`.
+  The deployment keeps what is the same: run a process, stream its log, cancel,
+  git. Docker's argument vectors are pinned byte for byte by
+  `test_docker_golden.py`, written before the refactor and unchanged by it.
+- **`$VISOR_BACKEND` is always named to `server_ctl.py`.** The script picks the
+  native backend by itself on every macOS when it is not told, while this client
+  keeps an Intel Mac on Docker. `subprocess_env()` therefore sets
+  `VISOR_BACKEND=docker|native` in the environment of every `server_ctl.py` the
+  deployment starts (the variable was already read: no contract change), so the
+  client's choice is final.
+- **`state.py`: `classify(status, backend, facts, job, client_url)`** is a pure
+  function giving `NEEDS_SETUP`, `NOT_INSTALLED`, `INSTALLING`,
+  `INSTALLED_STOPPED`, `STARTING`, `RUNNING`, `PORT_TAKEN` or `BROKEN`, with the
+  flags that are not states (`update_available`, `branch_mismatch`, and whether
+  the modules point at this server, at another one, or at none). `facts` is what
+  only this machine can say (free disk, whether a program holds the port).
+  `actions(state)` is the set of buttons the state shows; the panel hides every
+  other one (hidden, not greyed) and the one install button changes its text
+  with the state (install, start, or the fix for what is missing).
+  `SlicerCloud.py` only maps those answers to widgets.
+
+The status grid is what the backend says is worth checking: on a Mac git, uv,
+the Apple GPU, free disk, the port, the clone and the server; never Docker or
+Compose. Docker's grid is the one it always was.
+
+### Developer mode
+
+The repository URL and branch, the tools repository URL and branch, the port,
+the network choice and "point every module at this server" count **only when
+Slicer's own developer mode is on** (the `Developer/DeveloperMode` setting, the
+one that shows Reload & Test), read on every use. Outside it they are hidden
+**and ignored**: `deployment()` uses the compiled-in repositories and branches,
+`selectedBind()` answers loopback, `selectedPort()` answers None (the server
+keeps the port it remembers, which is also what makes "Try another port" last),
+and the modules are always pointed at the server that was started. A value saved
+in an earlier developer session decides nothing. The install folder is offered
+once, with the free space, before the first install, and only stated after.
+
+A test preset for a launcher can write `Developer/DeveloperMode` and the branch
+keys into the session's settings (`--python-code`), which is how branches under
+test reach a build used by someone who is not a developer; nothing in the
+extension reads a branch from anywhere else.
+
+### Replacing a server the modules already use
+
+If the modules point at a remote server, starting or using the local one asks
+first (naming that server); "no" changes nothing and starts no job. After "yes"
+the previous address and key are kept (`SlicerCloud/PreviousServerUrl`,
+`PreviousServerToken`, in the same settings file as `ServerTools/ApiToken`) and a
+**Switch back** link restores them. A server on this machine, or none, is
+replaced without a question.
 
 It also may not `pip install` anything, ever, so `server_ctl.py` is standard
 library only on its side too. `find_python()` picks the interpreter to run it
@@ -1753,7 +1825,7 @@ a reverse proxy or a server certificate). A native server on a Mac is the except
 
 ### Native server on a Mac
 
-On Apple silicon (`deploy.prefer_native()`, true also from a Rosetta Slicer)
+On Apple silicon (`deploy.select_backend()`, true also from a Rosetta Slicer)
 `LocalServerDeployment` drives `server_ctl.py --native`: `clone()`,
 `clone_tools()` (SADT-VISOR, beside the install folder), `install_tools()`,
 `up()`. The bind is fixed to `127.0.0.1`. HTTPS is kept by pinning out of band
@@ -1770,14 +1842,20 @@ against that file alone. Contract with `server_ctl.py` (VISOR-serve):
   and `url` as `https://127.0.0.1:<port>`; its own health check must trust
   that certificate file;
 - the panel saves a URL only when `tls.enabled` is true and the pin exists
-  (`deploy.local_client_url`).
+  (`NativeBackend.client_url`, which uses `backends.local_client_url`).
+
+Before any clone the native probe asks git and uv (`find_uv()` looks where the
+server's own `native_tools.find_uv()` will, including `~/.local/bin` which a GUI
+application does not have on its PATH): a missing uv used to be found after two
+clones.
 
 ### Which branch gets deployed
 
 `DEFAULT_REPO_URL` / `DEFAULT_BRANCH` in `deploy.py` are the compiled-in
-defaults; the panel's Advanced box exposes both, and a saved `QSettings` value
-wins over the constant. **Changing the constant therefore does nothing on a
-machine that has already saved a branch** — that is what the field is for.
+defaults; the panel's Advanced box exposes both **in developer mode**, where a
+saved `QSettings` value wins over the constant. **Changing the constant
+therefore does nothing on a developer machine that has already saved a branch**:
+that is what the field is for. Outside developer mode the constant always wins.
 
 The subtle part is the clone, which is created exactly **once**: `clone()`
 returns early when `server_ctl.py` is already there, and `update()` used to

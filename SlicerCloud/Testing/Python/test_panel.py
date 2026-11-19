@@ -238,6 +238,7 @@ except ImportError:
     sys.modules["requests"] = _requests
 
 import SlicerCloud  # noqa: E402
+from SlicerCloudLib import backends  # noqa: E402
 
 
 class SyncJob:
@@ -275,6 +276,8 @@ class SyncJob:
 
 class FakeDeployment:
     """Answers like a machine with docker present and nothing installed."""
+
+    backend = backends.DOCKER
 
     def __init__(self, install_dir=None, repo_url=None, branch=None, **kwargs):
         self.tools_repo_url = kwargs.get("tools_repo_url")
@@ -353,6 +356,11 @@ class PanelTestCase(unittest.TestCase):
         patcher = mock.patch.object(SlicerCloud.deploy, "is_apple_silicon", return_value=False)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # What only this machine can say: not the machine running the tests.
+        for name, value in (("port_in_use", False), ("free_space", 100 * 1024 ** 3)):
+            hostPatch = mock.patch.object(SlicerCloud.deploy, name, return_value=value)
+            hostPatch.start()
+            self.addCleanup(hostPatch.stop)
         SlicerCloud.BackgroundJob = SyncJob
         SlicerCloud.LocalServerDeployment = FakeDeployment
 
@@ -495,7 +503,12 @@ class TestChangingTheInstallFolder(PanelTestCase):
 
 class TestToolsRepository(PanelTestCase):
     """The native server's tools repository and branch: Advanced fields that
-    are remembered like the others and travel to the deployment."""
+    are remembered like the others and travel to the deployment, in developer
+    mode (outside it they are ignored: see TestDeveloperMode)."""
+
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        _QSettings.store["Developer/DeveloperMode"] = True
 
     def test_the_defaults_are_the_compiled_in_ones(self):
         from SlicerCloudLib import deploy
@@ -575,6 +588,7 @@ class TestServerUrlIsHttpsOnly(PanelTestCase):
 class NativeFake(FakeDeployment):
     """The native server on an Apple-silicon Mac: no Docker, a pinned URL."""
 
+    backend = backends.NATIVE
     native = True
     reported = {"url": "https://127.0.0.1:8000", "token": "t", "healthy": True,
                 "tls": {"enabled": True}}
@@ -632,7 +646,7 @@ class TestNativeServerPanel(PanelTestCase):
         widget = self.installed()
         self.assertEqual(widget.deployment().calls,
                          ["require_native_support", "clone", "clone_tools", "install_tools",
-                          ("up", 8000, "127.0.0.1")])
+                          ("up", None, "127.0.0.1")])
         self.assertEqual(DIALOGS["error"], [])
 
     def test_the_client_is_pointed_at_the_pinned_local_address(self):
@@ -658,10 +672,19 @@ class TestNativeServerPanel(PanelTestCase):
 
     def test_the_status_rows_describe_this_backend(self):
         widget = self.panel()
-        self.assertIn("not needed", widget._statusRows["docker"].text)
         self.assertIn("Apple GPU", widget._statusRows["gpu"].text)
         self.assertNotIn("Docker is missing", widget.hintLabel.text)
-        self.assertIn("Install and start", widget.hintLabel.text)
+        self.assertIn("Set up VISOR Local", widget.hintLabel.text)
+        self.assertEqual(widget.installButton.text, "Set up VISOR Local")
+
+    def test_no_row_describes_something_a_mac_does_not_use(self):
+        """Docker, Compose and the container were three rows of 'not needed'."""
+        widget = self.panel()
+        for key in ("docker", "compose", "container"):
+            self.assertFalse(widget._statusRows[key].isVisible(), key)
+            self.assertFalse(widget._statusNames[key].isVisible(), key)
+        for key in ("git", "uv", "gpu", "disk", "port", "clone", "health"):
+            self.assertTrue(widget._statusRows[key].isVisible(), key)
 
 
 class TestDockerMissing(PanelTestCase):
@@ -697,6 +720,8 @@ class TestNetworkAccess(PanelTestCase):
 
     def setUp(self):
         PanelTestCase.setUp(self)
+        # The network choice only counts in developer mode (TestDeveloperMode).
+        _QSettings.store["Developer/DeveloperMode"] = True
         # A fixed set of addresses, so the tests do not depend on whatever
         # interfaces the machine running them happens to have.
         self._realAddresses = SlicerCloud.deploy.host_addresses
@@ -869,7 +894,8 @@ class TestDockerGroup(PanelTestCase):
 
     def test_the_hint_points_at_the_button_that_explains(self):
         widget = self._panelOutsideTheGroup()
-        self.assertIn("Install and start", widget.hintLabel.text)
+        self.assertEqual(widget.installButton.text, "Fix: Show the steps")
+        self.assertIn("Fix: Show the steps", widget.hintLabel.text)
 
 
 def _withGpu(**gpu):
@@ -1058,13 +1084,384 @@ class TestUvIsCheckedBeforeAnythingIsCloned(PanelTestCase):
         widget = self.panel()
         widget.onInstall()
         self.assertEqual(widget.deployment().calls, [])
-        self.assertEqual(len(DIALOGS["error"]), 1)
-        self.assertIn("uv", DIALOGS["error"][0])
-        self.assertIn("astral.sh/uv", DIALOGS["error"][0])
+        self.assertEqual(DIALOGS["error"], [])
+        self.assertEqual(len(DIALOGS["info"]), 1)
+        self.assertIn("uv", DIALOGS["info"][0])
+        self.assertIn("astral.sh/uv", DIALOGS["info"][0])
+        self.assertEqual(widget.installButton.text, "Fix: Install uv")
 
     def test_the_hint_says_it_before_the_press(self):
         widget = self.panel()
         self.assertIn("uv", widget.hintLabel.text)
+
+
+import copy  # noqa: E402
+
+import fixtures  # noqa: E402
+
+LOCAL_URL = "https://127.0.0.1:8000"
+REMOTE_URL = "https://lab.example.org"
+PUBLIC_URL = "https://box.example.ts.net"
+
+
+def serving(status, backend=backends.DOCKER, **members):
+    """A deployment class whose status() is `status` (a fixtures.* dict)."""
+    namespace = {
+        "backend": backend,
+        "status": lambda self, check_remote=False, progress_cb=None: copy.deepcopy(status),
+        "token": lambda self, progress_cb=None: "the-token",
+        "up": lambda self, progress_cb=None, force_recreate=False, port=None, bind=None: (
+            self.calls.append(("up", port, bind)) or {"url": LOCAL_URL, "token": "t", "healthy": True}),
+    }
+    namespace.update(members)
+    return type("Serving", (FakeDeployment,), namespace)
+
+
+def visible(widget):
+    """Which of the panel's buttons are on screen, by name."""
+    names = ("installButton", "updateButton", "stopButton", "useButton", "portButton",
+             "refreshButton", "checkUpdateButton", "showLogsButton", "switchBackButton", "gpuButton",
+             "cancelButton")
+    return {name for name in names if getattr(widget, name).isVisible()}
+
+
+class TestTheStateDecidesTheButtons(PanelTestCase):
+    """The panel used to show every button in every state: 'Start server' beside a
+    running server. Hidden, not greyed, from the state alone."""
+
+    def show(self, status, backend=backends.DOCKER, client=None):
+        SlicerCloud.LocalServerDeployment = serving(status, backend)
+        if client:
+            SlicerCloud.get_client().configure(server_url=client, token="x")
+        return self.panel()
+
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        client = SlicerCloud.get_client()
+        self.addCleanup(client.configure, server_url=client.server_url, token=client.token)
+        SlicerCloud.get_client().configure(server_url="https://set-your-server.invalid", token="")
+
+    def test_a_running_docker_server_has_no_start_button(self):
+        widget = self.show(fixtures.docker(server={"public_url": PUBLIC_URL}), client=PUBLIC_URL)
+        self.assertNotIn("installButton", visible(widget))
+        self.assertIn("stopButton", visible(widget))
+
+    def test_a_running_native_server_has_no_start_button(self):
+        widget = self.show(fixtures.native(), backends.NATIVE, client=LOCAL_URL)
+        self.assertEqual(visible(widget),
+                         {"stopButton", "refreshButton", "checkUpdateButton", "showLogsButton"})
+        self.assertEqual(widget._statusBadge.text, "Server: online")
+
+    def test_nothing_installed_offers_only_the_install(self):
+        widget = self.show(fixtures.docker_uninstalled())
+        self.assertEqual(visible(widget), {"installButton", "refreshButton"})
+        self.assertEqual(widget.installButton.text, "Install and start")
+
+    def test_a_stopped_server_offers_start_and_hides_stop(self):
+        widget = self.show(fixtures.native(container={"running": False}, server={"healthy": False}),
+                           backends.NATIVE)
+        self.assertIn("installButton", visible(widget))
+        self.assertNotIn("stopButton", visible(widget))
+        self.assertEqual(widget.installButton.text, "Start VISOR Local")
+
+    def test_update_is_offered_only_when_there_is_something_to_update_to(self):
+        behind = self.show(fixtures.native(clone={"behind": 2}), backends.NATIVE, client=LOCAL_URL)
+        self.assertIn("updateButton", visible(behind))
+        current = self.show(fixtures.native(), backends.NATIVE, client=LOCAL_URL)
+        self.assertNotIn("updateButton", visible(current))
+
+    def test_a_running_server_the_modules_do_not_use_offers_to_be_used(self):
+        widget = self.show(fixtures.native(), backends.NATIVE, client=REMOTE_URL)
+        self.assertIn("useButton", visible(widget))
+        self.assertEqual(widget.useButton.text, "Use VISOR Local")
+        here = self.show(fixtures.native(), backends.NATIVE, client=LOCAL_URL)
+        self.assertNotIn("useButton", visible(here))
+
+    def test_a_missing_prerequisite_offers_its_fix_and_nothing_else(self):
+        widget = self.show(fixtures.native_uninstalled(uv=None), backends.NATIVE)
+        self.assertEqual(visible(widget), {"installButton", "refreshButton"})
+        self.assertEqual(widget.installButton.text, "Fix: Install uv")
+
+    def test_only_cancel_is_left_while_installing(self):
+        SyncJob.defer = True
+        widget = self.show(fixtures.native_uninstalled(), backends.NATIVE)
+        SyncJob.pending[0].finish()
+        SyncJob.pending = []
+        widget.onInstall()
+        self.assertEqual(visible(widget), {"cancelButton"})
+        SyncJob.pending[0].finish()
+        self.assertNotIn("cancelButton", visible(widget))
+        self.assertIn("refreshButton", visible(widget))
+
+    def test_the_buttons_come_back_when_a_job_fails(self):
+        class Failing(serving(fixtures.native_uninstalled(), backends.NATIVE)):
+            def require_native_support(self, progress_cb=None):
+                raise SlicerCloud.DeploymentError("nope")
+
+        SlicerCloud.LocalServerDeployment = Failing
+        widget = self.panel()
+        widget.onInstall()
+        self.assertIn("installButton", visible(widget))
+        self.assertNotIn("cancelButton", visible(widget))
+
+    def test_the_gpu_link_shows_in_a_state_that_can_use_it(self):
+        widget = self.show(fixtures.docker(container={"running": False}, server={"healthy": False},
+                                           gpu={"nvidia_smi": True, "nvidia_runtime": False}))
+        self.assertIn("gpuButton", visible(widget))
+
+    def test_every_backend_every_state_has_a_non_empty_hint(self):
+        for backend, status in ((backends.DOCKER, fixtures.docker()),
+                                (backends.NATIVE, fixtures.native()),
+                                (backends.DOCKER, fixtures.docker_uninstalled()),
+                                (backends.NATIVE, fixtures.native_uninstalled())):
+            widget = self.show(status, backend)
+            self.assertTrue(widget.hintLabel.text, (backend.name, status.get("cloned")))
+
+    def test_nothing_a_native_user_can_read_mentions_docker(self):
+        for status in (fixtures.native(), fixtures.native_uninstalled(),
+                       fixtures.native(container={"running": False}, server={"healthy": False}),
+                       fixtures.native_uninstalled(uv=None)):
+            widget = self.show(status, backends.NATIVE)
+            said = [widget.hintLabel.text, widget._serverBox.text, widget.installButton.text,
+                    widget.installButton.toolTip(), widget.updateButton.toolTip(),
+                    widget.stopOnExitCheck.toolTip(), widget.bindCombo.toolTip()]
+            for key, label in widget._statusRows.items():
+                if label.isVisible():
+                    said.append(label.text)
+            for text in said:
+                self.assertNotIn("docker", text.lower(), text)
+                self.assertNotIn("container", text.lower(), text)
+
+
+class TestInstallFolder(PanelTestCase):
+    def folder(self, status, backend=backends.DOCKER):
+        SlicerCloud.LocalServerDeployment = serving(status, backend)
+        return self.panel()
+
+    def test_it_is_offered_with_the_free_space_before_the_first_install(self):
+        widget = self.folder(fixtures.native_uninstalled(), backends.NATIVE)
+        self.assertTrue(widget.installDirEdit.isVisible())
+        self.assertIn("100.0 GB free", widget.installDirNote.text)
+
+    def test_once_installed_it_is_stated_not_offered(self):
+        widget = self.folder(fixtures.native(), backends.NATIVE)
+        self.assertFalse(widget.installDirEdit.isVisible())
+        self.assertIn("Installed in", widget.installDirNote.text)
+
+    def test_developer_mode_keeps_it_editable(self):
+        _QSettings.store["Developer/DeveloperMode"] = True
+        widget = self.folder(fixtures.native(), backends.NATIVE)
+        self.assertTrue(widget.installDirEdit.isVisible())
+
+
+class TestPortTaken(PanelTestCase):
+    def test_the_panel_offers_another_port_and_starts_there(self):
+        status = fixtures.native(container={"running": False}, server={"healthy": False})
+        SlicerCloud.LocalServerDeployment = serving(status, backends.NATIVE)
+        with mock.patch.object(SlicerCloud.deploy, "port_in_use", return_value=True), \
+                mock.patch.object(SlicerCloud.deploy, "find_free_port", return_value=8003):
+            widget = self.panel()
+            self.assertEqual(visible(widget) & {"portButton", "installButton"}, {"portButton"})
+            self.assertIn("another program", widget._statusRows["port"].text)
+            widget.onTryAnotherPort()
+        self.assertIn(("up", 8003, "127.0.0.1"), widget.deployment().calls)
+
+    def test_no_free_port_is_an_error_not_a_job(self):
+        status = fixtures.native(container={"running": False}, server={"healthy": False})
+        SlicerCloud.LocalServerDeployment = serving(status, backends.NATIVE)
+        with mock.patch.object(SlicerCloud.deploy, "find_free_port", return_value=None):
+            widget = self.panel()
+            widget.onTryAnotherPort()
+        self.assertEqual(len(DIALOGS["error"]), 1)
+        self.assertEqual(widget.deployment().calls, [])
+
+
+class TestReplacingAServer(PanelTestCase):
+    """A lab server a user already depends on must not be overwritten by pressing
+    one button: explicit confirmation, then replacement, and a way back."""
+
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        client = SlicerCloud.get_client()
+        self.addCleanup(client.configure, server_url=client.server_url, token=client.token)
+        client.configure(server_url=REMOTE_URL, token="lab-token")
+        SlicerCloud.LocalServerDeployment = serving(
+            fixtures.docker(server={"public_url": PUBLIC_URL}))
+
+    def test_it_asks_naming_the_server_in_use(self):
+        widget = self.panel()
+        widget.onUseHere()
+        (question,) = DIALOGS["confirm"]
+        self.assertIn(REMOTE_URL, question)
+        self.assertIn("Switch back", question)
+
+    def test_yes_replaces_it_and_keeps_the_previous_one(self):
+        widget = self.panel()
+        widget.onUseHere()
+        self.assertEqual(SlicerCloud.get_client().server_url, PUBLIC_URL)
+        self.assertEqual(SlicerCloud.get_client().token, "the-token")
+        self.assertEqual(_QSettings.store["SlicerCloud/PreviousServerUrl"], REMOTE_URL)
+        self.assertEqual(_QSettings.store["SlicerCloud/PreviousServerToken"], "lab-token")
+
+    def test_no_changes_nothing_and_runs_no_job(self):
+        ANSWER["yes"] = False
+        widget = self.panel()
+        widget.onUseHere()
+        self.assertEqual(SlicerCloud.get_client().server_url, REMOTE_URL)
+        self.assertNotIn("SlicerCloud/PreviousServerUrl", _QSettings.store)
+        self.assertIn("nothing was changed", "\n".join(widget.logView.lines).lower())
+
+    def test_install_asks_too_and_no_means_no_job(self):
+        ANSWER["yes"] = False
+        SlicerCloud.LocalServerDeployment = serving(fixtures.docker_uninstalled())
+        widget = self.panel()
+        widget.onInstall()
+        self.assertEqual(len(DIALOGS["confirm"]), 1)
+        self.assertEqual(widget.deployment().calls, [])
+
+    def test_switch_back_restores_the_previous_server(self):
+        widget = self.panel()
+        widget.onUseHere()
+        self.assertIn("switchBackButton", visible(widget))
+        widget.onSwitchBack()
+        self.assertEqual(SlicerCloud.get_client().server_url, REMOTE_URL)
+        self.assertEqual(SlicerCloud.get_client().token, "lab-token")
+        self.assertEqual(_QSettings.store["ServerTools/ServerUrl"], REMOTE_URL)
+        self.assertNotIn("switchBackButton", visible(widget))
+
+    def test_nothing_is_asked_when_no_server_is_set_or_it_is_this_computer(self):
+        client = SlicerCloud.get_client()
+        for url in ("https://set-your-server.invalid", "https://127.0.0.1:9000"):
+            client.configure(server_url=url, token="")
+            _reset_dialogs()
+            self.panel().onUseHere()
+            self.assertEqual(DIALOGS["confirm"], [], url)
+        self.assertNotIn("SlicerCloud/PreviousServerUrl", _QSettings.store)
+
+    def test_already_pointing_here_asks_nothing(self):
+        SlicerCloud.get_client().configure(server_url=PUBLIC_URL, token="x")
+        self.panel().onUseHere()
+        self.assertEqual(DIALOGS["confirm"], [])
+
+    def test_a_server_with_no_usable_address_is_not_saved(self):
+        SlicerCloud.LocalServerDeployment = serving(fixtures.docker())
+        widget = self.panel()
+        widget.onUseHere()
+        self.assertEqual(SlicerCloud.get_client().server_url, REMOTE_URL)
+        self.assertTrue(any("no public address" in text for text in DIALOGS["warning"]))
+
+
+class TestDeveloperMode(PanelTestCase):
+    """Advanced fields count only with Slicer's own developer mode: outside it
+    they are ignored, not just hidden, even when saved from an earlier session."""
+
+    FIELDS = {
+        "SlicerCloud/RepoUrl": "https://example.org/fork/VISOR-serve.git",
+        "SlicerCloud/Branch": "feat/test",
+        "SlicerCloud/ToolsRepoUrl": "https://example.org/fork/SADT-VISOR.git",
+        "SlicerCloud/ToolsBranch": "feat/tools-test",
+        "SlicerCloud/Port": 8123,
+        "SlicerCloud/BindAddress": "",
+    }
+
+    def filled(self, developer):
+        _QSettings.store.update(self.FIELDS)
+        if developer:
+            _QSettings.store["Developer/DeveloperMode"] = True
+        return self.panel()
+
+    def test_outside_developer_mode_the_saved_fields_decide_nothing(self):
+        from SlicerCloudLib import deploy
+        d = self.filled(False).deployment()
+        self.assertEqual((d.repo_url, d.branch), (deploy.DEFAULT_REPO_URL, deploy.DEFAULT_BRANCH))
+        self.assertEqual((d.tools_repo_url, d.tools_branch),
+                         (deploy.DEFAULT_TOOLS_REPO_URL, deploy.DEFAULT_TOOLS_BRANCH))
+
+    def test_outside_developer_mode_even_a_value_typed_now_is_ignored(self):
+        from SlicerCloudLib import deploy
+        widget = self.filled(False)
+        widget.branchEdit.text = "typed-just-now"
+        widget.toolsBranchEdit.text = "typed-too"
+        d = widget.deployment()
+        self.assertEqual((d.branch, d.tools_branch), (deploy.DEFAULT_BRANCH, deploy.DEFAULT_TOOLS_BRANCH))
+
+    def test_inside_developer_mode_they_are_used(self):
+        d = self.filled(True).deployment()
+        self.assertEqual(d.repo_url, self.FIELDS["SlicerCloud/RepoUrl"])
+        self.assertEqual(d.branch, "feat/test")
+        self.assertEqual(d.tools_repo_url, self.FIELDS["SlicerCloud/ToolsRepoUrl"])
+        self.assertEqual(d.tools_branch, "feat/tools-test")
+
+    def test_the_port_and_the_network_choice_are_ignored_outside_it(self):
+        widget = self.filled(False)
+        self.assertIsNone(widget.selectedPort())
+        self.assertEqual(widget.selectedBind(), "127.0.0.1")
+        inside = self.filled(True)
+        self.assertEqual(inside.selectedPort(), 8123)
+
+    def test_the_advanced_box_is_shown_in_developer_mode_only(self):
+        self.assertFalse(self.panel()._advanced.isVisible())
+        _QSettings.store["Developer/DeveloperMode"] = True
+        self.assertTrue(self.panel()._advanced.isVisible())
+
+    def test_the_tools_rows_exist_only_for_a_backend_that_has_tools(self):
+        _QSettings.store["Developer/DeveloperMode"] = True
+        docker = self.panel()
+        self.assertFalse(docker.toolsBranchEdit in [w for w in docker._toolsRows if w.isVisible()])
+        SlicerCloud.LocalServerDeployment = NativeFake
+        native = self.panel()
+        self.assertTrue(all(w.isVisible() for w in native._toolsRows))
+        self.assertFalse(any(w.isVisible() for w in native._bindRows))
+
+    def test_switching_developer_mode_while_the_panel_is_open_takes_effect(self):
+        from SlicerCloudLib import deploy
+        widget = self.panel()
+        widget.branchEdit.text = "feat/test"
+        self.assertEqual(widget.deployment().branch, deploy.DEFAULT_BRANCH)
+        _QSettings.store["Developer/DeveloperMode"] = True
+        widget.enter()
+        self.assertEqual(widget.deployment().branch, "feat/test")
+        self.assertTrue(widget._advanced.isVisible())
+        _QSettings.store["Developer/DeveloperMode"] = False
+        widget.enter()
+        self.assertEqual(widget.deployment().branch, deploy.DEFAULT_BRANCH)
+        self.assertFalse(widget._advanced.isVisible())
+
+    def test_install_outside_developer_mode_sends_no_port_and_loopback(self):
+        SlicerCloud.LocalServerDeployment = NativeFake
+        widget = self.filled(False)
+        widget.onInstall()
+        self.assertEqual(widget.deployment().calls[-1], ("up", None, "127.0.0.1"))
+
+    def test_install_in_developer_mode_sends_the_port_chosen(self):
+        SlicerCloud.LocalServerDeployment = NativeFake
+        widget = self.filled(True)
+        widget.onInstall()
+        self.assertEqual(widget.deployment().calls[-1], ("up", 8123, "127.0.0.1"))
+
+    def test_the_point_every_module_choice_counts_only_in_developer_mode(self):
+        client = SlicerCloud.get_client()
+        self.addCleanup(client.configure, server_url=client.server_url, token=client.token)
+        client.configure(server_url="https://set-your-server.invalid", token="")
+        SlicerCloud.LocalServerDeployment = serving(
+            fixtures.docker_uninstalled(),
+            up=lambda self, progress_cb=None, force_recreate=False, port=None, bind=None: {
+                "url": LOCAL_URL, "token": "t", "healthy": True, "public_url": PUBLIC_URL})
+        widget = self.panel()
+        widget.useServerCheck.checked = False
+        widget.onInstall()
+        self.assertEqual(client.server_url, PUBLIC_URL)
+        _QSettings.store["Developer/DeveloperMode"] = True
+        client.configure(server_url="https://set-your-server.invalid", token="")
+        widget.onInstall()
+        self.assertEqual(client.server_url, "https://set-your-server.invalid")
+
+    def test_a_saved_bind_survives_a_session_outside_developer_mode(self):
+        """Saving must keep what the combo holds, not the loopback it is forced to."""
+        _QSettings.store["SlicerCloud/BindAddress"] = ""
+        widget = self.panel()
+        widget._saveSettings()
+        self.assertEqual(_QSettings.store["SlicerCloud/BindAddress"], "")
 
 
 if __name__ == "__main__":
