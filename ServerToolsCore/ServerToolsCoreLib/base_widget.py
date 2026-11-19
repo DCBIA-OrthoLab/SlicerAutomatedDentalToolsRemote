@@ -27,10 +27,17 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
-from . import (config, console, design, digest, formgen, is_file_type, is_log_event,
+from . import (config, console, design, digest, formgen, gate, is_file_type, is_log_event,
                new_run_id, slicer_io, testfile_entries)
 from .errors import RunCancelled, ServerToolError, plain_text
 from .worker import BackgroundJob
+
+
+def _save_server_settings(url, token, timeout) -> None:
+    """Persist the address every module uses. Imported here, not at the top:
+    settings_qt needs the real `qt.QSettings`."""
+    from .settings_qt import save_overrides
+    save_overrides(url, token, timeout)
 
 logger = logging.getLogger("ServerToolsCore.base_widget")
 
@@ -567,6 +574,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.uiWidget = qt.QWidget()
         self.layout.addWidget(self.uiWidget)
+        # Beside the panel, not inside it: when there is nothing to talk to, the
+        # WHOLE panel is hidden and this is shown instead. One place for all
+        # tool modules, and nothing in the form code knows about it.
+        self._gateCard = self._buildGateCard()
+        self.layout.addWidget(self._gateCard)
         rootLayout = qt.QVBoxLayout(self.uiWidget)
 
         self._statusBadge = design.status_badge()
@@ -636,6 +648,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeRemovedEvent, self._onSceneNodesChanged)
 
         self._checkCanApply()
+        design.apply(self._gateCard)
+        self._applyGate()
 
         # Also kick off the health check here, not only in enter(): a module
         # reload re-instantiates the widget and calls setup() but never enter()
@@ -671,9 +685,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._downloadJob:
             self._downloadJob.cancel()
             self._downloadJob = None
+        for name in ("_gateJob", "_probeJob"):
+            job = getattr(self, name, None)
+            if job:
+                job.cancel()
+                setattr(self, name, None)
         self._removeOwnTestFiles()
 
     def enter(self) -> None:
+        # The server may have been set, or the local one started, since the last
+        # visit; and a failed automatic start is tried again once per visit.
+        self._gateFailed = False
+        if getattr(self, "_gateCard", None) is not None:
+            self._applyGate()
         if self.uiWidget:
             design.apply(self.uiWidget)
         # The fold the build asked for, applied now that the panel has a parent
@@ -4148,6 +4172,204 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         logger.info(summary)
 
     # ------------------------------------------------------------------
+    # No server to talk to: the card that replaces the form
+    # ------------------------------------------------------------------
+    #
+    # Everything here follows one rule: the card is a function of the
+    # configured ADDRESS (gate.classify), never of a network answer, and a
+    # server somebody configured elsewhere is never started around or replaced.
+
+    def _buildGateCard(self):
+        """The card, built once, hidden until needed. Its widgets are attributes
+        so a test can read exactly what a person would see."""
+        self._gateMode = None            # None, "unset", "starting" or "failed"
+        self._gateFailed = False         # a start was already tried during this visit
+        self._gateStarting = False       # a start is in flight
+        self._gateProbing = False        # the "is it installed" question is in flight
+        self._gateJob = None
+        self._probeJob = None
+        self._gateLocal = None           # what the provider snapshotted, once known
+        self._gateLocalInstalled = False
+        self._gatePointClient = False    # a start from the card sets the address
+
+        card = qt.QWidget()
+        layout = qt.QVBoxLayout(card)
+        self._gateTitle = design.section_title(_(gate.TITLE_UNSET))
+        self._gateBody = design.hint_label(_(gate.BODY_UNSET))
+        self._gateConnect = design.secondary_button(_(gate.CONNECT))
+        self._gateCompute = design.primary_button(_(gate.COMPUTE_HERE))
+        self._gateStart = design.primary_button(_(gate.START_LOCAL))
+        self._gateOpenLocal = design.secondary_button(_(gate.OPEN_LOCAL))
+        self._gateTryAgain = design.primary_button(_(gate.TRY_AGAIN))
+        for widget in (self._gateTitle, self._gateBody, self._gateStart, self._gateCompute,
+                       self._gateConnect, self._gateTryAgain, self._gateOpenLocal):
+            layout.addWidget(widget)
+        layout.addStretch(1)
+        self._gateConnect.clicked.connect(lambda *_a: slicer.util.selectModule("ServerToolsSettings"))
+        self._gateCompute.clicked.connect(lambda *_a: slicer.util.selectModule("SlicerCloud"))
+        self._gateOpenLocal.clicked.connect(lambda *_a: slicer.util.selectModule("SlicerCloud"))
+        self._gateStart.clicked.connect(lambda *_a: self._onGateStart())
+        self._gateTryAgain.clicked.connect(lambda *_a: self._onGateTryAgain())
+        card.setVisible(False)
+        return card
+
+    @staticmethod
+    def _slicerCloudAvailable() -> bool:
+        modules = getattr(slicer, "modules", None)
+        return modules is None or hasattr(modules, "slicercloud")
+
+    def _showGate(self, mode, reason: str = "") -> None:
+        """Show the card in `mode`, or (None) the panel."""
+        self._gateMode = mode
+        for button in (self._gateConnect, self._gateCompute, self._gateStart,
+                       self._gateOpenLocal, self._gateTryAgain):
+            button.setVisible(False)
+        if mode is None:
+            self._gateCard.setVisible(False)
+            self.uiWidget.setVisible(True)
+            return
+        if mode == "unset":
+            self._gateTitle.setText(_(gate.TITLE_UNSET))
+            self._gateBody.setText(_(gate.BODY_INSTALLED) if self._gateLocalInstalled else _(gate.BODY_UNSET))
+            self._gateConnect.setVisible(True)
+            self._gateCompute.setVisible(self._slicerCloudAvailable())
+            self._gateStart.setVisible(self._gateLocalInstalled)
+        elif mode == "starting":
+            self._gateTitle.setText(_(gate.TITLE_STARTING))
+            self._gateBody.setText(_(gate.BODY_STARTING))
+        elif mode == "failed":
+            self._gateTitle.setText(_(gate.TITLE_FAILED))
+            self._gateBody.setText(_(gate.BODY_FAILED).format(reason=reason))
+            self._gateOpenLocal.setVisible(self._slicerCloudAvailable())
+            self._gateTryAgain.setVisible(True)
+        self.uiWidget.setVisible(False)
+        self._gateCard.setVisible(True)
+
+    def _applyGate(self) -> None:
+        """Show the card or the panel for the address configured right now."""
+        kind = gate.classify(self.client.server_url)
+        if kind == gate.UNSET:
+            if self._gateMode != "unset":
+                self._showGate("unset")
+            self._probeLocalInstall()
+            return
+        if self._gateMode == "unset" or kind == gate.OK:
+            was = self._gateMode
+            self._showGate(None)
+            if was == "unset":
+                # The form was built while nothing was set: it holds an error.
+                self._buildForm(force_refresh=True)
+
+    def _probeLocalInstall(self) -> None:
+        """Is a local server installed? Asked once the card is up, off the main
+        thread (it reads a folder and may run a status command)."""
+        provider = gate.provider()
+        if provider is None or self._gateProbing:
+            return
+        local = provider.snapshot()
+        self._gateProbing = True
+
+        def done(installed):
+            self._gateProbing = False
+            self._probeJob = None
+            self._gateLocal = local
+            self._gateLocalInstalled = bool(installed)
+            if self._gateMode == "unset":
+                self._showGate("unset")
+
+        def failed(_exc):
+            self._gateProbing = False
+            self._probeJob = None
+
+        self._probeJob = BackgroundJob(lambda _progress: local.installed(), on_success=done, on_error=failed)
+        self._probeJob.start()
+
+    def _maybeAutostart(self, health_ok: bool) -> bool:
+        """The health check came back. True when this started something and the
+        caller should stop: the local server is down, and only then."""
+        if self._gateStarting or self._gateFailed or self._gateMode == "starting":
+            return self._gateMode == "starting"
+        if health_ok or gate.classify(self.client.server_url) != gate.LOCAL:
+            return False
+        provider = gate.provider()
+        if provider is None:
+            return False
+        local = provider.snapshot()
+        self._gateStarting = True
+        # Once per visit, whatever the outcome: a start that "worked" while the
+        # server still does not answer must not loop (start, check, start...).
+        self._gateFailed = True
+        self._gatePointClient = False
+
+        def check_then_start(_progress):
+            if not gate.may_autostart(self.client.server_url, False, local.installed()):
+                return None
+            return gate.start_serialized(local)
+
+        self._launchStart(check_then_start, installed_first=True)
+        return False
+
+    def _onGateStart(self) -> None:
+        local = self._gateLocal
+        if local is None or self._gateStarting:
+            return
+        self._gateStarting = True
+        self._gateFailed = True  # attempted: the health check that follows must not start it again
+        self._gatePointClient = True
+        self._showGate("starting")
+        self._launchStart(lambda _progress: gate.start_serialized(local), installed_first=False)
+
+    def _onGateTryAgain(self) -> None:
+        self._gateFailed = False
+        self._gateStarting = False
+        if gate.classify(self.client.server_url) == gate.UNSET and self._gateLocal is not None:
+            # Started from the card: there is no address yet for a health check
+            # to look at, so the same start is asked again.
+            self._onGateStart()
+            return
+        self._refreshServerStatus()
+
+    def _launchStart(self, target, installed_first: bool) -> None:
+        def done(result):
+            self._gateStarting = False
+            self._gateJob = None
+            if result is None:
+                # Nothing installed here: the panel stays as it was.
+                self._showGate(None) if self._gateMode == "starting" else None
+                return
+            if self._gatePointClient:
+                url = result.get("url")
+                if not url:
+                    # The server runs but publishes no address this client may
+                    # use: say so rather than guess one.
+                    self._showGate("failed", reason=result.get("no_url_message")
+                                   or _("VISOR Local is running but gave no address to use."))
+                    return
+                token = result.get("token", self.client.token)
+                self.client.configure(server_url=url, token=token)
+                _save_server_settings(url, token, self.client.timeout)
+            self._showGate(None)
+            self._buildForm(force_refresh=True)
+            self._refreshServerStatus()
+
+        def failed(exc):
+            self._gateStarting = False
+            self._gateJob = None
+            self._showGate("failed", reason=plain_text(str(exc)))
+
+        if installed_first:
+            # The card only appears once an install is known to exist, so a
+            # stale address with nothing behind it never flashes it.
+            def first_done(result):
+                done(result)
+
+            self._showGate("starting")
+            self._gateJob = BackgroundJob(target, on_success=first_done, on_error=failed)
+        else:
+            self._gateJob = BackgroundJob(target, on_success=done, on_error=failed)
+        self._gateJob.start()
+
+    # ------------------------------------------------------------------
     # Server status banner
     # ------------------------------------------------------------------
 
@@ -4174,6 +4396,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._statusJob = None
         if self._statusBadge:
             design.update_status_badge(self._statusBadge, ok)
+        if self._maybeAutostart(ok):
+            return
 
         # The panel is built from the schema, once. If the server was down when
         # this module was opened, all it holds is an error label — and the

@@ -25,6 +25,7 @@ set(MODULE_PYTHON_SCRIPTS
   ServerToolsCoreLib/base_widget.py
   ServerToolsCoreLib/settings_qt.py
   ServerToolsCoreLib/tls.py
+  ServerToolsCoreLib/gate.py
   )
 
 set(MODULE_PYTHON_RESOURCES
