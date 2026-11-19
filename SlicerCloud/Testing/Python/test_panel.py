@@ -1637,3 +1637,41 @@ class TestNativeSupportIsCheckedFirst(PanelTestCase):
         widget.onInstall()
         self.assertIn("no native support", DIALOGS["error"][0])
         self.assertEqual(widget.deployment().calls, [])
+
+
+class TestTheToolPanelsCanStartTheLocalServer(PanelTestCase):
+    """SlicerCloud hands ServerToolsCore a provider at startup; the tool panels
+    use it to offer Start and to restart a server that stopped with Slicer."""
+
+    def setUp(self):
+        super().setUp()
+        from ServerToolsCoreLib import gate
+        self.gate = gate
+        self.addCleanup(gate.register_provider, None)
+        gate.register_provider(None)
+        # The real class: what is under test is what it is built WITH.
+        self.addCleanup(setattr, SlicerCloud, "LocalServerDeployment", SlicerCloud.LocalServerDeployment)
+        SlicerCloud.LocalServerDeployment = SlicerCloud.deploy.LocalServerDeployment
+
+    def test_the_module_registers_a_provider(self):
+        SlicerCloud.SlicerCloud(types.SimpleNamespace())
+        self.assertIsNotNone(self.gate.provider())
+
+    def test_the_deployment_follows_the_saved_install_folder(self):
+        _QSettings.store["SlicerCloud/InstallDir"] = "/tmp/where-it-lives"
+        self.assertEqual(SlicerCloud.deploymentFromSettings().install_dir, "/tmp/where-it-lives")
+
+    def test_the_default_folder_when_nothing_was_saved(self):
+        self.assertEqual(SlicerCloud.deploymentFromSettings().install_dir, SlicerCloud.DEFAULT_INSTALL_DIR)
+
+    def test_outside_developer_mode_a_saved_branch_decides_nothing(self):
+        _QSettings.store["SlicerCloud/Branch"] = "someone/experiment"
+        _QSettings.store["SlicerCloud/RepoUrl"] = "https://example.org/fork.git"
+        deployment = SlicerCloud.deploymentFromSettings()
+        self.assertEqual(deployment.branch, SlicerCloud.DEFAULT_BRANCH)
+        self.assertEqual(deployment.repo_url, SlicerCloud.DEFAULT_REPO_URL)
+
+    def test_in_developer_mode_it_uses_them(self):
+        _QSettings.store["Developer/DeveloperMode"] = True
+        _QSettings.store["SlicerCloud/Branch"] = "someone/experiment"
+        self.assertEqual(SlicerCloud.deploymentFromSettings().branch, "someone/experiment")

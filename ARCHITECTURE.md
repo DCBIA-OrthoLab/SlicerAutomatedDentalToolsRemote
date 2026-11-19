@@ -35,6 +35,7 @@ SlicerAutomatedDentalTools/
 │       ├── client.py                       # ToolServerClient — the only class that speaks HTTP
 │       ├── transfer.py                     # parallel chunked upload / ranged download of big files
 │       ├── tls.py                          # https:// only, publicly-signed certificates only
+│       ├── gate.py                         # UNSET/LOCAL/OK from the address, and when to autostart. No slicer, no qt.
 │       ├── errors.py                       # ServerToolError + HTTP status → message mapping
 │       ├── digest.py                       # what a reviewer changed in a folder, by content not mtime
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
@@ -58,6 +59,7 @@ SlicerAutomatedDentalTools/
 │       ├── __init__.py
 │       ├── backends.py                     # Docker / Native: checks, plan, args, texts. No slicer, no qt.
 │       ├── state.py                        # classify(): the server's state. No slicer, no qt.
+│       ├── autostart.py                    # what the tool panels may ask: installed? start. No slicer, no qt.
 │       └── deploy.py                       # clone + drive scripts/server_ctl.py. No slicer, no qt.
 ├── SurgMovPred/
 │   ├── CMakeLists.txt
@@ -97,7 +99,7 @@ in the repo uses.
 
 ## Dependency rule — enforced, not just documented
 
-> `client.py`, `transfer.py`, `errors.py` and `digest.py` import neither
+> `client.py`, `transfer.py`, `errors.py`, `digest.py` and `gate.py` import neither
 > `slicer` nor `qt`. `base_widget.py`, `formgen.py`, `design.py`,
 > `slicer_io.py`, `worker.py` import neither `requests` nor anything HTTP.
 
@@ -1765,6 +1767,44 @@ A test preset for a launcher can write `Developer/DeveloperMode` and the branch
 keys into the session's settings (`--python-code`), which is how branches under
 test reach a build used by someone who is not a developer; nothing in the
 extension reads a branch from anywhere else.
+
+### No server set: one card for every tool module
+
+A tool module opened before any server is set used to show its whole form, an
+error line and a red badge. `ServerToolWidgetBase.setup()` now builds a card
+**beside** the panel (in the module's own layout, not inside `uiWidget`) and
+`_applyGate()` decides which of the two is shown, so the sixteen tool modules
+get it from one place and none can opt out (a test reads their source: none
+overrides `setup`, `enter`, `_onStatusChecked` or `_buildForm`).
+
+`ServerToolsCoreLib/gate.py` holds the rules, with no `qt` and no `slicer`:
+
+- `classify(url)` is `UNSET` (the `.invalid` placeholder, by its name, so no DNS
+  query is made for it), `LOCAL` (a loopback address) or `OK`. Nothing is read
+  from the network, and a malformed address is `OK` (the settings panel reports it).
+- The card says "No server is set" with two buttons, "Connect to a server"
+  (Server Tools Settings) and "Compute on this computer" (SlicerCloud, hidden if
+  that module is absent). When a local install is found it says so and adds
+  "Start VISOR Local".
+- `may_autostart(url, health_ok, installed)` is true **only** for a loopback
+  address that does not answer while a local install exists. A remote address,
+  reachable or not, is never started around or replaced; the placeholder starts
+  nothing by itself (the card offers Start instead, which points the modules at
+  the server it started and saves that address).
+- That automatic start runs when the health check of a panel comes back red. It
+  is tried once per visit (`enter()` resets it), so a start that "worked" while
+  the server still does not answer cannot loop, and a failure shows "VISOR Local
+  did not start" with the reason, "Open VISOR Local" and "Try again". The server
+  side is idempotent (`up` over our own server answers `already_running`), and a
+  process-wide lock makes several panels take turns.
+
+`ServerToolsCore` never imports SlicerCloud. At startup the SlicerCloud module
+registers a provider (`gate.register_provider(autostart.Provider(...))`); a panel
+asks it for a snapshot on the main thread and then calls `installed()` and
+`start()` on a worker. `SlicerCloudLib/autostart.py` implements them over the
+same deployment object the panel uses: `start()` never passes a port or a bind
+(the install remembers both, which keeps a port chosen with "Try another port"),
+and it never changes which server the modules use unless the caller asks.
 
 ### Replacing a server the modules already use
 

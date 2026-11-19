@@ -13,6 +13,7 @@ set(MODULE_PYTHON_SCRIPTS
   SlicerCloudLib/deploy.py
   SlicerCloudLib/local_cert.py
   SlicerCloudLib/state.py
+  SlicerCloudLib/autostart.py
   )
 
 # No icon: it uses Slicer's default one.

@@ -37,3 +37,9 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_state
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+add_test(
+  NAME SlicerCloud_test_autostart
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_autostart
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )

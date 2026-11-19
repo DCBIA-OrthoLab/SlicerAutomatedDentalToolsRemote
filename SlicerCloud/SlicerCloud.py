@@ -26,7 +26,8 @@ from ServerToolsCoreLib.client import checked_server_url
 from ServerToolsCoreLib.settings_qt import notify_uploads_are_not_deidentified, save_overrides
 from ServerToolsCoreLib.errors import plain_text
 from ServerToolsCoreLib.worker import BackgroundJob
-from SlicerCloudLib import backends, deploy
+from ServerToolsCoreLib import gate
+from SlicerCloudLib import autostart, backends, deploy
 from SlicerCloudLib import state as serverState
 from SlicerCloudLib.deploy import (
     DEFAULT_BRANCH,
@@ -108,6 +109,34 @@ def _qt_get(obj, name):
     """
     value = getattr(obj, name)
     return value() if callable(value) else value
+
+
+def _developerModeOn() -> bool:
+    """Slicer's own developer mode (the setting that shows Reload & Test)."""
+    raw = qt.QSettings().value(_KEY_DEVELOPER_MODE)
+    return raw is True or str(raw).lower() in ("true", "1")
+
+
+def deploymentFromSettings() -> LocalServerDeployment:
+    """The deployment the panel would build from what is saved, without a panel.
+
+    The tool panels use it (through `autostart.Provider`) to find and start the
+    local server although SlicerCloud was never opened this session. Same rule
+    as the panel's `deployment()`: outside developer mode the repositories and
+    branches are the compiled-in ones, whatever was saved.
+    """
+    settings = qt.QSettings()
+    install_dir = str(settings.value(_KEY_INSTALL_DIR) or DEFAULT_INSTALL_DIR)
+    if not _developerModeOn():
+        return LocalServerDeployment(install_dir)
+
+    def saved(key, default):
+        return str(settings.value(key) or "").strip() or default
+
+    return LocalServerDeployment(
+        install_dir, saved(_KEY_REPO_URL, DEFAULT_REPO_URL), saved(_KEY_BRANCH, DEFAULT_BRANCH),
+        tools_branch=saved(_KEY_TOOLS_BRANCH, DEFAULT_TOOLS_BRANCH),
+        tools_repo_url=saved(_KEY_TOOLS_REPO_URL, DEFAULT_TOOLS_REPO_URL))
 
 
 def stopServerOnExit() -> None:
@@ -228,6 +257,11 @@ class SlicerCloud(ScriptedLoadableModule):
         # been started in an earlier session and never revisited. Same place
         # ServerToolsCore applies its saved settings, for the same reason.
         slicer.app.connect("aboutToQuit()", stopServerOnExit)
+
+        # The other half of the same convenience: a server stopped when Slicer
+        # closed is started again when a tool opens. The tool panels never
+        # import this module; they ask the gate, which asks this provider.
+        gate.register_provider(autostart.Provider(deploymentFromSettings))
 
 
 class SlicerCloudWidget(ScriptedLoadableModuleWidget):
@@ -604,8 +638,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         Read each time, not cached: it can be switched while the panel is open.
         """
-        raw = qt.QSettings().value(_KEY_DEVELOPER_MODE)
-        return raw is True or str(raw).lower() in ("true", "1")
+        return _developerModeOn()
 
     def deployment(self) -> LocalServerDeployment:
         """Rebuilt whenever the folder/URL/branch fields change, so the object
