@@ -197,6 +197,7 @@ Panels that send work to the server:
 | [AReg](#areg-module) | Registers two timepoints of the same patient, for CBCT or intraoral surface scans. Acronym for Automated REGistration. |
 | [Crown Segmentation](Crown_Seg) | Labels an intraoral surface scan tooth by tooth. Its output is the precondition for ALI's IOS landmarks and for the IOS modes of ASO, AReg and FlexReg. |
 | [AutoCrop3D](#autocrop3d-module) | Crops a folder of CBCT scans to one region of interest drawn in Slicer. |
+| TMJ Crop | Crops the right and left temporomandibular joint of CBCT scans (orients, segments the mandible, then cuts one box per condyle). |
 | [AutoMatrix](#automatrix-module) | Applies one or several transformation matrices to a folder of scans or landmark files. |
 | [FlexReg](#flexreg-module) | Registers two intraoral arches on a patch the clinician draws, rather than on the whole mesh, because teeth move between timepoints and the palate does not. |
 | [GreedyReg](#greedyreg-module) | Affine registration of CBCT scans with the Greedy engine, in landmark, automatic or combined mode, single or batch. |
