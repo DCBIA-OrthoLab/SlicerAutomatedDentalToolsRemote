@@ -27,7 +27,7 @@ from ServerToolsCoreLib.settings_qt import notify_uploads_are_not_deidentified, 
 from ServerToolsCoreLib.errors import plain_text
 from ServerToolsCoreLib.worker import BackgroundJob
 from ServerToolsCoreLib import gate
-from SlicerCloudLib import autostart, backends, deploy
+from SlicerCloudLib import autostart, backends, deploy, progress
 from SlicerCloudLib import state as serverState
 from SlicerCloudLib.deploy import (
     DEFAULT_BRANCH,
@@ -283,6 +283,11 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._buildFailed = False      # setup() could not build the panel
         self._lastFacts = {}           # what only this machine can say: disk, port
         self._jobKind = None           # "install", "start" or "work" while a job runs
+        self._installProgress = None   # the install screen's model while an install runs
+        self._stepLabels = []          # one label per install step, rebuilt per install
+        self._rowChecks = {}           # {key: Check} behind the status rows, from the last render
+        self._announceCheck = False    # the next status answers a press of the Update button
+        self._logRequested = False     # the log was asked for (or a job failed): show it
 
     # ------------------------------------------------------------------
     # Slicer lifecycle
@@ -374,6 +379,13 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         # tools, moving it would leave the old copy behind.
         self.installDirNote = design.hint_label("")
         layout.addWidget(self.installDirNote)
+        # Before the first install a person is shown WHERE it goes and how much
+        # room is left, and may change it; no path field, that is for developers.
+        self.changeFolderButton = design.link_button(_("Change..."))
+        self.changeFolderButton.setToolTip(_("Choose another folder for the install. It cannot "
+                                             "be changed once the install has started."))
+        self.changeFolderButton.clicked.connect(lambda: self.onChangeFolder())
+        layout.addWidget(self.changeFolderButton)
 
         # Developer mode only, and IGNORED outside it (deployment(), selectedBind(),
         # selectedPort()): hiding a field is not enough when its saved value still
@@ -457,13 +469,23 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.hintLabel = design.hint_label("")
         layout.addWidget(self.hintLabel)
 
+        # The install screen: the steps of the plan and one weighted bar. Hidden
+        # until an install on a guided backend runs (state INSTALLING).
+        self._stepsBox = qt.QWidget()
+        self._stepsLayout = qt.QVBoxLayout(self._stepsBox)
+        self._stepsBox.setVisible(False)
+        layout.addWidget(self._stepsBox)
+        self._installBar = design.progress_bar()
+        self._installBar.setVisible(False)
+        layout.addWidget(self._installBar)
+
         # Which of these is on screen is the server's state (_applyActions): the
         # others are hidden, not greyed. The install button is one button whose
         # text follows the state: install, start, or the fix for what is missing.
         buttons = qt.QHBoxLayout()
         layout.addLayout(buttons)
         self.installButton = design.primary_button(_("Install and start"))
-        self.updateButton = design.primary_button(_("Update server"))
+        self.updateButton = design.primary_button(_("Check for updates"))
         self.useButton = design.primary_button(_("Use this server"))
         self.portButton = design.primary_button(_("Try another port"))
         self.stopButton = design.danger_button(_("Stop"))
@@ -474,8 +496,6 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         secondary = qt.QHBoxLayout()
         layout.addLayout(secondary)
         self.refreshButton = design.link_button(_("Refresh"))
-        self.checkUpdateButton = design.link_button(_("Check for updates"))
-        self.checkUpdateButton.setToolTip(_("Fetch the remote to see whether the clone is behind."))
         self.showLogsButton = design.link_button(_("Server logs"))
         self.switchBackButton = design.link_button(_("Switch back"))
         self.switchBackButton.setToolTip(_(
@@ -486,7 +506,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             "run on the CPU. Installs the NVIDIA Container Toolkit if needed and registers it "
             "with Docker. Needs your password, and restarts Docker."
         ))
-        for button in (self.refreshButton, self.checkUpdateButton, self.showLogsButton,
+        for button in (self.refreshButton, self.showLogsButton,
                        self.switchBackButton, self.gpuButton):
             secondary.addWidget(button)
         secondary.addStretch(1)
@@ -498,7 +518,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         layout.addWidget(self.stopOnExitCheck)
 
         self.installButton.clicked.connect(lambda: self.onInstall())
-        self.updateButton.clicked.connect(self.onUpdate)
+        self.updateButton.clicked.connect(lambda: self.onUpdateButton())
         self.stopButton.clicked.connect(self.onStop)
         self.useButton.clicked.connect(self.onUseHere)
         self.portButton.clicked.connect(self.onTryAnotherPort)
@@ -508,7 +528,6 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         # connection would let a widget detail decide whether Refresh hits the
         # network.
         self.refreshButton.clicked.connect(lambda: self.onRefresh())
-        self.checkUpdateButton.clicked.connect(lambda: self.onRefresh(check_remote=True))
         self.showLogsButton.clicked.connect(self.onShowLogs)
         # Wrapped for the same reason as refreshButton above: `clicked` carries a
         # `checked` bool, and _offerGpuSetup takes no argument.
@@ -518,7 +537,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def _buildDataBox(self):
         box = ctk.ctkCollapsibleButton()
-        box.text = _("Tool data")
+        box.text = _("Manage downloads")
+        box.collapsed = True
+        self._dataBox = box
         layout = qt.QVBoxLayout(box)
 
         layout.addWidget(design.hint_label(_(
@@ -563,6 +584,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         box = ctk.ctkCollapsibleButton()
         box.text = _("Log")
         box.collapsed = True
+        self._logBox = box
         layout = qt.QVBoxLayout(box)
         self.logView = qt.QTextEdit()
         self.logView.setReadOnly(True)
@@ -736,6 +758,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             "Point every Automated Dental Tools module at this server, with its address and "
             "API key: the same thing the Server Tools Settings module edits."))
         self.stopOnExitCheck.setToolTip(_(texts.stop_on_exit_tooltip))
+        self.stopOnExitCheck.text = _(texts.stop_on_exit_label)
         self.bindCombo.setToolTip(_(texts.bind_tooltip))
         # A fixed bind is not a choice: the row is not shown at all (and the
         # combo is also disabled, so nothing can change it by accident).
@@ -756,23 +779,40 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def _applyInstallFolder(self, current) -> None:
         """The install folder is chosen once, before the first install, with the
-        free space beside it; afterwards it is stated, not offered. Developer
-        mode keeps it editable."""
-        editable = self._developerMode() or current.kind in (
-            serverState.State.NEEDS_SETUP, serverState.State.NOT_INSTALLED)
-        self.installDirEdit.setVisible(editable)
-        self._installDirTitle.setVisible(editable)
+        free space beside it and a Change button; afterwards it is stated, not
+        offered. Developer mode edits it as a path."""
+        mode = serverState.layout(current, self.backend, self._developerMode()).folder
+        self.installDirEdit.setVisible(mode == "edit")
+        self._installDirTitle.setVisible(mode == "edit")
+        self.changeFolderButton.setVisible(mode == "change")
         folder = self.installDirEdit.currentPath or DEFAULT_INSTALL_DIR
-        if editable:
+        if mode == "stated":
+            note = _("Installed in {0}.").format(folder)
+        elif mode == "change":
+            note = _("It will be stored in {0}.").format(folder)
+            free = self._lastFacts.get("disk_free")
+            if free is not None:
+                note += " " + _("{0} free on that disk.").format(_human(free))
+            note += " " + _("The folder is fixed once the install has started.")
+        else:
             note = _(self.backend.texts.folder_note)
             free = self._lastFacts.get("disk_free")
             if free is not None:
                 note += " " + _("{0} free on that disk.").format(_human(free))
-            if current.kind in (serverState.State.NEEDS_SETUP, serverState.State.NOT_INSTALLED):
-                note += " " + _("Choose it now: it is fixed once the install has started.")
-        else:
-            note = _("Installed in {0}.").format(folder)
         self.installDirNote.setText(note)
+
+    def onChangeFolder(self) -> None:
+        """Choose another install folder (before the install has started)."""
+        start = self.installDirEdit.currentPath or DEFAULT_INSTALL_DIR
+        chosen = qt.QFileDialog.getExistingDirectory(self.uiWidget, _("Install folder"), start)
+        if not chosen:
+            return
+        self.installDirEdit.currentPath = str(chosen)
+        # currentPathChanged normally saves and refreshes; do it explicitly too,
+        # so a binding that does not emit for a programmatic change still works.
+        self._saveSettings()
+        if not self._busyWithWork():
+            self.onRefresh()
 
     def _onBindChanged(self, _index=None) -> None:
         """Warn on the way OUT of loopback, once, before anything is started.
@@ -834,8 +874,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if disable:
             for button in (self.installButton, self.updateButton, self.stopButton, self.useButton,
                            self.portButton, self.switchBackButton, self.downloadButton,
-                           self.refreshButton, self.checkUpdateButton, self.showLogsButton,
-                           self.gpuButton):
+                           self.refreshButton, self.showLogsButton, self.gpuButton,
+                           self.changeFolderButton):
                 button.setEnabled(not busy)
             self.cancelButton.setVisible(busy)
         self._progressLabel.setVisible(busy or bool(what))
@@ -893,6 +933,10 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def _onJobError(self, name: str, exc: Exception, refresh: bool = True) -> None:
         message = str(exc)
+        self._finishInstallProgress(ok=False)
+        # What went wrong is in the log: a guided screen has no log pane unless
+        # something asks for it, and a failure does.
+        self._logRequested = True
         self._log(f"error: {message}")
         if isinstance(exc, DeploymentError):
             # Written for the user by deploy.py or by server_ctl.py — shown verbatim.
@@ -911,11 +955,18 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             return
         self.logView.append(str(message))
         self.logView.ensureCursorVisible()
+        if self._installProgress is not None:
+            self._installProgress.feed(str(message))
+            self._renderSteps()
         if self._job is not None:
+            if self.backend.guided and not self._developerMode():
+                # The steps list carries what is happening; a raw server line
+                # may hold an address or a branch, which are not for this screen.
+                return
             # The last line doubles as the progress caption: a `docker compose
             # up` is fifteen silent minutes otherwise, and a panel that shows
             # nothing reads as frozen and gets cancelled just before it works.
-            self._progressLabel.setText(f"{self._jobName} — {str(message)[:120]}")
+            self._progressLabel.setText(f"{self._jobName}: {str(message)[:120]}")
 
     # ------------------------------------------------------------------
     # Actions
@@ -960,6 +1011,13 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._lastFacts = facts
         self._registeredTools = registered
         self._renderStatus(status)
+        if self._announceCheck:
+            self._announceCheck = False
+            texts = self.backend.texts
+            said = _(texts.update_found) if self._serverState().flags.update_available \
+                else _(texts.up_to_date)
+            self._log(said)
+            slicer.util.showStatusMessage(said, 5000)
         if catalog is not None:
             self._renderCatalog(catalog)
 
@@ -1037,17 +1095,22 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         options = {"port": port if port else self.selectedPort(), "bind": self.selectedBind()}
         plan = backend.install_plan(self._lastStatus)
         fresh = not serverState.is_installed(self._lastStatus, backend)
+        # The install screen: only for a first install on a guided backend. A
+        # plain start is a few seconds and has nothing to list.
+        self._installProgress = progress.InstallProgress(plan) if (fresh and backend.guided) else None
+        self._renderSteps()
 
         def task(progress_cb):
             # Each step is idempotent and the plan leaves out what is already
             # done, so a second press resumes after a failure or a cancel.
             result = None
             for step in plan:
-                progress_cb(f"== {step.label} ==")
+                progress_cb(progress.banner(step))
                 result = step.run(deployment, progress_cb, options)
             return result
 
         def done(result):
+            self._finishInstallProgress(ok=True)
             self._reportBranchSwitches(deployment, switches)
             if result.get("already_running") and not result.get("restarted"):
                 self._log(_("Server already running, address and token registered."))
@@ -1066,6 +1129,13 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                     slicer.util.warningDisplay(_(message))
             if result.get("healthy"):
                 slicer.util.showStatusMessage(_("The tool server is running."), 5000)
+            elif backend.guided and not self._developerMode():
+                # No address on this screen: it is not something to act on.
+                self._logRequested = True
+                slicer.util.warningDisplay(plain_text(_(
+                    "VISOR Local was started but did not answer in time. It may still be "
+                    "preparing itself: press Refresh in a few minutes, or open the Log."
+                )))
             else:
                 slicer.util.warningDisplay(plain_text(_(
                     "The server was started but {0}/health did not answer in time. It may "
@@ -1076,6 +1146,15 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         self._startJob(_("Installing and starting the server") if fresh else _("Starting the server"),
                        task, done, kind="install" if fresh else "start")
+
+    def _finishInstallProgress(self, ok: bool) -> None:
+        """End of an install: the bar fills on success, the running step is marked
+        on failure. The steps are hidden by the state (no longer INSTALLING)."""
+        run, self._installProgress = self._installProgress, None
+        if run is None:
+            return
+        run.finish() if ok else run.fail()
+        self._installBar.setValue(100 if ok else self._installBar.value)
 
     def _offerRemedy(self, current) -> None:
         """What the first missing prerequisite asks of the user. Nothing here
@@ -1328,6 +1407,15 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         self._startJob(_("Enabling GPU support"), task, done)
 
+    def onUpdateButton(self) -> None:
+        """The one Update button: with something newer known it updates, otherwise
+        it fetches the remote to find out, and says what it found."""
+        if serverState.update_action(self._serverState()) == "update":
+            self.onUpdate()
+            return
+        self._announceCheck = True
+        self.onRefresh(check_remote=True)
+
     def onUpdate(self) -> None:
         deployment = self.deployment()
         backend = deployment.backend
@@ -1368,6 +1456,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def onShowLogs(self) -> None:
         deployment = self.deployment()
+        self._logRequested = True
+        self._logBox.collapsed = False
+        self._logBox.setVisible(True)
         self._startJob(
             _("Reading the server log"),
             lambda progress_cb: deployment.logs(200, progress_cb=progress_cb),
@@ -1407,7 +1498,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                     "them; re-running fetches only those."
                 ).format(_human(still)))
             else:
-                slicer.util.showStatusMessage(_("Tool data is complete."), 5000)
+                slicer.util.showStatusMessage(_("The downloads are complete."), 5000)
 
         self._startJob(_("Downloading tool data"), task, done)
 
@@ -1458,9 +1549,13 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         backend = self.backend
         if self._lastStatus is None:
             # No answer yet: the install button is there and clickable (it must
-            # never wait for a passive check), nothing else is offered.
+            # never wait for a passive check), nothing else is offered. An
+            # install pressed before the first answer is still an install.
             shown = {serverState.INSTALL, serverState.REFRESH}
             label = _(backend.texts.install_label)
+            update_text = _(backend.texts.check_label)
+            if self._busyWithWork():
+                self._applyLayout(self._serverState())
         else:
             current = self._serverState()
             gpu_fixable = any(check.remedy and check.remedy.key == "gpu"
@@ -1469,16 +1564,67 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             switch_back = bool(str(settings.value(_KEY_PREVIOUS_URL) or ""))
             shown = set(serverState.actions(current, gpu_fixable, switch_back).shown)
             label = _(serverState.install_label(current, backend))
+            update_text = _(serverState.update_label(current, backend))
+            self._applyLayout(current)
         widgets = {
             serverState.INSTALL: self.installButton, serverState.UPDATE: self.updateButton,
             serverState.STOP: self.stopButton, serverState.USE_HERE: self.useButton,
             serverState.TRY_PORT: self.portButton, serverState.SWITCH_BACK: self.switchBackButton,
             serverState.LOGS: self.showLogsButton, serverState.REFRESH: self.refreshButton,
-            serverState.CHECK_UPDATE: self.checkUpdateButton, serverState.GPU: self.gpuButton,
+            serverState.GPU: self.gpuButton,
         }
         for key, widget in widgets.items():
             widget.setVisible(key in shown)
         self.installButton.setText(label)
+        self.updateButton.setText(update_text)
+
+    def _applyLayout(self, current) -> None:
+        """The blocks of the panel this state shows (serverState.layout): the raw
+        grid only for developers, the few checks before the install, the steps
+        while it runs, the folder once, the stop-on-exit line wherever a server is,
+        and the log only when developing or asked for."""
+        lay = serverState.layout(current, self.backend, self._developerMode())
+        for key, value in self._statusRows.items():
+            name = self._statusNames[key]
+            check = self._rowChecks.get(key)
+            if lay.grid == "all":
+                show = check is not None
+            elif lay.grid == "prerequisites":
+                show = check is not None and key in self.backend.prerequisites
+            else:
+                show = False
+            name.setVisible(show)
+            value.setVisible(show)
+        self._stepsBox.setVisible(lay.steps)
+        self._installBar.setVisible(lay.steps)
+        self.stopOnExitCheck.setVisible(lay.stop_on_exit)
+        self._logBox.setVisible(lay.log or self._logRequested)
+        self._applyInstallFolder(current)
+
+    def _renderSteps(self) -> None:
+        """The install screen: one line per step with its mark, and the bar."""
+        run = self._installProgress
+        if run is None:
+            return
+        marks = {"done": "\u2713", "running": "\u25cf", "waiting": "\u25cb", "failed": "\u2717"}
+        rows = run.rows()
+        if len(self._stepLabels) != len(rows):
+            for label in self._stepLabels:
+                label.setVisible(False)
+                label.setParent(None)
+            self._stepLabels = []
+            for _row in rows:
+                label = qt.QLabel("")
+                label.setWordWrap(True)
+                self._stepsLayout.addWidget(label)
+                self._stepLabels.append(label)
+        for label, row in zip(self._stepLabels, rows):
+            text = f"{marks[row.mark]} {_(row.label)}"
+            if row.detail:
+                text += f"   {row.detail}"
+            label.setText(text)
+        self._installBar.setRange(0, 100)
+        self._installBar.setValue(round(100 * run.fraction()))
 
     def _renderStatus(self, status: dict) -> None:
         tokens = design.tokens()
@@ -1487,14 +1633,14 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         # The grid is what the backend says is worth checking on this machine:
         # Docker and Compose never appear on a Mac that does not use them.
         rows = {check.key: check for check in backend.checks(status, self._lastFacts)}
+        self._rowChecks = rows
         for key, value in self._statusRows.items():
             name = self._statusNames[key]
             check = rows.get(key)
-            name.setVisible(check is not None)
-            value.setVisible(check is not None)
             if check is None:
                 continue
-            name.setText(_(check.label))
+            # A mark in front of the name: the list a person reads at a glance.
+            name.setText(("\u2713 " if check.ok else "\u2717 ") + _(check.label))
             value.setText(check.detail)
             value.setStyleSheet(f"color: {tokens['SUCCESS'] if check.ok else tokens['TEXT_MUTED']};")
 
@@ -1502,7 +1648,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             self._statusBadge, bool(status.get("server", {}).get("healthy")))
 
         current = self._serverState()
-        self.hintLabel.setText(_(backend.hint(current.kind, status, self._lastFacts)))
+        self.hintLabel.setText(_(backend.hint(current.kind, status, self._lastFacts,
+                                              developer=self._developerMode())))
         self._applyBackendTexts()
         self._applyDeveloperMode()
         self._applyInstallFolder(current)

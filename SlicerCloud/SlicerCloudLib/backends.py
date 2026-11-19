@@ -212,6 +212,11 @@ class Backend:
     fixed_bind = None
     #: Whether `server_ctl.py` is given a folder of tools to build environments from.
     has_tools_checkout = False
+    #: The four-screen presentation (checks, one sentence, steps, ready) instead
+    #: of the full grid; Docker keeps the grid it always had.
+    guided = False
+    #: The keys of `checks()` a person is shown before setting up.
+    prerequisites = ()
     texts = None
 
     # -- environment and arguments -------------------------------------
@@ -279,7 +284,7 @@ class Backend:
     def no_url_message(self) -> str:
         return NO_PUBLIC_URL_MESSAGE
 
-    def hint(self, kind: str, status, facts=None) -> str:
+    def hint(self, kind: str, status, facts=None, developer: bool = False) -> str:
         raise NotImplementedError
 
     # -- pieces shared by both backends' grids ---------------------------
@@ -341,6 +346,11 @@ class DockerBackend(Backend):
         unit="container",
         install_label="Install and start",
         start_label="Start server",
+        update_label="Update server",
+        check_label="Check for updates",
+        update_found="A new version of the server is available.",
+        up_to_date="The server is up to date.",
+        stop_on_exit_label="Stop the server when Slicer closes",
         install_tooltip=("Clone the server repository if needed, then start its container and wait "
                          "for it to answer. Safe to run again: an existing install is reused and "
                          "its API key kept."),
@@ -493,7 +503,7 @@ class DockerBackend(Backend):
 
     # -- sentences ----------------------------------------------------------
 
-    def hint(self, kind: str, status, facts=None) -> str:
+    def hint(self, kind: str, status, facts=None, developer: bool = False) -> str:
         status = status or {}
         docker = status.get("docker") or {}
         clone = status.get("clone") or {}
@@ -534,7 +544,7 @@ class DockerBackend(Backend):
         if gpu.get("nvidia_smi") and not gpu.get("nvidia_runtime"):
             return ("The server is up, but on the CPU: this machine has a GPU that Docker "
                     "cannot reach. Press 'Enable GPU support' to set that up.")
-        return "The server is up. Pick the tools you need under 'Tool data'."
+        return "The server is up. Pick the tools you need under 'Manage downloads'."
 
 
 class NativeBackend(Backend):
@@ -545,12 +555,19 @@ class NativeBackend(Backend):
     native = True
     fixed_bind = BIND_LOCALHOST
     has_tools_checkout = True
+    guided = True
+    prerequisites = ("git", "uv", "gpu", "disk", "port")
 
     texts = Texts(
         title="VISOR Local",
         unit="server",
         install_label="Set up VISOR Local",
         start_label="Start VISOR Local",
+        update_label="Update VISOR Local",
+        check_label="Check for updates",
+        update_found="A new version is available.",
+        up_to_date="VISOR Local is up to date.",
+        stop_on_exit_label="Stop VISOR Local when Slicer closes (it starts again when you open a tool)",
         install_tooltip=("Download the server and the tools, prepare the tools' Python "
                          "environments (slow once, instant after), then start the server on this "
                          "Mac and wait for it to answer. Safe to run again: each step is skipped "
@@ -842,7 +859,7 @@ class NativeBackend(Backend):
 
     # -- sentences ----------------------------------------------------------
 
-    def hint(self, kind: str, status, facts=None) -> str:
+    def hint(self, kind: str, status, facts=None, developer: bool = False) -> str:
         status = status or {}
         clone = status.get("clone") or {}
         if kind == "needs_setup":
@@ -857,8 +874,9 @@ class NativeBackend(Backend):
                 if missing:
                     return ("Some tools are not prepared yet ({0}). Press 'Set up VISOR Local': it "
                             "builds them, then starts the server.").format(", ".join(missing))
-            return ("Press 'Set up VISOR Local' to download the server and the tools and start it. "
-                    "The first time takes a while and several GB of disk.")
+            return ("Everything this Mac needs is here. Setting up downloads about {0} and takes a "
+                    "while the first time. You can keep using Slicer meanwhile."
+                    ).format(human_size(NATIVE_SETUP_BYTES))
         if kind == "installing":
             return "Setting up. You can keep using Slicer meanwhile."
         if kind == "broken":
@@ -867,17 +885,19 @@ class NativeBackend(Backend):
             return ("Another program is using the port VISOR Local needs. Press 'Try another port', "
                     "or stop that program.")
         if kind in ("installed_stopped", "starting", "running"):
+            if clone.get("branch_mismatch") and not developer:
+                return "A newer version is available. Press 'Update VISOR Local'."
             if clone.get("branch_mismatch"):
                 return (f"The clone is on branch '{clone.get('branch')}' but this deployment asks for "
-                        f"'{clone.get('configured_branch')}'. Press 'Update server' to switch it.")
+                        f"'{clone.get('configured_branch')}'. Press 'Update VISOR Local' to switch it.")
             if clone.get("behind"):
-                return "A newer version of the server is available. Press 'Update server'."
+                return "A newer version of the server is available. Press 'Update VISOR Local'."
         if kind == "installed_stopped":
             return "VISOR Local is installed but not running. Press 'Start VISOR Local'."
         if kind == "starting":
-            return "VISOR Local is starting; the first start can take a few minutes. Check the Log."
-        return ("VISOR Local is running on this Mac, over https on this computer only. Open any "
-                "tool to use it.")
+            return ("VISOR Local is starting; the first start can take a few minutes."
+                    + (" Check the Log." if developer else ""))
+        return "VISOR Local is running on this Mac. Open any tool (ALI, AMASSS, ...) to use it."
 
 
 def _has_nvidia_cdi_device(raw) -> bool:

@@ -185,35 +185,35 @@ TABLE = [
      "install", {"install", "refresh"}),
     ("docker: installing", fixtures.docker_uninstalled(), DOCKER, "install", UNSET, None, {"cancel"}),
     ("docker: stopped", fixtures.docker(container={"running": False}, server={"healthy": False}),
-     DOCKER, None, UNSET, "install", {"install", "refresh", "logs", "check_update"}),
+     DOCKER, None, UNSET, "install", {"install", "update", "refresh", "logs"}),
     ("docker: stopped, behind",
      fixtures.docker(container={"running": False}, server={"healthy": False}, clone={"behind": 2}),
-     DOCKER, None, UNSET, "install", {"install", "update", "refresh", "logs", "check_update"}),
+     DOCKER, None, UNSET, "install", {"install", "update", "refresh", "logs"}),
     ("docker: starting", fixtures.docker(server={"healthy": False}), DOCKER, None, UNSET,
-     None, {"stop", "refresh", "logs", "check_update"}),
+     None, {"stop", "refresh", "logs"}),
     ("docker: running, client unset", fixtures.docker(), DOCKER, None, UNSET,
-     "use_here", {"use_here", "stop", "refresh", "logs", "check_update"}),
+     "use_here", {"use_here", "stop", "update", "refresh", "logs"}),
     ("docker: running, client here",
      fixtures.docker(server={"public_url": "https://box.ts.net"}), DOCKER, None, "https://box.ts.net",
-     "stop", {"stop", "refresh", "logs", "check_update"}),
+     "stop", {"stop", "update", "refresh", "logs"}),
     ("docker: running, client elsewhere", fixtures.docker(), DOCKER, None, REMOTE,
-     "use_here", {"use_here", "stop", "refresh", "logs", "check_update"}),
+     "use_here", {"use_here", "stop", "update", "refresh", "logs"}),
     ("native: uv missing", fixtures.native_uninstalled(uv=None), NATIVE, None, UNSET,
      "install", {"install", "refresh"}),
     ("native: not installed", fixtures.native_uninstalled(), NATIVE, None, UNSET,
      "install", {"install", "refresh"}),
     ("native: stopped", fixtures.native(container={"running": False}, server={"healthy": False}),
-     NATIVE, None, LOCAL, "install", {"install", "refresh", "logs", "check_update"}),
+     NATIVE, None, LOCAL, "install", {"install", "update", "refresh", "logs"}),
     ("native: running, client here", fixtures.native(), NATIVE, None, LOCAL,
-     "stop", {"stop", "refresh", "logs", "check_update"}),
+     "stop", {"stop", "update", "refresh", "logs"}),
     ("native: running, client here, update",
      fixtures.native(clone={"behind": 1}), NATIVE, None, LOCAL,
-     "stop", {"stop", "update", "refresh", "logs", "check_update"}),
+     "stop", {"stop", "update", "refresh", "logs"}),
     ("native: running, branch differs",
      fixtures.native(clone={"branch": "feat/x", "branch_mismatch": True}), NATIVE, None, LOCAL,
-     "stop", {"stop", "update", "refresh", "logs", "check_update"}),
+     "stop", {"stop", "update", "refresh", "logs"}),
     ("native: running, client elsewhere", fixtures.native(), NATIVE, None, REMOTE,
-     "use_here", {"use_here", "stop", "refresh", "logs", "check_update"}),
+     "use_here", {"use_here", "stop", "update", "refresh", "logs"}),
     ("native: port taken",
      fixtures.native(container={"running": False}, server={"healthy": False}),
      NATIVE, None, LOCAL, "try_port", {"try_port", "refresh", "logs"}),
@@ -233,6 +233,32 @@ class TestTheButtonsEachStateOffers(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(result.primary, primary)
                 self.assertEqual(set(result.shown), shown)
+
+    def test_update_is_one_button_that_checks_when_nothing_is_known(self):
+        """'Check for updates' used to be a second control. It is the same
+        button now: it checks, and once something newer is known it updates."""
+        stopped = fixtures.native(container={"running": False}, server={"healthy": False})
+        for status in (stopped, fixtures.native()):
+            current = classify(status, NATIVE, FREE, None, LOCAL)
+            self.assertIn("update", actions(current).shown)
+            self.assertEqual(state.update_action(current), "check")
+            self.assertEqual(state.update_label(current, NATIVE), "Check for updates")
+        behind = classify(fixtures.native(clone={"behind": 2}), NATIVE, FREE, None, LOCAL)
+        self.assertEqual(state.update_action(behind), "update")
+        self.assertEqual(state.update_label(behind, NATIVE), "Update VISOR Local")
+        docker = classify(fixtures.docker(clone={"behind": 2}), DOCKER, FREE, None, LOCAL)
+        self.assertEqual(state.update_label(docker, DOCKER), "Update server")
+
+    def test_no_update_while_starting_or_when_nothing_is_installed(self):
+        starting = classify(fixtures.native(server={"healthy": False}), NATIVE, FREE, None, LOCAL)
+        self.assertNotIn("update", actions(starting).shown)
+        fresh = classify(fixtures.native_uninstalled(), NATIVE, FREE, None, UNSET)
+        self.assertNotIn("update", actions(fresh).shown)
+
+    def test_a_branch_mismatch_is_an_update_not_a_check(self):
+        current = classify(fixtures.native(clone={"branch": "feat/x", "branch_mismatch": True}),
+                           NATIVE, FREE, None, LOCAL)
+        self.assertEqual(state.update_action(current), "update")
 
     def test_start_is_never_offered_while_the_server_runs(self):
         for backend, status in ((DOCKER, fixtures.docker()), (NATIVE, fixtures.native())):
@@ -272,3 +298,55 @@ class TestTheButtonsEachStateOffers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWhatThePanelLays(unittest.TestCase):
+    """Which blocks of the panel each state shows, for a person and for a developer."""
+
+    def lay(self, status, backend=NATIVE, developer=False, job=None, facts=FREE):
+        return state.layout(classify(status, backend, facts, job, LOCAL), backend, developer)
+
+    def test_a_mac_missing_something_sees_the_checks_not_the_raw_grid(self):
+        result = self.lay(fixtures.native_uninstalled(uv=None))
+        self.assertEqual(result.grid, "prerequisites")
+        self.assertEqual(result.folder, "change")
+
+    def test_a_mac_ready_to_install_sees_one_sentence_and_the_folder_once(self):
+        result = self.lay(fixtures.native_uninstalled())
+        self.assertEqual((result.grid, result.folder, result.steps), ("none", "change", False))
+
+    def test_installing_shows_the_steps_and_states_the_folder(self):
+        result = self.lay(fixtures.native_uninstalled(), job="install")
+        self.assertEqual((result.grid, result.folder, result.steps), ("none", "stated", True))
+
+    def test_afterwards_the_folder_is_only_stated(self):
+        for status in (fixtures.native(), fixtures.native(container={"running": False},
+                                                          server={"healthy": False})):
+            self.assertEqual(self.lay(status).folder, "stated")
+
+    def test_developer_mode_keeps_the_raw_grid_and_edits_the_folder(self):
+        result = self.lay(fixtures.native(), developer=True)
+        self.assertEqual((result.grid, result.folder, result.log), ("all", "edit", True))
+
+    def test_the_log_is_not_a_block_of_the_guided_screens(self):
+        self.assertFalse(self.lay(fixtures.native()).log)
+
+    def test_docker_keeps_the_grid_and_the_log_it_always_had(self):
+        result = self.lay(fixtures.docker(), DOCKER)
+        self.assertEqual((result.grid, result.steps, result.log), ("all", False, True))
+
+    def test_stop_on_exit_is_on_screen_wherever_a_server_exists(self):
+        stopped = fixtures.native(container={"running": False}, server={"healthy": False})
+        for status in (fixtures.native(), stopped, fixtures.native(server={"healthy": False})):
+            self.assertTrue(self.lay(status).stop_on_exit)
+        for status in (fixtures.native_uninstalled(), fixtures.native_uninstalled(uv=None)):
+            self.assertFalse(self.lay(status).stop_on_exit)
+        self.assertFalse(self.lay(fixtures.native_uninstalled(), job="install").stop_on_exit)
+        self.assertTrue(self.lay(fixtures.docker_uninstalled(), DOCKER).stop_on_exit)
+
+
+class TestPrerequisiteRows(unittest.TestCase):
+    def test_what_a_person_checks_before_setting_up(self):
+        self.assertEqual(NATIVE.prerequisites, ("git", "uv", "gpu", "disk", "port"))
+        self.assertTrue(NATIVE.guided)
+        self.assertFalse(DOCKER.guided)

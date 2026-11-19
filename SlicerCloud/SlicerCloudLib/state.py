@@ -175,7 +175,6 @@ TRY_PORT = "try_port"
 SWITCH_BACK = "switch_back"
 LOGS = "logs"
 REFRESH = "refresh"
-CHECK_UPDATE = "check_update"
 GPU = "gpu"
 CANCEL = "cancel"
 
@@ -209,20 +208,16 @@ def actions(state: ServerState, gpu_fixable: bool = False, can_switch_back: bool
         shown |= {TRY_PORT, REFRESH, LOGS}
     elif kind == State.INSTALLED_STOPPED:
         primary = INSTALL
-        shown |= {INSTALL, REFRESH, LOGS, CHECK_UPDATE}
-        if flags.update_available:
-            shown.add(UPDATE)
+        shown |= {INSTALL, REFRESH, LOGS, UPDATE}
     elif kind == State.STARTING:
-        shown |= {STOP, REFRESH, LOGS, CHECK_UPDATE}
+        shown |= {STOP, REFRESH, LOGS}
     elif kind == State.RUNNING:
-        shown |= {STOP, REFRESH, LOGS, CHECK_UPDATE}
+        shown |= {STOP, REFRESH, LOGS, UPDATE}
         if flags.client != CLIENT_HERE:
             primary = USE_HERE
             shown.add(USE_HERE)
         else:
             primary = STOP
-        if flags.update_available:
-            shown.add(UPDATE)
     if gpu_fixable and kind in (State.NEEDS_SETUP, State.NOT_INSTALLED, State.INSTALLED_STOPPED,
                                 State.RUNNING, State.STARTING):
         shown.add(GPU)
@@ -240,3 +235,56 @@ def install_label(state: ServerState, backend) -> str:
     if state.kind == State.INSTALLED_STOPPED:
         return texts.start_label
     return texts.install_label
+
+
+def update_action(state: ServerState) -> str:
+    """What the one Update button does: "update" when something newer is known
+    (or the clone sits on another branch than the one asked), otherwise "check",
+    which fetches the remote to find out. 'Check for updates' used to be a second
+    control beside it."""
+    return "update" if state.flags.update_available else "check"
+
+
+def update_label(state: ServerState, backend) -> str:
+    texts = backend.texts
+    return texts.update_label if update_action(state) == "update" else texts.check_label
+
+
+Layout = collections.namedtuple("Layout", "grid steps folder stop_on_exit log")
+
+
+def layout(state: ServerState, backend, developer: bool) -> Layout:
+    """Which blocks of the panel `state` shows.
+
+    `grid`       "all" the raw status rows, "prerequisites" the few checks a person
+                 acts on, "none" nothing (a sentence says it instead)
+    `steps`      the list of install steps with the global progress bar
+    `folder`     "edit" a path field (developer mode), "change" the folder stated
+                 with a Change button (before the first install: it is fixed once
+                 it has started), "stated" a line of text
+    `stop_on_exit` the 'stop when Slicer closes' line, wherever a server exists
+    `log`        the log pane as a block of the panel (developer mode, or a backend
+                 that is not guided)
+    """
+    guided = backend.guided
+    kind = state.kind
+    before_install = kind in (State.NEEDS_SETUP, State.NOT_INSTALLED)
+    if developer or not guided:
+        grid = "all"
+    elif kind == State.NEEDS_SETUP:
+        grid = "prerequisites"
+    else:
+        grid = "none"
+    if developer:
+        folder = "edit"
+    elif before_install:
+        folder = "change"
+    else:
+        folder = "stated"
+    if guided:
+        stop_on_exit = kind in (State.INSTALLED_STOPPED, State.STARTING, State.RUNNING,
+                                State.PORT_TAKEN)
+    else:
+        stop_on_exit = True
+    return Layout(grid=grid, steps=guided and kind == State.INSTALLING, folder=folder,
+                  stop_on_exit=stop_on_exit, log=developer or not guided)

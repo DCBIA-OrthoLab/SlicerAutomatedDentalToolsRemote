@@ -238,6 +238,7 @@ except ImportError:
     sys.modules["requests"] = _requests
 
 import SlicerCloud  # noqa: E402
+from SlicerCloudLib import progress  # noqa: E402
 from SlicerCloudLib import backends  # noqa: E402
 
 
@@ -674,11 +675,13 @@ class TestNativeServerPanel(PanelTestCase):
         widget = self.panel()
         self.assertIn("Apple GPU", widget._statusRows["gpu"].text)
         self.assertNotIn("Docker is missing", widget.hintLabel.text)
-        self.assertIn("Set up VISOR Local", widget.hintLabel.text)
+        self.assertIn("Everything this Mac needs is here", widget.hintLabel.text)
         self.assertEqual(widget.installButton.text, "Set up VISOR Local")
 
     def test_no_row_describes_something_a_mac_does_not_use(self):
-        """Docker, Compose and the container were three rows of 'not needed'."""
+        """Docker, Compose and the container were three rows of 'not needed'.
+        The raw grid is a developer's view now; it still holds no such row."""
+        _QSettings.store["Developer/DeveloperMode"] = True
         widget = self.panel()
         for key in ("docker", "compose", "container"):
             self.assertFalse(widget._statusRows[key].isVisible(), key)
@@ -1120,8 +1123,7 @@ def serving(status, backend=backends.DOCKER, **members):
 def visible(widget):
     """Which of the panel's buttons are on screen, by name."""
     names = ("installButton", "updateButton", "stopButton", "useButton", "portButton",
-             "refreshButton", "checkUpdateButton", "showLogsButton", "switchBackButton", "gpuButton",
-             "cancelButton")
+             "refreshButton", "showLogsButton", "switchBackButton", "gpuButton", "cancelButton")
     return {name for name in names if getattr(widget, name).isVisible()}
 
 
@@ -1149,7 +1151,7 @@ class TestTheStateDecidesTheButtons(PanelTestCase):
     def test_a_running_native_server_has_no_start_button(self):
         widget = self.show(fixtures.native(), backends.NATIVE, client=LOCAL_URL)
         self.assertEqual(visible(widget),
-                         {"stopButton", "refreshButton", "checkUpdateButton", "showLogsButton"})
+                         {"stopButton", "refreshButton", "updateButton", "showLogsButton"})
         self.assertEqual(widget._statusBadge.text, "Server: online")
 
     def test_nothing_installed_offers_only_the_install(self):
@@ -1164,11 +1166,13 @@ class TestTheStateDecidesTheButtons(PanelTestCase):
         self.assertNotIn("stopButton", visible(widget))
         self.assertEqual(widget.installButton.text, "Start VISOR Local")
 
-    def test_update_is_offered_only_when_there_is_something_to_update_to(self):
+    def test_the_one_update_button_says_what_it_will_do(self):
         behind = self.show(fixtures.native(clone={"behind": 2}), backends.NATIVE, client=LOCAL_URL)
         self.assertIn("updateButton", visible(behind))
+        self.assertEqual(behind.updateButton.text, "Update VISOR Local")
         current = self.show(fixtures.native(), backends.NATIVE, client=LOCAL_URL)
-        self.assertNotIn("updateButton", visible(current))
+        self.assertIn("updateButton", visible(current))
+        self.assertEqual(current.updateButton.text, "Check for updates")
 
     def test_a_running_server_the_modules_do_not_use_offers_to_be_used(self):
         widget = self.show(fixtures.native(), backends.NATIVE, client=REMOTE_URL)
@@ -1240,18 +1244,21 @@ class TestInstallFolder(PanelTestCase):
 
     def test_it_is_offered_with_the_free_space_before_the_first_install(self):
         widget = self.folder(fixtures.native_uninstalled(), backends.NATIVE)
-        self.assertTrue(widget.installDirEdit.isVisible())
+        self.assertFalse(widget.installDirEdit.isVisible(), "a path field is for developers")
+        self.assertTrue(widget.changeFolderButton.isVisible())
         self.assertIn("100.0 GB free", widget.installDirNote.text)
 
     def test_once_installed_it_is_stated_not_offered(self):
         widget = self.folder(fixtures.native(), backends.NATIVE)
         self.assertFalse(widget.installDirEdit.isVisible())
+        self.assertFalse(widget.changeFolderButton.isVisible())
         self.assertIn("Installed in", widget.installDirNote.text)
 
     def test_developer_mode_keeps_it_editable(self):
         _QSettings.store["Developer/DeveloperMode"] = True
         widget = self.folder(fixtures.native(), backends.NATIVE)
         self.assertTrue(widget.installDirEdit.isVisible())
+        self.assertFalse(widget.changeFolderButton.isVisible())
 
 
 class TestPortTaken(PanelTestCase):
@@ -1675,3 +1682,330 @@ class TestTheToolPanelsCanStartTheLocalServer(PanelTestCase):
         _QSettings.store["Developer/DeveloperMode"] = True
         _QSettings.store["SlicerCloud/Branch"] = "someone/experiment"
         self.assertEqual(SlicerCloud.deploymentFromSettings().branch, "someone/experiment")
+
+
+
+class StreamJob(SyncJob):
+    """A SyncJob that forwards the task's progress lines, as BackgroundJob does."""
+
+    def finish(self):
+        try:
+            result = self._target(self._on_progress or (lambda message: None))
+        except Exception as exc:  # noqa: BLE001
+            if self._on_error:
+                self._on_error(exc)
+            return
+        if self._on_success:
+            self._on_success(result)
+
+
+class GuidedCase(PanelTestCase):
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        client = SlicerCloud.get_client()
+        self.addCleanup(client.configure, server_url=client.server_url, token=client.token)
+        client.configure(server_url="https://set-your-server.invalid", token="")
+
+    def show(self, status, backend=backends.NATIVE, client=None, **members):
+        SlicerCloud.LocalServerDeployment = serving(status, backend, **members)
+        if client:
+            SlicerCloud.get_client().configure(server_url=client, token="x")
+        return self.panel()
+
+    @staticmethod
+    def shown_rows(widget):
+        return [key for key, label in widget._statusRows.items() if label.isVisible()]
+
+    @staticmethod
+    def everything_visible(widget):
+        """Every text a person can read on the guided screens, in one list."""
+        texts = [widget._serverBox.text, widget.hintLabel.text, widget.installDirNote.text,
+                 widget._progressLabel.text if widget._progressLabel.isVisible() else "",
+                 widget.stopOnExitCheck.text if widget.stopOnExitCheck.isVisible() else ""]
+        for name in ("installButton", "updateButton", "stopButton", "useButton", "portButton",
+                     "refreshButton", "showLogsButton", "switchBackButton", "changeFolderButton"):
+            button = getattr(widget, name)
+            if button.isVisible():
+                texts.append(button.text)
+        for key, label in widget._statusRows.items():
+            if label.isVisible():
+                texts += [widget._statusNames[key].text, label.text]
+        for row in getattr(widget, "_stepLabels", []):
+            if row.isVisible():
+                texts.append(row.text)
+        return texts
+
+
+class TestScreenAChecks(GuidedCase):
+    def test_a_mac_missing_uv_sees_the_checks_with_marks_and_nothing_raw(self):
+        widget = self.show(fixtures.native_uninstalled(uv=None))
+        self.assertEqual(self.shown_rows(widget), ["git", "uv", "gpu", "disk", "port"])
+        names = {key: widget._statusNames[key].text for key in self.shown_rows(widget)}
+        self.assertTrue(names["git"].startswith("\u2713 "), names)
+        self.assertTrue(names["uv"].startswith("\u2717 "), names)
+        self.assertEqual(widget.installButton.text, "Fix: Install uv")
+
+    def test_the_checks_do_not_name_docker_compose_or_the_server_address(self):
+        widget = self.show(fixtures.native_uninstalled(uv=None))
+        for text in self.everything_visible(widget):
+            for word in ("docker", "compose", "container", "http", "tls"):
+                self.assertNotIn(word, text.lower(), text)
+
+    def test_the_folder_is_stated_with_a_change_button(self):
+        widget = self.show(fixtures.native_uninstalled(uv=None))
+        self.assertTrue(widget.changeFolderButton.isVisible())
+        self.assertFalse(widget.installDirEdit.isVisible())
+
+
+class TestScreenBReadyToSetUp(GuidedCase):
+    def test_one_sentence_the_space_and_one_button(self):
+        widget = self.show(fixtures.native_uninstalled())
+        self.assertEqual(self.shown_rows(widget), [])
+        self.assertTrue(widget.hintLabel.text.startswith("Everything this Mac needs is here."))
+        self.assertIn("about 15", widget.hintLabel.text)
+        self.assertIn("keep using Slicer", widget.hintLabel.text)
+        self.assertEqual(visible(widget), {"installButton", "refreshButton"})
+        self.assertEqual(widget.installButton.text, "Set up VISOR Local")
+
+    def test_change_picks_a_folder_and_remembers_it(self):
+        widget = self.show(fixtures.native_uninstalled())
+        qt.QFileDialog.next_directory = "/tmp/elsewhere"
+        self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
+        widget.changeFolderButton.click()
+        self.assertEqual(widget.installDirEdit.currentPath, "/tmp/elsewhere")
+        self.assertIn("/tmp/elsewhere", widget.installDirNote.text)
+        self.assertEqual(_QSettings.store["SlicerCloud/InstallDir"], "/tmp/elsewhere")
+
+    def test_a_cancelled_dialog_changes_nothing(self):
+        widget = self.show(fixtures.native_uninstalled())
+        before = widget.installDirEdit.currentPath
+        qt.QFileDialog.next_directory = ""
+        widget.changeFolderButton.click()
+        self.assertEqual(widget.installDirEdit.currentPath, before)
+
+    def test_the_free_space_is_beside_the_folder(self):
+        widget = self.show(fixtures.native_uninstalled())
+        self.assertIn("100.0 GB free", widget.installDirNote.text)
+
+    def test_nothing_on_this_screen_shows_an_address_or_a_branch(self):
+        widget = self.show(fixtures.native_uninstalled())
+        for text in self.everything_visible(widget):
+            for word in ("http", "tls", "branch", "certificate", "127.0.0.1"):
+                self.assertNotIn(word, text.lower(), text)
+
+
+class TestScreenCInstalling(GuidedCase):
+    def setUp(self):
+        GuidedCase.setUp(self)
+        SlicerCloud.BackgroundJob = StreamJob
+
+    def test_the_steps_and_the_global_bar_follow_the_banners(self):
+        SyncJob.defer = True
+        widget = self.show(fixtures.native_uninstalled())
+        SyncJob.pending.pop(0).finish()
+        widget.onInstall()
+        plan = backends.NATIVE.install_plan(fixtures.native_uninstalled())
+        self.assertTrue(widget._stepsBox.isVisible())
+        self.assertEqual([row.text.split(" ", 1)[1] for row in widget._stepLabels], [s.label for s in plan])
+        widget._log(progress.banner(plan[0]))
+        widget._log(progress.banner(plan[1]))
+        self.assertEqual(widget._stepLabels[0].text.split(" ", 1)[0], "\u2713")
+        self.assertEqual(widget._stepLabels[1].text.split(" ", 1)[0], "\u25cf")
+        self.assertEqual(widget._stepLabels[2].text.split(" ", 1)[0], "\u25cb")
+        total = sum(step.weight for step in plan)
+        self.assertEqual(widget._installBar.value, round(100 * plan[0].weight / total))
+        self.assertEqual(visible(widget), {"cancelButton"})
+
+    def test_a_long_step_shows_what_it_is_doing_without_an_address(self):
+        SyncJob.defer = True
+        widget = self.show(fixtures.native_uninstalled())
+        SyncJob.pending.pop(0).finish()
+        widget.onInstall()
+        plan = backends.NATIVE.install_plan(fixtures.native_uninstalled())
+        widget._log(progress.banner(plan[3]))
+        widget._log("Preparing AREG_IOS (7 of 19)")
+        self.assertIn("Preparing AREG_IOS (7 of 19)", widget._stepLabels[3].text)
+        widget._log("serving at https://127.0.0.1:8000 on branch main with TLS")
+        self.assertNotIn("https", widget._stepLabels[3].text)
+        self.assertNotIn("branch", widget._stepLabels[3].text)
+        self.assertNotIn("https", widget._progressLabel.text)
+
+    def test_a_finished_install_hides_the_steps_and_shows_the_ready_screen(self):
+        SyncJob.defer = False
+        widget = self.show(fixtures.native_uninstalled())
+        widget.onInstall()
+        self.assertFalse(widget._stepsBox.isVisible())
+        self.assertFalse(widget._installBar.isVisible())
+
+    def test_a_failure_leaves_the_failed_step_marked_and_the_button_back(self):
+        class Failing(serving(fixtures.native_uninstalled(), backends.NATIVE)):
+            def clone(self, progress_cb=None):
+                raise SlicerCloud.DeploymentError("no network")
+
+            def require_native_support(self, progress_cb=None):
+                return None
+
+        SlicerCloud.LocalServerDeployment = Failing
+        widget = self.panel()
+        widget.onInstall()
+        self.assertIn("installButton", visible(widget))
+        self.assertFalse(widget._installBar.isVisible())
+
+    def test_docker_has_no_steps_list(self):
+        widget = self.show(fixtures.docker_uninstalled(), backends.DOCKER)
+        widget.onInstall()
+        self.assertFalse(widget._stepsBox.isVisible())
+
+
+class TestScreenDReady(GuidedCase):
+    def ready(self):
+        return self.show(fixtures.native(), client=LOCAL_URL)
+
+    def test_one_sentence_a_stop_button_and_nothing_raw(self):
+        widget = self.ready()
+        self.assertEqual(self.shown_rows(widget), [])
+        self.assertIn("VISOR Local is running on this Mac", widget.hintLabel.text)
+        self.assertIn("Open any tool", widget.hintLabel.text)
+        self.assertEqual(visible(widget), {"stopButton", "refreshButton", "updateButton", "showLogsButton"})
+        self.assertEqual(widget.updateButton.text, "Check for updates")
+
+    def test_the_folder_is_only_stated(self):
+        widget = self.ready()
+        self.assertFalse(widget.changeFolderButton.isVisible())
+        self.assertIn("Installed in", widget.installDirNote.text)
+
+    def test_no_address_certificate_or_branch_anywhere_on_the_ready_screen(self):
+        for status in (fixtures.native(), fixtures.native(clone={"behind": 2}),
+                       fixtures.native(clone={"branch": "feat/x", "configured_branch": "main",
+                                              "branch_mismatch": True}),
+                       fixtures.native(container={"running": False}, server={"healthy": False}),
+                       fixtures.native(server={"healthy": False})):
+            widget = self.show(status, client=LOCAL_URL)
+            for text in self.everything_visible(widget):
+                for word in ("http", "tls", "branch", "certificate", "127.0.0.1", "feat/"):
+                    self.assertNotIn(word, text.lower(), text)
+
+    def test_manage_downloads_is_a_collapsed_secondary_block(self):
+        widget = self.ready()
+        self.assertEqual(widget._dataBox.text, "Manage downloads")
+        self.assertTrue(widget._dataBox.collapsed)
+
+    def test_the_stop_on_exit_line_is_on_screen_and_on_by_default(self):
+        widget = self.ready()
+        self.assertTrue(widget.stopOnExitCheck.isVisible())
+        self.assertTrue(widget.stopOnExitCheck.isChecked())
+        self.assertIn("starts again when you open a tool", widget.stopOnExitCheck.text)
+
+    def test_the_stop_on_exit_line_is_there_when_stopped_and_gone_before_the_install(self):
+        stopped = self.show(fixtures.native(container={"running": False}, server={"healthy": False}),
+                            client=LOCAL_URL)
+        self.assertTrue(stopped.stopOnExitCheck.isVisible())
+        fresh = self.show(fixtures.native_uninstalled())
+        self.assertFalse(fresh.stopOnExitCheck.isVisible())
+
+    def test_the_stop_on_exit_line_is_not_inside_the_developer_box(self):
+        widget = self.ready()
+        self.assertFalse(widget._advanced.isVisible())
+        self.assertTrue(widget.stopOnExitCheck.isVisible())
+
+    def test_the_log_is_not_a_block_of_the_screen_until_asked_for(self):
+        widget = self.ready()
+        self.assertFalse(widget._logBox.isVisible())
+        widget.showLogsButton.click()
+        self.assertTrue(widget._logBox.isVisible())
+
+    def test_a_failed_job_reveals_the_log(self):
+        class Failing(serving(fixtures.native_uninstalled(), backends.NATIVE)):
+            def require_native_support(self, progress_cb=None):
+                raise SlicerCloud.DeploymentError("nope")
+
+        SlicerCloud.LocalServerDeployment = Failing
+        widget = self.panel()
+        self.assertFalse(widget._logBox.isVisible())
+        widget.onInstall()
+        self.assertTrue(widget._logBox.isVisible())
+
+    def test_developer_mode_shows_the_log_and_the_raw_grid(self):
+        _QSettings.store["Developer/DeveloperMode"] = True
+        widget = self.ready()
+        self.assertTrue(widget._logBox.isVisible())
+        self.assertIn("health", self.shown_rows(widget))
+
+    def test_docker_keeps_its_grid_and_its_log(self):
+        widget = self.show(fixtures.docker(server={"public_url": PUBLIC_URL}), backends.DOCKER,
+                           client=PUBLIC_URL)
+        self.assertIn("container", self.shown_rows(widget))
+        self.assertTrue(widget._logBox.isVisible())
+
+
+class TestTheOneUpdateButton(GuidedCase):
+    def test_pressing_it_with_nothing_known_checks_the_remote_and_says_the_result(self):
+        seen = []
+
+        class Checking(serving(fixtures.native(), backends.NATIVE)):
+            def status(self, check_remote=False, progress_cb=None):
+                seen.append(check_remote)
+                return copy.deepcopy(fixtures.native())
+
+        SlicerCloud.LocalServerDeployment = Checking
+        SlicerCloud.get_client().configure(server_url=LOCAL_URL, token="x")
+        widget = self.panel()
+        seen.clear()
+        widget.updateButton.click()
+        self.assertEqual(seen[0], True)
+        self.assertIn("VISOR Local is up to date.", "\n".join(widget.logView.lines))
+        self.assertFalse(any("update" in call for call in widget.deployment().calls if isinstance(call, str)))
+
+    def test_when_the_check_finds_something_the_button_becomes_the_update(self):
+        state = {"behind": 0}
+
+        class Checking(serving(fixtures.native(), backends.NATIVE)):
+            def status(self, check_remote=False, progress_cb=None):
+                status = copy.deepcopy(fixtures.native())
+                if check_remote:
+                    state["behind"] = 2
+                status["clone"]["behind"] = state["behind"]
+                return status
+
+        SlicerCloud.LocalServerDeployment = Checking
+        SlicerCloud.get_client().configure(server_url=LOCAL_URL, token="x")
+        widget = self.panel()
+        self.assertEqual(widget.updateButton.text, "Check for updates")
+        widget.updateButton.click()
+        self.assertEqual(widget.updateButton.text, "Update VISOR Local")
+        self.assertIn("A new version is available", "\n".join(widget.logView.lines))
+
+    def test_with_an_update_known_it_updates(self):
+        calls = []
+
+        def update(self, progress_cb=None, force=False, bind=None):
+            calls.append("update")
+            return {"pulled": True, "restarted": True, "healthy": True, "clone": {}}
+
+        SlicerCloud.LocalServerDeployment = serving(
+            fixtures.native(clone={"behind": 2}), backends.NATIVE, update=update,
+            require_native_support=lambda self, progress_cb=None: None,
+            clone_tools=lambda self, progress_cb=None: None,
+            install_tools=lambda self, progress_cb=None: None)
+        SlicerCloud.get_client().configure(server_url=LOCAL_URL, token="x")
+        widget = self.panel()
+        widget.updateButton.click()
+        self.assertEqual(calls, ["update"])
+
+    def test_there_is_no_second_control_for_checking(self):
+        widget = self.show(fixtures.native(), client=LOCAL_URL)
+        self.assertFalse(hasattr(widget, "checkUpdateButton"))
+
+
+class TestTheKeptServerIsNeverLogged(GuidedCase):
+    def test_the_previous_address_key_is_not_written_to_the_log_or_the_screen(self):
+        client = SlicerCloud.get_client()
+        client.configure(server_url=REMOTE_URL, token="SECRET-LAB-KEY")
+        SlicerCloud.LocalServerDeployment = serving(fixtures.native(), backends.NATIVE)
+        widget = self.panel()
+        widget.onUseHere()
+        widget.onSwitchBack()
+        everything = "\n".join(widget.logView.lines) + "\n".join(self.everything_visible(widget))
+        self.assertNotIn("SECRET-LAB-KEY", everything)
+        self.assertNotIn("the-token", everything)
+        self.assertEqual(client.token, "SECRET-LAB-KEY")

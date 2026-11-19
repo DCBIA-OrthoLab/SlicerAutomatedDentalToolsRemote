@@ -372,3 +372,33 @@ class TestEveryModuleOfTheLibraryIsShipped(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSentencesForAPerson(unittest.TestCase):
+    """What the guided screens say names no address, certificate or branch,
+    unless the reader is a developer."""
+
+    STATES = ("needs_setup", "not_installed", "installing", "installed_stopped", "starting",
+              "running", "port_taken", "broken")
+
+    def test_no_native_sentence_names_an_address_a_certificate_or_a_branch(self):
+        mismatch = fixtures.native(clone={"branch": "feat/x", "configured_branch": "main",
+                                          "branch_mismatch": True})
+        for status in (fixtures.native(), mismatch, fixtures.native_uninstalled()):
+            for kind in self.STATES:
+                text = backends.NATIVE.hint(kind, status, {}, developer=False)
+                for word in ("http", "tls", "certificate", "branch", "127.0.0.1"):
+                    self.assertNotIn(word, text.lower(), (kind, text))
+
+    def test_a_developer_still_reads_the_branch(self):
+        mismatch = fixtures.native(clone={"branch": "feat/x", "configured_branch": "main",
+                                          "branch_mismatch": True})
+        self.assertIn("feat/x", backends.NATIVE.hint("running", mismatch, {}, developer=True))
+
+    def test_the_update_sentences_name_the_button_that_exists(self):
+        behind = fixtures.native(clone={"behind": 2})
+        self.assertIn("'%s'" % backends.NATIVE.texts.update_label,
+                      backends.NATIVE.hint("running", behind, {}))
+        behind = fixtures.docker(clone={"behind": 2})
+        self.assertIn("'%s'" % backends.DOCKER.texts.update_label,
+                      backends.DOCKER.hint("running", behind, {}))

@@ -55,11 +55,14 @@ SlicerAutomatedDentalTools/
 │   ├── Testing/Python/test_docker_golden.py # every Docker argv, pinned byte for byte
 │   ├── Testing/Python/test_backends.py     # the two backends behind one interface
 │   ├── Testing/Python/test_state.py        # server state and the buttons each state offers
+│   ├── Testing/Python/test_autostart.py    # what the tool panels may ask of the local server
+│   ├── Testing/Python/test_progress.py     # the install screen's steps and weighted bar
 │   └── SlicerCloudLib/
 │       ├── __init__.py
 │       ├── backends.py                     # Docker / Native: checks, plan, args, texts. No slicer, no qt.
 │       ├── state.py                        # classify(): the server's state. No slicer, no qt.
 │       ├── autostart.py                    # what the tool panels may ask: installed? start. No slicer, no qt.
+│       ├── progress.py                     # the install screen's steps and weighted bar. No slicer, no qt.
 │       └── deploy.py                       # clone + drive scripts/server_ctl.py. No slicer, no qt.
 ├── SurgMovPred/
 │   ├── CMakeLists.txt
@@ -1744,11 +1747,51 @@ none, a Start button beside a running server. It is now three layers:
   `actions(state)` is the set of buttons the state shows; the panel hides every
   other one (hidden, not greyed) and the one install button changes its text
   with the state (install, start, or the fix for what is missing).
+  `layout(state, backend, developer)` is the set of blocks (see below).
   `SlicerCloud.py` only maps those answers to widgets.
 
 The status grid is what the backend says is worth checking: on a Mac git, uv,
 the Apple GPU, free disk, the port, the clone and the server; never Docker or
 Compose. Docker's grid is the one it always was.
+
+### The four screens of VISOR Local (native, `backend.guided`)
+
+On a Mac the panel is four screens, each a state of `classify`, with no address,
+certificate or branch on any of them (those are the developer's):
+
+- **A, checks** (`NEEDS_SETUP`): the few prerequisites (`backend.prerequisites`:
+  git, uv, the Apple GPU, free disk, the port), each with a check or a cross in
+  front of its name, and one button that is the fix for the first missing one.
+  The folder is stated with a **Change...** button and the free space.
+- **B, ready** (`NOT_INSTALLED`): one sentence ("Everything this Mac needs is
+  here. Setting up downloads about 15 GB..."), the folder, one button. The 15 GB
+  is an estimate that is only displayed, never used to refuse; no duration is
+  promised.
+- **C, installing** (`INSTALLING`): the steps of `install_plan()` as a list
+  (done, running, waiting, failed) and one progress bar weighted by the steps'
+  `weight`, and Cancel. `progress.InstallProgress` is the model: the panel feeds
+  it every line, each step prints a banner (`== <label> ==`) before it runs, and
+  the bar moves when a step finishes (no step reports a percentage, so none is
+  invented). The detail line under the running step drops any line that names an
+  address, a certificate, a token or a branch. A second press resumes: the plan
+  leaves out what is done.
+- **D, running** (`RUNNING`): "VISOR Local is running on this Mac. Open any tool
+  to use it.", Stop, one Update button, the "Stop VISOR Local when Slicer closes"
+  line, and "Manage downloads" (the former Tool data box) collapsed.
+
+The folder is offered once, before the first install (`layout().folder` is
+`change`), then stated; developers edit it as a path (`edit`). The raw grid
+(`layout().grid` is `all`) and the log pane are developer mode only; a failed
+job, or "Server logs", reveals the log for the session. Docker is not guided: it
+keeps its grid, its hints, its log and no steps list.
+
+**One Update button.** "Check for updates" is not a second control any more:
+`update` is shown whenever a server is installed (not while it starts), and
+`state.update_action` says what it does: with nothing newer known it fetches the
+remote (`status --check-remote`, unchanged) and says "VISOR Local is up to date."
+or "A new version is available."; once something newer is known, or the clone is
+on another branch than the one asked, the same button is "Update VISOR Local"
+and updates.
 
 ### Developer mode
 
@@ -1761,7 +1804,9 @@ one that shows Reload & Test), read on every use. Outside it they are hidden
 keeps the port it remembers, which is also what makes "Try another port" last),
 and the modules are always pointed at the server that was started. A value saved
 in an earlier developer session decides nothing. The install folder is offered
-once, with the free space, before the first install, and only stated after.
+once, with the free space and a Change button, before the first install, and only
+stated after (a path field in developer mode). The raw status grid and the log
+pane are developer mode only on the guided (Mac) screens.
 
 A test preset for a launcher can write `Developer/DeveloperMode` and the branch
 keys into the session's settings (`--python-code`), which is how branches under
@@ -1960,7 +2005,8 @@ up. Leaving the module does nothing (there is deliberately no `exit()`
 override), and `cleanup()` — teardown only — cancels the running *subprocess*,
 never the container. A reboot brings it back (`restart: unless-stopped`).
 
-**"Stop the server when Slicer closes" (on by default)** is the answer to the
+**"Stop the server when Slicer closes" (on by default)**, a plain line on the
+panel wherever a server exists (not inside Advanced), is the answer to the
 obvious objection: a clinician should not be left with a background process
 they did not ask for. Idle it costs ~220 MB of RAM and no CPU or GPU (measured
 — the tools' heavy imports are lazy, so torch is not even loaded), but after a
