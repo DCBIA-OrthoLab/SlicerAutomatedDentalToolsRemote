@@ -573,8 +573,8 @@ class TestAppleSiliconDetection(unittest.TestCase):
             self.assertFalse(deploy.prefer_native())
             d = LocalServerDeployment("/x")
         self.assertFalse(d.native)
-        self.assertEqual(d._native_args(), [])
-        self.assertEqual(d._tls_args(), [])
+        self.assertEqual(d.backend.common_args(d), [])
+        self.assertEqual(d.backend.start_args(d), [])
 
     def test_the_default_follows_the_machine(self):
         with mock.patch.object(deploy, "is_apple_silicon", return_value=True):
