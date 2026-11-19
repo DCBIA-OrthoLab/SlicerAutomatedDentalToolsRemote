@@ -27,6 +27,7 @@ add_subdirectory(ASORemote)
 add_subdirectory(AREGRemote)
 add_subdirectory(AutoMatrixRemote)
 add_subdirectory(AutoCrop3DRemote)
+add_subdirectory(TMJ_CropRemote)
 add_subdirectory(FlexRegRemote)
 # MRI2CBCTRemote and MRI2CBCT_CLIRemote are kept in the tree but not built:
 # they stay out until MRI2CBCT is ported to the tool server.
