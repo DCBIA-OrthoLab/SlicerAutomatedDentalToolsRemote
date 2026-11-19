@@ -854,7 +854,7 @@ class ToolServerClient:
                 f"{self._server_url}/tools/{tool_name}/pairs",
                 headers={"Authorization": f"Bearer {self._token}"},
                 json={"inputs": inputs, "arguments": arguments or {}},
-                timeout=self._timeout, verify=self._verify_tls,
+                timeout=self._timeout, verify=tls.ca_bundle(),
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not ask the server how to pair the inputs: {exc}")

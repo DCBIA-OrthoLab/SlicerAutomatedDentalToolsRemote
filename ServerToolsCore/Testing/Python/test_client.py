@@ -199,6 +199,22 @@ class ToolServerClientTest(unittest.TestCase):
             self.assertIn("No server is set", str(caught.exception))
         mock_get.assert_not_called()
 
+    @mock.patch("requests.Session.post")
+    def test_pairs_verifies_with_the_ca_bundle_and_returns_the_answer(self, mock_post):
+        """pairs() once read a `_verify_tls` attribute that no longer exists, so
+        every paired cohort failed with an AttributeError before any request."""
+        from ServerToolsCoreLib import tls
+
+        answer = {"groups": [], "shared": {}, "unpaired": {}}
+        mock_post.return_value = _response(json_data=answer)
+
+        result = self.client.pairs("example_tool", {"file": ["a.nii"]}, {"mode": "x"})
+
+        self.assertEqual(result, answer)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["verify"], tls.ca_bundle())
+        self.assertEqual(kwargs["json"], {"inputs": {"file": ["a.nii"]}, "arguments": {"mode": "x"}})
+
     # -- list_tool_data (server-side models/testfiles) -----------------
 
     @mock.patch("requests.Session.get")
