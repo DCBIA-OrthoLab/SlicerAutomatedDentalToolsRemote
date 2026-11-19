@@ -1808,6 +1808,32 @@ fields hold the defaults, and is refused in plain words when they do not (the
 alternative, an argparse error, or silently ignoring the branch the user typed).
 Docker updates are unchanged.
 
+Guards around an existing clone (native mode for the first two, Docker unchanged):
+
+- **Native support is checked before anything is modified.**
+  `require_native_support()` looks for `scripts/server_ctl_native.py` on the
+  requested branch of the server repository: read in place when the clone is
+  already on that branch, otherwise the branch is fetched from `origin` into the
+  private ref `refs/slicercloud/probe` and read with `git cat-file -e`, so the
+  clone's branches, tree and remote are untouched. A branch without it is
+  refused, naming the Branch and Repository URL fields. `clone()` makes the
+  same check on a fresh clone. A check that cannot run (offline) does not
+  block. If `server_ctl.py` still answers `invalid choice: 'install-tools'` or
+  `unrecognized arguments: --native`, `run_ctl` raises that same message with
+  the argparse text kept underneath.
+- **No silent branch switch.** `pending_branch_switches()` lists the managed
+  clones (server, and tools in native mode) that are on another branch than the
+  form's. `onInstall` and `onUpdate` refuse a clone with uncommitted tracked
+  changes, otherwise ask yes/no naming old and new branch
+  (`confirmBranchSwitch`, the test seam); "no" starts no job. After the job the
+  panel logs what happened ("passed from A to B"). The switch itself is still
+  done where it was: `update --tools-branch` for the tools, the existing
+  mechanism for the server repository.
+- **`already_running`.** `up --native` is idempotent: a result with
+  `already_running: true` and no `restarted` is reported as "Server already
+  running, address and token registered", and the address and token are still
+  saved. A missing field (older server) is treated as a normal start.
+
 ### Lifecycle: the container outlives Slicer unless told otherwise
 
 `docker compose up -d` is detached, so nothing about the container is tied to

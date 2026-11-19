@@ -812,6 +812,53 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if catalog is not None:
             self._renderCatalog(catalog)
 
+    def confirmBranchSwitch(self, text: str) -> bool:
+        """Yes/no question for a branch switch. Its own method so a test (or a
+        different front end) can answer it without a dialog."""
+        return bool(slicer.util.confirmYesNoDisplay(text, _("Switch branch?")))
+
+    def _allowBranchSwitches(self, deployment) -> list:
+        """Decide, before any job starts, whether the managed clones may change branch.
+
+        Returns the switches that will happen, or None when the action must not
+        run: a clone with uncommitted changes is refused outright, and the
+        answer "no" leaves everything as it was. The panel used to put an
+        existing clone on the form's branch without a word.
+        """
+        switches = deployment.pending_branch_switches()
+        if not switches:
+            return []
+        for switch in switches:
+            if switch.dirty:
+                message = _(
+                    "The {0} in {1} is on branch '{2}' and has uncommitted changes, so it cannot "
+                    "be moved to '{3}'. Commit or discard them, or set the matching branch field "
+                    "under Advanced to '{2}'. Nothing was changed."
+                ).format(switch.what, switch.path, switch.current, switch.wanted)
+                self._log(message)
+                slicer.util.errorDisplay(plain_text(message))
+                return None
+        lines = "\n".join(
+            _("  - {0} in {1}: '{2}' to '{3}'").format(s.what, s.path, s.current, s.wanted)
+            for s in switches)
+        question = _(
+            "The form asks for a different branch than the one these clones are on:\n\n{0}\n\n"
+            "Continuing will switch them. Switch?").format(lines)
+        if not self.confirmBranchSwitch(plain_text(question)):
+            self._log(_("Branch switch declined: nothing was changed."))
+            return None
+        return switches
+
+    def _reportBranchSwitches(self, deployment, switches) -> None:
+        for switch in switches:
+            now = deployment.current_branch(switch.path)
+            if now == switch.wanted:
+                self._log(_("The {0} passed from '{1}' to '{2}'.").format(
+                    switch.what, switch.current, switch.wanted))
+            else:
+                self._log(_("The {0} is on '{1}' (the form asks for '{2}').").format(
+                    switch.what, now or switch.current, switch.wanted))
+
     def onInstall(self) -> None:
         deployment = self.deployment()
         configure = self.useServerCheck.checked
@@ -827,8 +874,13 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if self._lastStatus is not None and not native and not docker.get("daemon"):
             self._offerDockerInstall(docker)
             return
+        switches = self._allowBranchSwitches(deployment)
+        if switches is None:
+            return
 
         def task(progress_cb):
+            if native:
+                deployment.require_native_support(progress_cb=progress_cb)
             deployment.clone(progress_cb=progress_cb)
             if native:
                 # No Docker on a Mac with Apple silicon (it cannot reach the
@@ -850,6 +902,11 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             return deployment.up(progress_cb=progress_cb, port=port, bind=bind)
 
         def done(result):
+            self._reportBranchSwitches(deployment, switches)
+            if result.get("already_running") and not result.get("restarted"):
+                self._log(_("Server already running, address and token registered."))
+                slicer.util.showStatusMessage(
+                    _("Server already running, address and token registered."), 5000)
             if configure and result.get("token"):
                 url = deploy.client_url(result)
                 if url:
@@ -1007,13 +1064,18 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         bind = self.selectedBind()
 
         native = self._isNative()
+        switches = self._allowBranchSwitches(deployment)
+        if switches is None:
+            return
 
         def task(progress_cb):
             if native:
+                deployment.require_native_support(progress_cb=progress_cb)
                 deployment.clone_tools(progress_cb=progress_cb)
             return deployment.update(progress_cb=progress_cb, bind=bind)
 
         def done(result):
+            self._reportBranchSwitches(deployment, switches)
             clone = result.get("clone") or {}
             if result.get("pulled"):
                 summary = _("Updated to {0} and relaunched.").format(clone.get("commit") or _("the latest commit"))
