@@ -65,13 +65,15 @@ follows is only what happens on this side of the wire.
 
 ### A server with a public address
 
-The server listens on loopback with a self-signed certificate this client does
-not accept. The client talks to it only through a **public address**: an
-`https://` URL whose certificate a public authority signed — **for a server on
-this very computer too**. Any of these gives it one:
+The Docker server listens on loopback without a certificate this client accepts.
+The client talks to it only through a **public address**: an `https://` URL
+whose certificate a public authority signed, **for a Docker server on this
+very computer too**. (The one local exception, the native server on an
+Apple-silicon Mac, is described below.) Any of these gives it one:
 
-- **`tailscale serve`** (`scripts/setup-tailscale.sh`) publishes it as
-  `https://<name>.<tailnet>.ts.net` and fetches and renews the certificate
+- **`tailscale serve`**, set up by hand on the server's machine with the
+  `tailscale` command (no script in these repositories does it), publishes it
+  as `https://<name>.<tailnet>.ts.net` and fetches and renews the certificate
   itself;
 - **a reverse proxy** in front of it with a Let's Encrypt or institutional
   certificate, its address set as `PUBLIC_URL` in the server's `.env`;
@@ -96,13 +98,29 @@ The rules have no setting, flag or file that relaxes them
 - **Publicly-signed certificates only**, verified against the authorities in
   certifi's bundle (the one `requests` ships), named explicitly so that
   `REQUESTS_CA_BUNDLE` and its kin change nothing, hostname included. There is
-  no custom CA, no certificate pinning and never `verify=False`.
+  no custom CA, no trust on first use and never `verify=False`. The single
+  exception is `127.0.0.1` and `::1`, and only while
+  `~/.slicercloud/tls/server.crt` (made by SlicerCloud, see below) is there and
+  intact: that one certificate is then the only one trusted for those hosts.
 - **No redirect is ever followed**, and no request to an `http://` URL ever
   leaves the client: a redirect is how `https://` would become `http://`.
 - **What the server says is shown as text.** Its error messages, a text
   tool's answer and a schema's descriptions never render as HTML in a dialog,
   a label or a tooltip, and a result archive is unpacked only inside its
   folder, under a size and entry-count ceiling.
+
+### A server on an Apple-silicon Mac
+
+Docker cannot give a container the Mac's GPU, so on a Mac with Apple silicon
+**SlicerCloud** runs the server as a plain process instead (`Install and start`
+clones the server and the tools, builds the tools' Python environments, starts
+it). It listens on `127.0.0.1` only, over `https://`, with a self-signed
+certificate SlicerCloud generated on this Mac (`~/.slicercloud/tls/`, private
+key `0600` in a `0700` folder) and handed to the server as a file path. The
+client trusts **that file and nothing else**, and only for `127.0.0.1`, `::1`
+(no name such as `localhost`): the certificate never travels over the network and is not
+learned on first use, so another program that grabs the port first cannot pass
+for the server. `http://` stays refused.
 
 Behind `tailscale serve`, a device that has not joined the tailnet cannot reach
 the address at all, which is the access control; removing it from the

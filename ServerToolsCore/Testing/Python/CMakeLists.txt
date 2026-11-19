@@ -158,3 +158,15 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_digest
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+# test_gate.py and test_panel_gate.py: the card that replaces a tool's form when
+# no server is set, and the automatic start of the LOCAL server when it stopped
+# with Slicer. The decision is a pure function of the configured address (no
+# DNS, nothing started around a remote server); the card runs on stand-ins.
+foreach(_gate_test test_gate test_panel_gate)
+  add_test(
+    NAME ServerToolsCore_${_gate_test}
+    COMMAND ${Python3_EXECUTABLE} -m unittest ${_gate_test}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endforeach()

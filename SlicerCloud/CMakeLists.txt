@@ -9,7 +9,12 @@ set(MODULE_NAME SlicerCloud)
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   SlicerCloudLib/__init__.py
+  SlicerCloudLib/backends.py
   SlicerCloudLib/deploy.py
+  SlicerCloudLib/local_cert.py
+  SlicerCloudLib/state.py
+  SlicerCloudLib/autostart.py
+  SlicerCloudLib/progress.py
   )
 
 # No icon: it uses Slicer's default one.

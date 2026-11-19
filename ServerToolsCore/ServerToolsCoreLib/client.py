@@ -617,6 +617,25 @@ class _RefusePlainHttp(requests.adapters.BaseAdapter):
         pass
 
 
+class _PinnedLoopbackAdapter(requests.adapters.HTTPAdapter):
+    """HTTPAdapter that swaps the trust anchor for this machine's own address.
+
+    Every call site passes `verify=tls.ca_bundle()`. For an https:// URL whose
+    host is 127.0.0.1, ::1 or localhost AND for which tls.pinned_certificate()
+    finds the locally-written certificate, `verify` becomes that file's path
+    instead (tls.py, rule 3). For any other host, or without a valid pin, the
+    value passes through untouched. Done in `send` rather than `cert_verify`
+    because requests >= 2.32 picks the connection pool from `verify` before
+    `cert_verify` runs.
+    """
+
+    def send(self, request, **kwargs):
+        pin = tls.pin_for_url(request.url)
+        if pin:
+            kwargs["verify"] = pin
+        return super().send(request, **kwargs)
+
+
 def _refuse_redirects(response, *_args, **_kwargs):
     """Response hook: any redirect is an error, whatever the method.
 
@@ -649,7 +668,7 @@ def _pooled_session() -> requests.Session:
     (10 per host, blocking above that) would quietly serialise them.
     """
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(
+    adapter = _PinnedLoopbackAdapter(
         pool_connections=_CONNECTION_POOL_SIZE,
         pool_maxsize=_CONNECTION_POOL_SIZE,
         # Retries stay with the callers: transfer.py resends the one part that
@@ -660,7 +679,8 @@ def _pooled_session() -> requests.Session:
     # Only https:// gets this adapter: every server URL went through
     # tls.require_https, so a plain-HTTP URL reaching the session is a bug.
     # Every request passes verify=tls.ca_bundle(): the public authorities of requests'
-    # own bundle, hostname included, with no knob anywhere (see tls.py).
+    # own bundle, hostname included, with no knob anywhere (see tls.py). The
+    # adapter replaces it only for this machine's own pinned certificate.
     session.mount("https://", adapter)
     session.mount("http://", _RefusePlainHttp())
     session.max_redirects = 0
@@ -834,7 +854,7 @@ class ToolServerClient:
                 f"{self._server_url}/tools/{tool_name}/pairs",
                 headers={"Authorization": f"Bearer {self._token}"},
                 json={"inputs": inputs, "arguments": arguments or {}},
-                timeout=self._timeout, verify=self._verify_tls,
+                timeout=self._timeout, verify=tls.ca_bundle(),
             )
         except requests.RequestException as exc:
             raise ServerToolError(f"Could not ask the server how to pair the inputs: {exc}")
@@ -1072,6 +1092,13 @@ class ToolServerClient:
         return destination
 
     def _fetch_tools(self) -> dict:
+        # The placeholder host never resolves (see health()): asking would cost
+        # a DNS lookup per module and end in a raw network error instead of the
+        # one thing worth saying, that no server has been chosen yet.
+        if _never_resolves(self._server_url):
+            raise ServerToolError(
+                "No server is set. Choose one in Server Tools Settings, or set one up on this "
+                "computer with Slicer Cloud.")
         try:
             response = self._session.get(
                 f"{self._server_url}/tools", timeout=_TOOLS_FETCH_TIMEOUT, verify=tls.ca_bundle()

@@ -1,8 +1,9 @@
 """Support package for the Slicer Cloud module.
 
-Only `deploy` lives here, and it imports neither `slicer` nor `qt` — see
-ARCHITECTURE.md's dependency rule and `Testing/Python/test_deploy.py`, which
-runs it under plain `python3 -m unittest`.
+`deploy`, `backends`, `state` and `local_cert` live here, and none imports
+`slicer` nor `qt`, see ARCHITECTURE.md's dependency rule and
+`Testing/Python/test_deploy.py`, which runs them under plain
+`python3 -m unittest`.
 """
 
 from .deploy import (
@@ -14,12 +15,14 @@ from .deploy import (
     LocalServerDeployment,
     find_python,
     probe_host,
+    select_backend,
 )
 
 __all__ = [
     "LocalServerDeployment",
     "DeploymentError",
     "probe_host",
+    "select_backend",
     "find_python",
     "DEFAULT_REPO_URL",
     "DEFAULT_BRANCH",

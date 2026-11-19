@@ -13,6 +13,7 @@ against a mocked `Popen`.
 
 import io
 import os
+import subprocess
 import shutil
 import stat
 import time
@@ -46,6 +47,12 @@ def _write_fake_ctl(install_dir: str, body: str) -> str:
 
 class TempInstallDir(unittest.TestCase):
     def setUp(self):
+        # These suites describe the Docker path. On an Apple-silicon runner the
+        # deployment would otherwise choose the native backend by itself; the
+        # native one has its own tests below, which ask for it explicitly.
+        patcher = mock.patch.object(deploy, "is_apple_silicon", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.tmp = tempfile.mkdtemp(prefix="slicercloud_test_")
         self.install_dir = os.path.join(self.tmp, "SlicerCloudServer")
 
@@ -478,7 +485,8 @@ class TestClientUrl(unittest.TestCase):
 
     def test_the_message_names_every_way_to_get_a_public_address(self):
         message = deploy.NO_PUBLIC_URL_MESSAGE
-        self.assertIn("setup-tailscale.sh", message)
+        self.assertIn("tailscale serve", message)
+        self.assertNotIn("setup-tailscale", message)
         self.assertIn("PUBLIC_URL", message)
         self.assertIn("reverse proxy", message)
 
@@ -536,5 +544,732 @@ class TestFindPython(unittest.TestCase):
             sys.executable = original
 
 
+# --- the native backend (Apple-silicon Mac) ---------------------------------
+#
+# Nothing below starts a server or a build: commands are captured at `run_ctl`
+# / `_spawn`, which is where the argv leaves this module.
+
+class TestAppleSiliconDetection(unittest.TestCase):
+    def test_native_is_for_apple_silicon_only(self):
+        self.assertTrue(deploy.is_apple_silicon("darwin", "arm64"))
+        self.assertFalse(deploy.is_apple_silicon("darwin", "x86_64", sysctl="0"))
+        self.assertFalse(deploy.is_apple_silicon("linux", "aarch64"))
+        self.assertFalse(deploy.is_apple_silicon("linux", "x86_64"))
+        self.assertFalse(deploy.is_apple_silicon("win32", "AMD64"))
+
+    def test_a_rosetta_process_on_an_apple_cpu_still_counts(self):
+        """The stable Slicer for macOS is x86_64: platform.machine() lies there,
+        `sysctl hw.optional.arm64` does not."""
+        self.assertTrue(deploy.is_apple_silicon("darwin", "x86_64", sysctl="1\n"))
+
+    def test_an_intel_mac_stays_on_docker(self):
+        """No native backend for Intel: the deployment is Docker, its commands
+        carry no --native, and no certificate is made."""
+        with mock.patch.object(deploy.sys, "platform", "darwin"), \
+                mock.patch.object(deploy.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(deploy.subprocess, "run",
+                                  return_value=deploy.subprocess.CompletedProcess([], 0, "0\n", "")):
+            self.assertFalse(deploy.is_apple_silicon())
+            self.assertFalse(deploy.prefer_native())
+            d = LocalServerDeployment("/x")
+        self.assertFalse(d.native)
+        self.assertEqual(d.backend.common_args(d), [])
+        self.assertEqual(d.backend.start_args(d), [])
+
+    def test_the_default_follows_the_machine(self):
+        with mock.patch.object(deploy, "is_apple_silicon", return_value=True):
+            self.assertTrue(LocalServerDeployment("/x").native)
+            self.assertFalse(LocalServerDeployment("/x", native=False).native)
+        with mock.patch.object(deploy, "is_apple_silicon", return_value=False):
+            self.assertFalse(LocalServerDeployment("/x").native)
+            self.assertTrue(LocalServerDeployment("/x", native=True).native)
+
+
+class NativeCase(TempInstallDir):
+    def setUp(self):
+        super().setUp()
+        _write_fake_ctl(self.install_dir, "print('{}')\n")
+        self.pin_dir = os.path.join(self.tmp, "pin")
+        patcher = mock.patch.object(deploy.tls, "local_tls_dir", return_value=self.pin_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tools = os.path.join(self.tmp, "SADT-VISOR")
+        self.captured = []
+
+    def native(self, **kwargs):
+        return self.deployment(native=True, tools_dir=self.tools, **kwargs)
+
+    def capture(self, deployment):
+        def fake(args, progress_cb=None):
+            self.captured.append(list(args))
+            return {"url": "https://127.0.0.1:8000"}
+        return mock.patch.object(deployment, "run_ctl", side_effect=fake)
+
+
+class TestNativeCommands(NativeCase):
+    def test_up_names_the_backend_the_tools_and_the_certificate(self):
+        d = self.native()
+        with self.capture(d):
+            d.up(port=8123, bind=deploy.BIND_LOCALHOST)
+        args = self.captured[0]
+        cert = os.path.join(self.pin_dir, "server.crt")
+        key = os.path.join(self.pin_dir, "server.key")
+        self.assertEqual(args, ["up", "--native", "--tools-dir", self.tools,
+                                "--tls-cert", cert, "--tls-key", key,
+                                "--port", "8123", "--bind", "127.0.0.1"])
+
+    def test_the_certificate_exists_when_up_is_called(self):
+        d = self.native()
+        with self.capture(d):
+            d.up()
+        self.assertTrue(os.path.isfile(os.path.join(self.pin_dir, "server.crt")))
+        self.assertTrue(os.path.isfile(os.path.join(self.pin_dir, "server.key")))
+        self.assertEqual(deploy.tls.pinned_certificate("127.0.0.1"),
+                         os.path.join(self.pin_dir, "server.crt"))
+
+    def test_update_carries_the_certificate_too(self):
+        d = self.native()
+        with self.capture(d), self.publishes():
+            d.update(force=True)
+        args = self.captured[0]
+        self.assertEqual(args[:4], ["update", "--native", "--tools-dir", self.tools])
+        self.assertIn("--tls-cert", args)
+        self.assertIn("--tls-key", args)
+        self.assertEqual(args[args.index("--branch") + 1], deploy.DEFAULT_BRANCH)
+        self.assertEqual(args[-1], "--force")
+
+    def publishes(self, supported=True):
+        return mock.patch.object(deploy.LocalServerDeployment, "_ctl_publishes", return_value=supported)
+
+    def test_update_names_the_tools_branch(self):
+        d = self.native(tools_branch="update")
+        with self.capture(d), self.publishes():
+            d.update(force=True)
+        args = self.captured[0]
+        i = args.index("--tools-branch")
+        self.assertEqual(args[i:i + 2], ["--tools-branch", "update"])
+        self.assertNotIn("--tools-url", args)
+        self.assertEqual(args[-1], "--force")
+
+    def test_update_names_the_tools_url_only_when_it_is_not_the_default(self):
+        url = "https://github.com/someone/SADT-VISOR.git"
+        d = self.native(tools_branch="dev", tools_repo_url=url)
+        with self.capture(d), self.publishes():
+            d.update()
+        args = self.captured[0]
+        self.assertEqual(args[args.index("--tools-branch"):][:4], ["--tools-branch", "dev", "--tools-url", url])
+        d = self.native()
+        with self.capture(d), self.publishes():
+            d.update()
+        self.assertEqual(self.captured[1][self.captured[1].index("--tools-branch") + 1], deploy.DEFAULT_TOOLS_BRANCH)
+        self.assertNotIn("--tools-url", self.captured[1])
+
+    def test_an_older_server_is_not_sent_options_it_does_not_know(self):
+        d = self.native()
+        with self.capture(d), self.publishes(False):
+            d.update()
+        self.assertNotIn("--tools-branch", self.captured[0])
+        self.assertNotIn("--tools-url", self.captured[0])
+
+    def test_an_older_server_refuses_a_chosen_branch_in_plain_words(self):
+        for kwargs in ({"tools_branch": "update"},
+                       {"tools_repo_url": "https://example.org/x/SADT-VISOR.git"}):
+            d = self.native(**kwargs)
+            with self.capture(d), self.publishes(False), self.assertRaises(DeploymentError) as caught:
+                d.update()
+            self.assertIn("too old", str(caught.exception))
+            self.assertIn("not touched", str(caught.exception))
+            self.assertEqual(self.captured, [])
+
+    def test_the_help_probe_reads_what_the_installed_server_publishes(self):
+        with_option = "import sys\nprint('usage: update [--tools-branch B]' if 'update' in sys.argv else '')\n"
+        _write_fake_ctl(self.install_dir, with_option)
+        self.assertTrue(self.native()._ctl_publishes("--tools-branch"))
+        _write_fake_ctl(self.install_dir, "print('usage: update [--force]')\n")
+        self.assertFalse(self.native()._ctl_publishes("--tools-branch"))
+        _write_fake_ctl(self.install_dir, "import sys\nsys.exit(2)\n")
+        self.assertFalse(self.native()._ctl_publishes("--tools-branch"))
+
+    def test_a_refused_switch_is_shown_as_is_and_says_the_old_server_runs(self):
+        refusal = ("Tools checkout /x/SADT-VISOR: it is on 'main' and 'update' was asked for, but the "
+                   "tree has uncommitted changes. Commit or discard them, then update again.")
+        d = self.native(tools_branch="update")
+        with self.publishes(), mock.patch.object(d, "run_ctl", side_effect=DeploymentError(refusal)), \
+                self.assertRaises(DeploymentError) as caught:
+            d.update()
+        message = str(caught.exception)
+        self.assertTrue(message.startswith(refusal))
+        self.assertIn("still running", message)
+        self.assertNotIn("nothing is serving", message)
+
+    def test_a_failed_relaunch_says_the_old_server_is_stopped(self):
+        stopped = ("The old native server was stopped, and the new one did not start (X: y). "
+                   "Nothing is serving now.")
+        d = self.native()
+        with self.publishes(), mock.patch.object(d, "run_ctl", side_effect=DeploymentError(stopped)), \
+                self.assertRaises(DeploymentError) as caught:
+            d.update()
+        message = str(caught.exception)
+        self.assertTrue(message.startswith(stopped))
+        self.assertIn("was stopped and the new one is not running", message)
+        self.assertNotIn("still running", message)
+
+    def test_other_update_errors_are_passed_on_untouched(self):
+        d = self.native()
+        with self.publishes(), mock.patch.object(d, "run_ctl", side_effect=DeploymentError("boom")), \
+                self.assertRaises(DeploymentError) as caught:
+            d.update()
+        self.assertEqual(str(caught.exception), "boom")
+
+    def test_docker_update_argv_is_what_it_was_before(self):
+        d = self.deployment(native=False, tools_branch="update",
+                            tools_repo_url="https://example.org/x/SADT-VISOR.git")
+        with self.capture(d), mock.patch.object(deploy.subprocess, "run") as run:
+            d.update()
+            d.update(force=True, bind=deploy.BIND_LOCALHOST)
+        run.assert_not_called()
+        self.assertEqual(self.captured[0], ["update", "--branch", deploy.DEFAULT_BRANCH])
+        self.assertEqual(self.captured[1], ["update", "--branch", deploy.DEFAULT_BRANCH,
+                                            "--bind", "127.0.0.1", "--force"])
+
+    def test_install_tools_is_native_only_and_names_each_tool(self):
+        d = self.native()
+        with self.capture(d):
+            d.install_tools()
+            d.install_tools(tools=["AMASSS", "ALI_CBCT"], force=True)
+        self.assertEqual(self.captured[0], ["install-tools", "--native", "--tools-dir", self.tools])
+        self.assertEqual(self.captured[1], ["install-tools", "--native", "--tools-dir", self.tools,
+                                            "--tool", "AMASSS", "--tool", "ALI_CBCT", "--force"])
+        with self.assertRaises(DeploymentError):
+            self.deployment(native=False).install_tools()
+
+    def test_the_rest_of_the_commands_say_native_too(self):
+        d = self.native()
+        with self.capture(d):
+            d.status(check_remote=True)
+            d.down()
+            d.logs(50)
+        base = ["--native", "--tools-dir", self.tools]
+        self.assertEqual(self.captured[0], ["status"] + base + ["--branch", deploy.DEFAULT_BRANCH,
+                                                                 "--check-remote"])
+        self.assertEqual(self.captured[1], ["down"] + base)
+        self.assertEqual(self.captured[2], ["logs"] + base + ["-n", "50"])
+
+    def test_up_and_update_never_reach_for_the_certificate_in_docker_mode(self):
+        d = self.deployment(native=False)
+        with self.capture(d):
+            d.up(port=8123)
+            d.update()
+        self.assertEqual(self.captured[0], ["up", "--port", "8123"])
+        self.assertEqual(self.captured[1], ["update", "--branch", deploy.DEFAULT_BRANCH])
+        self.assertFalse(os.path.exists(self.pin_dir))
+
+    def test_a_wider_bind_is_refused_before_anything_starts(self):
+        d = self.native()
+        for bind in (deploy.BIND_EVERYWHERE, "192.168.1.10"):
+            with self.capture(d), self.assertRaises(DeploymentError):
+                d.up(bind=bind)
+            with self.capture(d), self.assertRaises(DeploymentError):
+                d.update(bind=bind)
+        self.assertEqual(self.captured, [])
+        self.assertFalse(os.path.exists(self.pin_dir))
+
+    def test_a_certificate_failure_is_a_DeploymentError(self):
+        d = self.native()
+        boom = deploy.local_cert.CertificateError("no openssl")
+        with mock.patch.object(deploy.local_cert, "ensure_local_certificate", side_effect=boom), \
+                self.capture(d), self.assertRaises(DeploymentError) as caught:
+            d.up()
+        self.assertIn("no openssl", str(caught.exception))
+        self.assertEqual(self.captured, [])
+
+    def test_the_stop_on_quit_is_native_too(self):
+        d = self.native()
+        with mock.patch.object(deploy.subprocess, "Popen") as popen:
+            self.assertTrue(d.stop_detached())
+        command = popen.call_args[0][0]
+        self.assertEqual(command[2:], ["down", "--native", "--tools-dir", self.tools])
+
+
+class TestNativeToolsCheckout(NativeCase):
+    def test_the_tools_folder_is_beside_the_install_folder(self):
+        d = self.deployment(native=True)
+        self.assertEqual(d.tools_dir, os.path.join(self.tmp, "SADT-VISOR"))
+        self.assertFalse(d.tools_cloned)
+
+    def test_it_is_cloned_with_the_configured_branch(self):
+        d = self.native(tools_branch="feat/mps-devices", tools_repo_url="https://example.org/t.git")
+        with mock.patch.object(d, "_spawn", return_value=(1, "")) as spawn, \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/git"), \
+                self.assertRaises(DeploymentError):
+            d.clone_tools()
+        self.assertEqual(spawn.call_args[0][0], ["git", "clone", "--branch", "feat/mps-devices",
+                                                 "https://example.org/t.git", self.tools])
+
+    def test_an_existing_checkout_is_reused(self):
+        os.makedirs(os.path.join(self.tools, "tools"))
+        d = self.native()
+        with mock.patch.object(d, "_spawn") as spawn:
+            d.clone_tools()
+        spawn.assert_not_called()
+
+    def test_a_foreign_folder_is_not_cloned_over(self):
+        os.makedirs(self.tools)
+        open(os.path.join(self.tools, "mine.txt"), "w").close()
+        d = self.native()
+        with mock.patch.object(d, "_spawn") as spawn, \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/git"), \
+                self.assertRaises(DeploymentError):
+            d.clone_tools()
+        spawn.assert_not_called()
+
+    def test_docker_mode_clones_nothing(self):
+        d = self.deployment(native=False)
+        with mock.patch.object(d, "_spawn") as spawn:
+            d.clone_tools()
+        spawn.assert_not_called()
+
+
+class TestNativeStatusBeforeInstalling(NativeCase):
+    def test_docker_is_never_asked(self):
+        shutil.rmtree(os.path.join(self.install_dir, "scripts"))     # nothing installed yet
+        d = self.native()
+        asked = []
+
+        def fake_run(command, **_kwargs):
+            asked.append(command[0])
+            return deploy.subprocess.CompletedProcess(command, 0, "git version 2.50\n", "")
+
+        with mock.patch.object(deploy.subprocess, "run", fake_run), \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/x"):
+            status = d.status()
+        self.assertNotIn("docker", asked)
+        self.assertTrue(status["native"])
+        self.assertFalse(status["cloned"])
+        self.assertFalse(status["docker"]["available"])
+
+
+class TestNativeClientUrl(NativeCase):
+    def setUp(self):
+        super().setUp()
+        self.reported = {"url": "https://127.0.0.1:8123", "token": "t", "healthy": True,
+                         "tls": {"enabled": True, "cert": os.path.join(self.pin_dir, "server.crt")}}
+
+    def pin(self):
+        deploy.local_cert.ensure_local_certificate(self.pin_dir)
+
+    def test_the_pinned_local_address_is_handed_over(self):
+        self.pin()
+        self.assertEqual(deploy.client_url(self.reported), "https://127.0.0.1:8123")
+        # `status` reports the same thing under `server`
+        status = {"server": {"url": "http://127.0.0.1:8123", "healthy": True},
+                  "tls": {"enabled": True}}
+        self.assertEqual(deploy.client_url(status), "https://127.0.0.1:8123")
+        # a stand-in answering from [::1] still gets OUR host; a name is not accepted
+        self.assertEqual(deploy.client_url(dict(self.reported, url="https://[::1]:9000")),
+                         "https://127.0.0.1:9000")
+        self.assertIsNone(deploy.client_url(dict(self.reported, url="https://localhost:9000")))
+
+    def test_without_the_server_saying_it_serves_tls_nothing_is_handed_over(self):
+        self.pin()
+        for tls_field in (None, {}, {"enabled": False}, "yes", []):
+            with self.subTest(tls=tls_field):
+                result = dict(self.reported, tls=tls_field)
+                self.assertIsNone(deploy.client_url(result))
+        result = dict(self.reported)
+        del result["tls"]
+        self.assertIsNone(deploy.client_url(result))
+
+    def test_without_a_pinned_certificate_nothing_is_handed_over(self):
+        self.assertIsNone(deploy.client_url(self.reported))
+
+    def test_only_this_machine_qualifies(self):
+        self.pin()
+        for url in ("https://10.0.0.5:8123", "https://server.example.org:8123", "https://127.0.0.2:8123",
+                    "https://127.0.0.1", "", None):
+            with self.subTest(url=url):
+                self.assertIsNone(deploy.client_url(dict(self.reported, url=url)))
+
+    def test_a_server_serving_some_other_certificate_is_not_trusted_to_say_so(self):
+        self.pin()
+        other = dict(self.reported, tls={"enabled": True, "cert": "/tmp/elsewhere.crt"})
+        self.assertIsNone(deploy.client_url(other))
+
+    def test_a_public_url_still_wins_and_docker_results_are_unchanged(self):
+        self.pin()
+        self.assertEqual(deploy.client_url(dict(self.reported, public_url="https://v.example.ts.net")),
+                         "https://v.example.ts.net")
+        self.assertIsNone(deploy.client_url({"url": "https://localhost:8000"}))
+
+    def test_the_message_for_a_native_server_that_does_not_report_tls(self):
+        self.assertIn("Update server", deploy.NO_LOCAL_TLS_MESSAGE)
+        self.assertNotIn("setup-tailscale", deploy.NO_LOCAL_TLS_MESSAGE)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+def _git(cwd, *args):
+    done = subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+    return done.stdout.strip()
+
+
+def _commit_file(repo, relpath, text="x\n"):
+    full = os.path.join(repo, relpath)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    _git(repo, "add", relpath)
+    _git(repo, "commit", "-q", "-m", "c " + relpath)
+
+
+class GitCase(NativeCase):
+    """A real origin with an old `main` (no native code) and a `mac` branch with it,
+    and a clone of it as the panel would have made."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.install_dir)
+        self.origin = os.path.join(self.tmp, "origin")
+        os.makedirs(self.origin)
+        _git(self.origin, "init", "-q", "-b", "main")
+        _commit_file(self.origin, "scripts/server_ctl.py", "print('{}')\n")
+        _git(self.origin, "checkout", "-q", "-b", "mac")
+        _commit_file(self.origin, "scripts/server_ctl_native.py")
+        _git(self.origin, "checkout", "-q", "main")
+        _git(self.tmp, "clone", "-q", "--branch", "main", self.origin, self.install_dir)
+
+    def head(self):
+        return _git(self.install_dir, "rev-parse", "--abbrev-ref", "HEAD"), _git(self.install_dir, "rev-parse", "HEAD")
+
+
+class TestNativeSupportCheck(GitCase):
+    def test_a_branch_with_native_support_passes_without_touching_the_clone(self):
+        d = self.native(branch="mac", repo_url=self.origin)
+        before = self.head()
+        d.require_native_support()
+        self.assertEqual(self.head(), before)
+        self.assertEqual(_git(self.install_dir, "status", "--porcelain"), "")
+        self.assertFalse(os.path.exists(os.path.join(self.install_dir, "scripts", "server_ctl_native.py")))
+
+    def test_a_branch_without_it_is_refused_before_anything_changes(self):
+        _git(self.origin, "branch", "old", "main")
+        d = self.native(branch="old", repo_url=self.origin)
+        before = self.head()
+        with self.assertRaises(DeploymentError) as caught:
+            d.require_native_support()
+        message = str(caught.exception)
+        self.assertIn("'old'", message)
+        self.assertIn("no native", message)
+        self.assertIn("Branch", message)
+        self.assertIn("Repository URL", message)
+        self.assertEqual(self.head(), before)
+        self.assertEqual(_git(self.install_dir, "remote", "get-url", "origin"), self.origin)
+
+    def test_a_clone_already_on_the_branch_is_read_in_place(self):
+        d = self.native(branch="main", repo_url=self.origin)
+        with mock.patch.object(deploy.subprocess, "run", wraps=deploy.subprocess.run) as run:
+            with self.assertRaises(DeploymentError):
+                d.require_native_support()
+        self.assertFalse(any("fetch" in call.args[0] for call in run.call_args_list))
+        _git(self.install_dir, "merge", "-q", "origin/main")
+        _git(self.install_dir, "fetch", "-q", "origin", "mac")
+        _git(self.install_dir, "merge", "-q", "FETCH_HEAD")
+        self.native(branch="main", repo_url=self.origin).require_native_support()
+
+    def test_docker_never_looks(self):
+        d = self.deployment(native=False, branch="old")
+        with mock.patch.object(deploy.subprocess, "run") as run:
+            d.require_native_support()
+        run.assert_not_called()
+
+    def test_an_unreachable_origin_does_not_block(self):
+        _git(self.install_dir, "remote", "set-url", "origin", os.path.join(self.tmp, "gone"))
+        messages = []
+        d = self.native(branch="mac")
+        d.require_native_support(progress_cb=messages.append)
+        self.assertTrue(any("could not check" in m.lower() for m in messages))
+
+    def test_nothing_to_check_before_the_first_clone(self):
+        shutil.rmtree(self.install_dir)
+        self.native(branch="old").require_native_support()
+
+    def test_a_fresh_clone_of_a_branch_without_it_is_refused(self):
+        shutil.rmtree(self.install_dir)
+        d = self.native(branch="main", repo_url=self.origin)
+        with self.assertRaises(DeploymentError) as caught:
+            d.clone()
+        self.assertIn("no native", str(caught.exception))
+
+
+class TestRawArgparseIsExplained(NativeCase):
+    def failing(self, stderr_text):
+        _write_fake_ctl(self.install_dir, f"sys.stderr.write({stderr_text!r} + '\\n')\nsys.exit(2)\n")
+        return self.native(branch="main")
+
+    def test_invalid_choice_install_tools(self):
+        d = self.failing("server_ctl.py: error: argument command: invalid choice: 'install-tools' "
+                         "(choose from 'up', 'down')")
+        with self.assertRaises(DeploymentError) as caught:
+            d.install_tools()
+        message = str(caught.exception)
+        self.assertIn("no native", message)
+        self.assertIn("'main'", message)
+        self.assertIn("invalid choice: 'install-tools'", message)
+
+    def test_unrecognized_native_arguments(self):
+        d = self.failing("server_ctl.py: error: unrecognized arguments: --native --tools-dir /x")
+        with self.assertRaises(DeploymentError) as caught:
+            d.up()
+        self.assertIn("no native", str(caught.exception))
+        self.assertIn("unrecognized arguments", str(caught.exception))
+
+    def test_docker_keeps_the_raw_message(self):
+        _write_fake_ctl(self.install_dir, "sys.stderr.write('error: unrecognized arguments: --native\\n')\nsys.exit(2)\n")
+        d = self.deployment(native=False)
+        with self.assertRaises(DeploymentError) as caught:
+            d.run_ctl(["up"])
+        self.assertNotIn("no native", str(caught.exception))
+        self.assertIn("unrecognized arguments", str(caught.exception))
+
+
+class TestBranchSwitches(GitCase):
+    def test_a_clone_on_the_requested_branch_has_nothing_to_switch(self):
+        self.assertEqual(self.native(branch="main").pending_branch_switches(), [])
+
+    def test_the_server_clone_on_another_branch_is_named(self):
+        (switch,) = self.native(branch="mac").pending_branch_switches()
+        self.assertEqual((switch.current, switch.wanted, switch.dirty), ("main", "mac", False))
+        self.assertEqual(switch.path, self.install_dir)
+        self.assertIn("server", switch.what)
+
+    def test_a_dirty_tree_is_flagged(self):
+        with open(os.path.join(self.install_dir, "scripts", "server_ctl.py"), "a") as handle:
+            handle.write("# local edit\n")
+        (switch,) = self.native(branch="mac").pending_branch_switches()
+        self.assertTrue(switch.dirty)
+
+    def test_untracked_files_do_not_count_as_dirty(self):
+        open(os.path.join(self.install_dir, "scratch.txt"), "w").close()
+        (switch,) = self.native(branch="mac").pending_branch_switches()
+        self.assertFalse(switch.dirty)
+
+    def test_the_tools_clone_counts_in_native_mode_only(self):
+        shutil.copytree(self.origin, self.tools)
+        _git(self.tools, "checkout", "-q", "mac")
+        os.makedirs(os.path.join(self.tools, "tools"))
+        switches = self.native(branch="main", tools_branch="main").pending_branch_switches()
+        self.assertEqual([(s.current, s.wanted) for s in switches], [("mac", "main")])
+        self.assertIn("tools", switches[0].what)
+        self.assertEqual(self.deployment(native=False, branch="main", tools_branch="main",
+                                         ).pending_branch_switches(), [])
+
+    def test_a_missing_clone_has_nothing_to_switch(self):
+        shutil.rmtree(self.install_dir)
+        self.assertEqual(self.native(branch="mac").pending_branch_switches(), [])
+
+
+class TestTheBackendIsNamedToTheServer(TempInstallDir):
+    """server_ctl.py picks the native backend by itself on every darwin, while
+    this client keeps an Intel Mac on Docker. The client's choice is therefore
+    stated in the environment of every server_ctl.py it starts
+    ($VISOR_BACKEND, which the script already reads), so both always agree."""
+
+    def tearDown(self):
+        deploy.set_subprocess_env(None)
+        super().tearDown()
+
+    def backend_seen_by_ctl(self, **kwargs):
+        _write_fake_ctl(self.install_dir, (
+            "import os\n"
+            "print(json.dumps({'backend': os.environ.get('VISOR_BACKEND')}))\n"))
+        return self.deployment(**kwargs).run_ctl(["status"])["backend"]
+
+    def test_a_docker_deployment_says_docker(self):
+        self.assertEqual(self.backend_seen_by_ctl(native=False), "docker")
+
+    def test_a_native_deployment_says_native(self):
+        self.assertEqual(self.backend_seen_by_ctl(native=True), "native")
+
+    def test_it_overrides_whatever_the_environment_already_had(self):
+        deploy.set_subprocess_env({"PATH": os.environ.get("PATH", ""), "VISOR_BACKEND": "native"})
+        self.assertEqual(self.backend_seen_by_ctl(native=False), "docker")
+
+    def test_an_intel_mac_is_docker_all_the_way_to_the_server(self):
+        with mock.patch.object(deploy.sys, "platform", "darwin"), \
+                mock.patch.object(deploy.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(deploy, "is_apple_silicon", return_value=False):
+            self.assertEqual(self.backend_seen_by_ctl(), "docker")
+
+    def test_the_configured_environment_is_kept(self):
+        _write_fake_ctl(self.install_dir, (
+            "import os\n"
+            "print(json.dumps({'marker': os.environ.get('SLICERCLOUD_TEST_MARKER')}))\n"))
+        deploy.set_subprocess_env({"PATH": os.environ.get("PATH", ""),
+                                   "SLICERCLOUD_TEST_MARKER": "kept"})
+        self.assertEqual(self.deployment(native=False).run_ctl(["status"])["marker"], "kept")
+
+    def test_the_stop_on_exit_command_carries_it_too(self):
+        _write_fake_ctl(self.install_dir, "print('{}')\n")
+        with mock.patch.object(deploy.subprocess, "Popen") as popen:
+            self.deployment(native=False).stop_detached()
+        self.assertEqual(popen.call_args[1]["env"]["VISOR_BACKEND"], "docker")
+
+
+class TestNativePrerequisitesBeforeTheClone(NativeCase):
+    def probe(self, uv):
+        shutil.rmtree(os.path.join(self.install_dir, "scripts"), ignore_errors=True)
+        with mock.patch.object(deploy.subprocess, "run", return_value=deploy.subprocess.CompletedProcess(
+                [], 0, "git version 2.50\n", "")), \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/x"), \
+                mock.patch.object(deploy, "find_uv", return_value=uv):
+            return self.native().status()
+
+    def test_uv_is_reported_before_anything_is_cloned(self):
+        self.assertIsNone(self.probe(None)["uv"])
+        self.assertEqual(self.probe("/opt/homebrew/bin/uv")["uv"], "/opt/homebrew/bin/uv")
+
+    def test_find_uv_looks_where_a_gui_application_does_not_have_on_its_path(self):
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(home, ".local", "bin"))
+        uv = os.path.join(home, ".local", "bin", "uv")
+        with open(uv, "w") as handle:
+            handle.write("#!/bin/sh\n")
+        os.chmod(uv, 0o755)
+        with mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}, clear=False), \
+                mock.patch.object(deploy.shutil, "which", return_value=None), \
+                mock.patch.dict(os.environ, {"UV": ""}):
+            self.assertEqual(deploy.find_uv(), uv)
+
+
+class TestDescribeUpdate(unittest.TestCase):
+    def test_what_each_backend_did(self):
+        d = deploy.describe_update
+        self.assertEqual(d({"pulled": True, "clone": {"commit": "abc"}}), "Updated to abc and relaunched.")
+        self.assertEqual(d({"recreated": True}), "Already up to date; the container was relaunched.")
+        self.assertEqual(d({}), "Already up to date and running, nothing to do.")
+        self.assertEqual(d({"tools_pulled": True, "restarted": True}),
+                         "Tools updated; the server was relaunched.")
+        self.assertEqual(d({"pulled": True, "tools_pulled": True, "restarted": True,
+                            "clone": {"commit": "abc"}}),
+                         "Updated to abc and the tools; the server was relaunched.")
+        self.assertEqual(d({"restarted": True}), "Already up to date; the server was relaunched.")
+        self.assertEqual(d({"venvs": [{"action": "built"}], "restarted": True}),
+                         "1 tool environment(s) rebuilt; the server was relaunched.")
+
+
+class TestPortConflicts(unittest.TestCase):
+    """The server says a port is taken in two ways: a code (newer servers) and a
+    sentence (older ones). Both must be recognised, and neither shown raw."""
+
+    def test_by_code_with_the_owner(self):
+        error = deploy.DeploymentError("Something is already listening on port 8000", code="port_in_use",
+                                       port=8000, owner="Python (pid 4242)")
+        self.assertEqual(deploy.port_conflict(error), {"port": 8000, "owner": "Python (pid 4242)"})
+
+    def test_by_the_sentence_of_an_older_server(self):
+        error = deploy.DeploymentError(
+            "Something is already listening on port 8123 of this machine, and it is not this "
+            "deployment's native server. Pick another with --port, or stop whatever holds it.")
+        self.assertEqual(deploy.port_conflict(error), {"port": 8123, "owner": None})
+
+    def test_other_errors_are_not_port_conflicts(self):
+        self.assertIsNone(deploy.port_conflict(deploy.DeploymentError("git is missing")))
+        self.assertIsNone(deploy.port_conflict(RuntimeError("Something is already listening on port 1")))
+
+    def test_the_fields_come_from_the_servers_json_error(self):
+        tmp = tempfile.mkdtemp(prefix="slicercloud_test_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        install = os.path.join(tmp, "S")
+        _write_fake_ctl(install, (
+            "print(json.dumps({'error': 'Something is already listening on port 8000 of this machine.',"
+            " 'error_code': 'port_in_use', 'port': 8000, 'port_owner': 'Python (pid 4242)'}))\n"
+            "sys.exit(1)\n"))
+        with mock.patch.object(deploy, "is_apple_silicon", return_value=False):
+            d = LocalServerDeployment(install, python_executable=sys.executable)
+        with self.assertRaises(DeploymentError) as caught:
+            d.run_ctl(["up"])
+        self.assertEqual(caught.exception.code, "port_in_use")
+        self.assertEqual(deploy.port_conflict(caught.exception), {"port": 8000, "owner": "Python (pid 4242)"})
+
+
+class EnsureUpCase(unittest.TestCase):
+    """`ensure_up` never launches a server that is already running or starting."""
+
+    @property
+    def fixtures(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import fixtures
+        return fixtures
+
+    def deployment(self, statuses, up_result=None):
+        from SlicerCloudLib import backends
+        import copy
+        sequence = list(statuses)
+        calls = []
+
+        class D(LocalServerDeployment):
+            def __init__(self):
+                super().__init__("/tmp/nowhere", native=True)
+
+            def status(self, check_remote=False, progress_cb=None):
+                calls.append("status")
+                value = sequence.pop(0) if len(sequence) > 1 else sequence[0]
+                return copy.deepcopy(value)
+
+            def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+                calls.append(("up", port, bind))
+                return up_result or {"token": "t", "healthy": True}
+
+            def token(self, progress_cb=None):
+                return "the-token"
+
+        self.calls = calls
+        self.slept = []
+        return D()
+
+
+class TestEnsureUp(EnsureUpCase):
+    def run_it(self, statuses, **kw):
+        d = self.deployment(statuses)
+        messages = []
+        result = d.ensure_up(progress_cb=messages.append, timeout=kw.pop("timeout", 30),
+                             sleep=self.slept.append, **kw)
+        return result, messages
+
+    def test_a_running_server_is_not_launched_again(self):
+        result, _ = self.run_it([self.fixtures.native()])
+        self.assertNotIn(("up", None, None), self.calls)
+        self.assertTrue(result["already_running"] and not result["restarted"])
+        self.assertEqual(result["token"], "the-token")
+        self.assertEqual(result["url"], "https://127.0.0.1:8000")
+
+    def test_a_server_that_is_starting_is_waited_for_not_relaunched(self):
+        starting = self.fixtures.native(server={"healthy": False})
+        result, messages = self.run_it([starting, starting, self.fixtures.native()])
+        self.assertTrue([c for c in self.calls if isinstance(c, tuple)] == [])
+        self.assertEqual(len(self.slept), 2)
+        self.assertTrue(any("starting" in m.lower() for m in messages))
+        self.assertTrue(result["healthy"])
+
+    def test_a_server_that_never_comes_up_is_reported_not_relaunched(self):
+        starting = self.fixtures.native(server={"healthy": False})
+        d = self.deployment([starting])
+        with mock.patch.object(deploy.time, "monotonic", side_effect=[0, 1, 2, 100, 200]):
+            with self.assertRaises(DeploymentError) as caught:
+                d.ensure_up(timeout=10, sleep=lambda _s: None)
+        self.assertIn("still starting", str(caught.exception))
+        self.assertEqual([c for c in self.calls if isinstance(c, tuple)], [])
+
+    def test_a_stopped_server_is_launched_with_what_was_asked(self):
+        stopped = self.fixtures.native(container={"running": False}, server={"healthy": False})
+        d = self.deployment([stopped])
+        d.ensure_up(port=8123, bind="127.0.0.1", sleep=self.slept.append)
+        self.assertIn(("up", 8123, "127.0.0.1"), self.calls)
+
+    def test_nothing_installed_is_launched_too(self):
+        d = self.deployment([self.fixtures.native_uninstalled()])
+        d.ensure_up(sleep=self.slept.append)
+        self.assertIn(("up", None, None), self.calls)
