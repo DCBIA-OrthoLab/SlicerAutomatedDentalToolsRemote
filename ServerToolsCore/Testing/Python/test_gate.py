@@ -94,5 +94,43 @@ class TestSerializedStart(unittest.TestCase):
         self.assertEqual(overlap, [])
 
 
+class TestLocalWorkIsSharedWithSlicerCloud(unittest.TestCase):
+    """An install, a start or an update running in the SlicerCloud panel and the
+    automatic start of a tool panel must never both run `up`."""
+
+    def test_idle_by_default_and_busy_between_begin_and_end(self):
+        self.assertFalse(gate.local_work_active())
+        token = gate.begin_local_work()
+        self.assertTrue(gate.local_work_active())
+        gate.end_local_work(token)
+        self.assertFalse(gate.local_work_active())
+
+    def test_ending_twice_is_harmless(self):
+        token = gate.begin_local_work()
+        gate.end_local_work(token)
+        gate.end_local_work(token)
+        self.assertFalse(gate.local_work_active())
+
+    def test_two_jobs_keep_it_busy_until_both_end(self):
+        first, second = gate.begin_local_work(), gate.begin_local_work()
+        gate.end_local_work(first)
+        self.assertTrue(gate.local_work_active())
+        gate.end_local_work(second)
+        self.assertFalse(gate.local_work_active())
+
+    def test_waiting_returns_when_the_work_ends(self):
+        token = gate.begin_local_work()
+        threading.Timer(0.05, gate.end_local_work, args=(token,)).start()
+        self.assertTrue(gate.wait_for_idle(timeout=2))
+
+    def test_waiting_gives_up_after_the_timeout(self):
+        token = gate.begin_local_work()
+        self.addCleanup(gate.end_local_work, token)
+        self.assertFalse(gate.wait_for_idle(timeout=0.05))
+
+    def test_waiting_when_idle_is_immediate(self):
+        self.assertTrue(gate.wait_for_idle(timeout=0))
+
+
 if __name__ == "__main__":
     unittest.main()

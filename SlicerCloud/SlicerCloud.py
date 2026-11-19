@@ -73,6 +73,10 @@ _DEFAULT_STOP_ON_EXIT = True
 # unbounded QTextEdit makes the panel crawl long before anyone reads them.
 _LOG_MAX_BLOCKS = 2000
 
+# The jobs that change the local server's state; the tool panels' automatic
+# start waits for each of them to end.
+_SERVER_WORK = ("install", "start", "update", "stop")
+
 # Every row either backend can show, in an order that keeps each backend's own
 # order. The backend decides which are shown and what they say (checks()); the
 # rest are hidden, so no row ever describes something this machine does not use.
@@ -287,6 +291,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._stepLabels = []          # one label per install step, rebuilt per install
         self._rowChecks = {}           # {key: Check} behind the status rows, from the last render
         self._announceCheck = False    # the next status answers a press of the Update button
+        self._workToken = None         # marks install/start/update/stop for the tool panels' autostart
+        self._portError = None         # {"port", "owner"} after a start that found its port taken
+        self._portPending = False      # the refresh that follows such an error reports it
         self._logRequested = False     # the log was asked for (or a job failed): show it
 
     # ------------------------------------------------------------------
@@ -897,17 +904,24 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._jobName = name
         self._jobBlocking = blocking
         self._jobKind = kind if blocking else None
+        # While this panel installs, starts, updates or stops the server, the tool
+        # panels' automatic start waits (gate.wait_for_idle): two launches racing
+        # each other is how a server found its own port taken.
+        if blocking and kind in _SERVER_WORK:
+            self._workToken = gate.begin_local_work()
         self._setBusy(True, name, disable=blocking)
         self._log(f"--- {name} ---")
 
         def succeeded(result):
             self._job = None
+            self._endServerWork()
             self._setBusy(False, disable=blocking)
             self._applyActions()
             on_success(result)
 
         def failed(exc):
             self._job = None
+            self._endServerWork()
             self._setBusy(False, disable=blocking)
             self._applyActions()
             self._onJobError(name, exc, refresh_on_error)
@@ -917,12 +931,18 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._applyActions()
         self._job.start()
 
+    def _endServerWork(self) -> None:
+        token, self._workToken = self._workToken, None
+        if token is not None:
+            gate.end_local_work(token)
+
     def _cancelJob(self) -> None:
         if self._deployment is not None:
             self._deployment.cancel()
         if self._job is not None:
             self._job.cancel()
             self._job = None
+            self._endServerWork()
         self._setBusy(False)
         self._applyActions()
 
@@ -938,8 +958,20 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         # something asks for it, and a failure does.
         self._logRequested = True
         self._log(f"error: {message}")
+        conflict = deploy.port_conflict(exc)
+        if conflict and refresh:
+            # Not an error to show raw: the port is held, and the state that
+            # follows (PORT_TAKEN, or our own server running) carries the way out.
+            self._portError = conflict
+            self._portPending = True
+            self.onRefresh()
+            return
         if isinstance(exc, DeploymentError):
-            # Written for the user by deploy.py or by server_ctl.py — shown verbatim.
+            # Written for the user by deploy.py or by server_ctl.py, shown verbatim,
+            # then what can be done about it.
+            if self._jobKind in ("install", "start"):
+                message += "\n\n" + _("The Log below has the details. Press Refresh to check the "
+                                       "state again.")
             slicer.util.errorDisplay(plain_text(message))
         else:
             logger.exception("%s failed", name)
@@ -1007,10 +1039,18 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def _onRefreshed(self, result) -> None:
         status, catalog, registered, facts = result
+        if self._portError and not (status.get("container") or {}).get("running"):
+            # The server said the port is held: believe it even if the probe, a
+            # moment apart, found the port free.
+            facts = dict(facts, port_in_use=True, port_owner=self._portError.get("owner"))
+            if self._portError.get("port"):
+                facts["port"] = self._portError["port"]
         self._lastStatus = status
         self._lastFacts = facts
         self._registeredTools = registered
         self._renderStatus(status)
+        if self._portPending:
+            self._reportPortConflict()
         if self._announceCheck:
             self._announceCheck = False
             texts = self.backend.texts
@@ -1020,6 +1060,30 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             slicer.util.showStatusMessage(said, 5000)
         if catalog is not None:
             self._renderCatalog(catalog)
+
+    def _reportPortConflict(self) -> None:
+        """Say what the port error means, now that the state is known."""
+        self._portPending = False
+        conflict = self._portError or {}
+        port = conflict.get("port") or self._lastFacts.get("port") or _DEFAULT_PORT
+        current = self._serverState()
+        if current.kind in (serverState.State.RUNNING, serverState.State.STARTING):
+            # The program holding the port is our own server: nothing to move.
+            self._portError = None
+            message = _("Port {0} is used by VISOR Local itself: it is already running, or still "
+                        "starting, so nothing needs to be started. Press '{1}' to connect the tools "
+                        "to it.").format(port, _(self.backend.texts.use_label))
+            self._log(message)
+            slicer.util.infoDisplay(plain_text(message))
+            return
+        owner = conflict.get("owner")
+        who = _("{0} is using port {1}").format(owner, port) if owner else \
+            _("Another program is using port {0}").format(port)
+        message = _("{0}, so {1} cannot start. Press 'Try another port' to start it on a free "
+                    "one, or stop that program first. The Log has the details.").format(
+                        who, _(self.backend.texts.title))
+        self._log(message)
+        slicer.util.errorDisplay(plain_text(message))
 
     def confirmBranchSwitch(self, text: str) -> bool:
         """Yes/no question for a branch switch. Its own method so a test (or a
@@ -1077,6 +1141,15 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         backend = deployment.backend
         self._saveSettings()
 
+        # A server that runs, or is still starting, is never launched again: the
+        # second launch is what reported its own port as taken. The button is not
+        # even shown in those states; this is for every other way in. A deliberate
+        # new port (Try another port) is the one case that must still reach `up`.
+        if port is None and self._lastStatus is not None and self._serverState().kind in (
+                serverState.State.RUNNING, serverState.State.STARTING):
+            self.onUseHere()
+            return
+
         # Handled before the job starts, not inside it: a remedy needs a decision
         # (and for Docker a password prompt), and neither can be asked for from a
         # worker thread.
@@ -1111,6 +1184,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         def done(result):
             self._finishInstallProgress(ok=True)
+            self._portError = None
             self._reportBranchSwitches(deployment, switches)
             if result.get("already_running") and not result.get("restarted"):
                 self._log(_("Server already running, address and token registered."))
@@ -1266,6 +1340,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
     def onTryAnotherPort(self) -> None:
         """The port is held by another program: start on the first free one. The
         server remembers it, so this has to be done once."""
+        self._portError = None
         port = deploy.find_free_port()
         if port is None:
             slicer.util.errorDisplay(_("No free port was found between 8001 and 8099."))
@@ -1444,7 +1519,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 ))
             self.onRefresh()
 
-        self._startJob(_("Updating the server"), task, done)
+        self._startJob(_("Updating the server"), task, done, kind="update")
 
     def onStop(self) -> None:
         deployment = self.deployment()
@@ -1452,6 +1527,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             _("Stopping the server"),
             lambda progress_cb: deployment.down(progress_cb=progress_cb),
             lambda _result: self.onRefresh(),
+            kind="stop",
         )
 
     def onShowLogs(self) -> None:

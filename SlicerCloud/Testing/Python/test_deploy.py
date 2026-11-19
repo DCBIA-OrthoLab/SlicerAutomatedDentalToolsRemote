@@ -1158,3 +1158,118 @@ class TestDescribeUpdate(unittest.TestCase):
         self.assertEqual(d({"restarted": True}), "Already up to date; the server was relaunched.")
         self.assertEqual(d({"venvs": [{"action": "built"}], "restarted": True}),
                          "1 tool environment(s) rebuilt; the server was relaunched.")
+
+
+class TestPortConflicts(unittest.TestCase):
+    """The server says a port is taken in two ways: a code (newer servers) and a
+    sentence (older ones). Both must be recognised, and neither shown raw."""
+
+    def test_by_code_with_the_owner(self):
+        error = deploy.DeploymentError("Something is already listening on port 8000", code="port_in_use",
+                                       port=8000, owner="Python (pid 4242)")
+        self.assertEqual(deploy.port_conflict(error), {"port": 8000, "owner": "Python (pid 4242)"})
+
+    def test_by_the_sentence_of_an_older_server(self):
+        error = deploy.DeploymentError(
+            "Something is already listening on port 8123 of this machine, and it is not this "
+            "deployment's native server. Pick another with --port, or stop whatever holds it.")
+        self.assertEqual(deploy.port_conflict(error), {"port": 8123, "owner": None})
+
+    def test_other_errors_are_not_port_conflicts(self):
+        self.assertIsNone(deploy.port_conflict(deploy.DeploymentError("git is missing")))
+        self.assertIsNone(deploy.port_conflict(RuntimeError("Something is already listening on port 1")))
+
+    def test_the_fields_come_from_the_servers_json_error(self):
+        tmp = tempfile.mkdtemp(prefix="slicercloud_test_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        install = os.path.join(tmp, "S")
+        _write_fake_ctl(install, (
+            "print(json.dumps({'error': 'Something is already listening on port 8000 of this machine.',"
+            " 'error_code': 'port_in_use', 'port': 8000, 'port_owner': 'Python (pid 4242)'}))\n"
+            "sys.exit(1)\n"))
+        with mock.patch.object(deploy, "is_apple_silicon", return_value=False):
+            d = LocalServerDeployment(install, python_executable=sys.executable)
+        with self.assertRaises(DeploymentError) as caught:
+            d.run_ctl(["up"])
+        self.assertEqual(caught.exception.code, "port_in_use")
+        self.assertEqual(deploy.port_conflict(caught.exception), {"port": 8000, "owner": "Python (pid 4242)"})
+
+
+class EnsureUpCase(unittest.TestCase):
+    """`ensure_up` never launches a server that is already running or starting."""
+
+    @property
+    def fixtures(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import fixtures
+        return fixtures
+
+    def deployment(self, statuses, up_result=None):
+        from SlicerCloudLib import backends
+        import copy
+        sequence = list(statuses)
+        calls = []
+
+        class D(LocalServerDeployment):
+            def __init__(self):
+                super().__init__("/tmp/nowhere", native=True)
+
+            def status(self, check_remote=False, progress_cb=None):
+                calls.append("status")
+                value = sequence.pop(0) if len(sequence) > 1 else sequence[0]
+                return copy.deepcopy(value)
+
+            def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+                calls.append(("up", port, bind))
+                return up_result or {"token": "t", "healthy": True}
+
+            def token(self, progress_cb=None):
+                return "the-token"
+
+        self.calls = calls
+        self.slept = []
+        return D()
+
+
+class TestEnsureUp(EnsureUpCase):
+    def run_it(self, statuses, **kw):
+        d = self.deployment(statuses)
+        messages = []
+        result = d.ensure_up(progress_cb=messages.append, timeout=kw.pop("timeout", 30),
+                             sleep=self.slept.append, **kw)
+        return result, messages
+
+    def test_a_running_server_is_not_launched_again(self):
+        result, _ = self.run_it([self.fixtures.native()])
+        self.assertNotIn(("up", None, None), self.calls)
+        self.assertTrue(result["already_running"] and not result["restarted"])
+        self.assertEqual(result["token"], "the-token")
+        self.assertEqual(result["url"], "https://127.0.0.1:8000")
+
+    def test_a_server_that_is_starting_is_waited_for_not_relaunched(self):
+        starting = self.fixtures.native(server={"healthy": False})
+        result, messages = self.run_it([starting, starting, self.fixtures.native()])
+        self.assertTrue([c for c in self.calls if isinstance(c, tuple)] == [])
+        self.assertEqual(len(self.slept), 2)
+        self.assertTrue(any("starting" in m.lower() for m in messages))
+        self.assertTrue(result["healthy"])
+
+    def test_a_server_that_never_comes_up_is_reported_not_relaunched(self):
+        starting = self.fixtures.native(server={"healthy": False})
+        d = self.deployment([starting])
+        with mock.patch.object(deploy.time, "monotonic", side_effect=[0, 1, 2, 100, 200]):
+            with self.assertRaises(DeploymentError) as caught:
+                d.ensure_up(timeout=10, sleep=lambda _s: None)
+        self.assertIn("still starting", str(caught.exception))
+        self.assertEqual([c for c in self.calls if isinstance(c, tuple)], [])
+
+    def test_a_stopped_server_is_launched_with_what_was_asked(self):
+        stopped = self.fixtures.native(container={"running": False}, server={"healthy": False})
+        d = self.deployment([stopped])
+        d.ensure_up(port=8123, bind="127.0.0.1", sleep=self.slept.append)
+        self.assertIn(("up", 8123, "127.0.0.1"), self.calls)
+
+    def test_nothing_installed_is_launched_too(self):
+        d = self.deployment([self.fixtures.native_uninstalled()])
+        d.ensure_up(sleep=self.slept.append)
+        self.assertIn(("up", None, None), self.calls)

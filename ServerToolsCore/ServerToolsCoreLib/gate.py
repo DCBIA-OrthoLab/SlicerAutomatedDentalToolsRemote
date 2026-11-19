@@ -49,7 +49,7 @@ BODY_INSTALLED = (
     "Start it to use these tools."
 )
 TITLE_STARTING = "Starting VISOR Local"
-BODY_STARTING = "VISOR Local was stopped when Slicer last closed. It is starting again, this can take a minute."
+BODY_STARTING = "VISOR Local is starting. This can take a minute."
 TITLE_FAILED = "VISOR Local did not start"
 BODY_FAILED = "{reason}\n\nOpen VISOR Local to see what is wrong, or try again."
 OPEN_LOCAL = "Open VISOR Local"
@@ -104,6 +104,41 @@ _provider = None
 # The server's `up` is idempotent, but two launches racing each other are not
 # something to rely on: they take turns, and the second finds it running.
 _start_lock = threading.Lock()
+
+
+# Work the SlicerCloud panel is doing on the local server (an install, a start,
+# an update, a stop). The tool panels' automatic start waits for it to end: two
+# `up` racing each other is how "port 8000 is already used" came from the very
+# server being started.
+_work = threading.Condition()
+_work_tokens = set()
+_work_next = [0]
+
+
+def begin_local_work():
+    """Mark the start of work on the local server; returns the token to end it with."""
+    with _work:
+        _work_next[0] += 1
+        _work_tokens.add(_work_next[0])
+        return _work_next[0]
+
+
+def end_local_work(token) -> None:
+    """Idempotent: ending a token twice, or one never begun, changes nothing."""
+    with _work:
+        _work_tokens.discard(token)
+        _work.notify_all()
+
+
+def local_work_active() -> bool:
+    with _work:
+        return bool(_work_tokens)
+
+
+def wait_for_idle(timeout=None) -> bool:
+    """Block until no work is running on the local server. False on timeout."""
+    with _work:
+        return _work.wait_for(lambda: not _work_tokens, timeout)
 
 
 def register_provider(provider) -> None:

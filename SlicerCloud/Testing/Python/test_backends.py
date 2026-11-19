@@ -197,6 +197,10 @@ class FakeDeployment:
         self.calls.append(("up", port, bind))
         return {"healthy": True}
 
+    def ensure_up(self, progress_cb=None, port=None, bind=None):
+        self.calls.append(("ensure_up", port, bind))
+        return {"healthy": True}
+
     def status(self, progress_cb=None):
         self.calls.append("status")
         if self.docker_usable:
@@ -221,7 +225,7 @@ class TestInstallPlan(unittest.TestCase):
         self.assertEqual(self.keys(NATIVE, fixtures.native_uninstalled()),
                          ["support", "clone", "tools", "environments", "start"])
         calls, result = self.run_plan(NATIVE, fixtures.native_uninstalled())
-        self.assertEqual(calls, ["support", "clone", "tools", "environments", ("up", 8000, "127.0.0.1")])
+        self.assertEqual(calls, ["support", "clone", "tools", "environments", ("ensure_up", 8000, "127.0.0.1")])
         self.assertEqual(result, {"healthy": True})
 
     def test_native_starting_an_installed_server_is_check_then_start(self):

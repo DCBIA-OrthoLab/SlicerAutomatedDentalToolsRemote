@@ -86,7 +86,17 @@ NATIVE_SETUP_BYTES = 15 * 1024 ** 3
 
 
 class DeploymentError(Exception):
-    """Something the user can act on, with a message written for them."""
+    """Something the user can act on, with a message written for them.
+
+    `code`, `port` and `owner` are filled when the server's JSON error carried
+    `error_code`, `port` and `port_owner` (newer servers); all None otherwise.
+    """
+
+    def __init__(self, message="", code=None, port=None, owner=None):
+        super().__init__(message)
+        self.code = code
+        self.port = port
+        self.owner = owner
 
 
 class BranchSwitch(collections.namedtuple("BranchSwitch", "what path current wanted dirty")):
@@ -525,8 +535,7 @@ class DockerBackend(Backend):
         if kind == "broken":
             return "The install in this folder cannot be used. Check the log, or choose another folder."
         if kind == "port_taken":
-            return ("Another program is using the port this server needs. Press 'Try another port', "
-                    "or stop that program.")
+            return _port_taken_sentence(facts, "this server")
         if kind in ("installed_stopped", "starting", "running"):
             if clone.get("branch_mismatch"):
                 return (f"The clone is on branch '{clone.get('branch')}' but this deployment asks for "
@@ -844,8 +853,11 @@ class NativeBackend(Backend):
             deployment.install_tools(progress_cb=progress_cb)
 
         def start(deployment, progress_cb, options):
-            return deployment.up(progress_cb=progress_cb, port=options.get("port"),
-                                 bind=options.get("bind"))
+            # Not a bare `up`: another panel may have started the server while the
+            # tools were being prepared, and launching it twice is what reports
+            # its own port as taken. `ensure_up` waits for one that is starting.
+            return deployment.ensure_up(progress_cb=progress_cb, port=options.get("port"),
+                                        bind=options.get("bind"))
 
         steps = [Step("support", "Check the server version", 1, support)]
         if not status.get("cloned"):
@@ -882,8 +894,7 @@ class NativeBackend(Backend):
         if kind == "broken":
             return "The install in this folder cannot be used. Check the log, or choose another folder."
         if kind == "port_taken":
-            return ("Another program is using the port VISOR Local needs. Press 'Try another port', "
-                    "or stop that program.")
+            return _port_taken_sentence(facts, "VISOR Local")
         if kind in ("installed_stopped", "starting", "running"):
             if clone.get("branch_mismatch") and not developer:
                 return "A newer version is available. Press 'Update VISOR Local'."
@@ -898,6 +909,16 @@ class NativeBackend(Backend):
             return ("VISOR Local is starting; the first start can take a few minutes."
                     + (" Check the Log." if developer else ""))
         return "VISOR Local is running on this Mac. Open any tool (ALI, AMASSS, ...) to use it."
+
+
+def _port_taken_sentence(facts, what: str) -> str:
+    """The hint of the PORT_TAKEN state: names the program when the server knew it."""
+    facts = facts or {}
+    port = facts.get("port")
+    owner = facts.get("port_owner")
+    where = f"port {port}" if port else "the port " + what + " needs"
+    who = f"{owner} is using {where}" if owner else f"Another program is using {where}"
+    return f"{who}, so {what} cannot start. Press 'Try another port', or stop that program."
 
 
 def _has_nvidia_cdi_device(raw) -> bool:

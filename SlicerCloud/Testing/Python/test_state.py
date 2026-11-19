@@ -190,7 +190,7 @@ TABLE = [
      fixtures.docker(container={"running": False}, server={"healthy": False}, clone={"behind": 2}),
      DOCKER, None, UNSET, "install", {"install", "update", "refresh", "logs"}),
     ("docker: starting", fixtures.docker(server={"healthy": False}), DOCKER, None, UNSET,
-     None, {"stop", "refresh", "logs"}),
+     "use_here", {"use_here", "stop", "refresh", "logs"}),
     ("docker: running, client unset", fixtures.docker(), DOCKER, None, UNSET,
      "use_here", {"use_here", "stop", "update", "refresh", "logs"}),
     ("docker: running, client here",
@@ -233,6 +233,16 @@ class TestTheButtonsEachStateOffers(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(result.primary, primary)
                 self.assertEqual(set(result.shown), shown)
+
+    def test_a_server_that_is_starting_can_already_be_used(self):
+        """Pressing the main button while it starts must connect the tools, never
+        launch it a second time (that reported its own port as taken)."""
+        starting = fixtures.native(server={"healthy": False})
+        elsewhere = classify(starting, NATIVE, FREE, None, REMOTE)
+        self.assertEqual(actions(elsewhere).primary, "use_here")
+        here = classify(starting, NATIVE, FREE, None, LOCAL)
+        self.assertNotIn("use_here", actions(here).shown)
+        self.assertNotIn("install", actions(elsewhere).shown)
 
     def test_update_is_one_button_that_checks_when_nothing_is_known(self):
         """'Check for updates' used to be a second control. It is the same

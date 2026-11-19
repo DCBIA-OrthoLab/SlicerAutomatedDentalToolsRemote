@@ -239,6 +239,7 @@ except ImportError:
 
 import SlicerCloud  # noqa: E402
 from SlicerCloudLib import progress  # noqa: E402
+from SlicerCloudLib import state as serverState  # noqa: E402
 from SlicerCloudLib import backends  # noqa: E402
 
 
@@ -339,6 +340,10 @@ class FakeDeployment:
     def clone(self, progress_cb=None):
         self.calls.append("clone")
         return {"cloned": True}
+
+    def ensure_up(self, progress_cb=None, port=None, bind=None, timeout=180.0, sleep=None):
+        """What the native install's last step calls: `up` unless one is running."""
+        return self.up(progress_cb=progress_cb, port=port, bind=bind)
 
     def enable_gpu_runtime(self, progress_cb=None):
         self.calls.append("enable_gpu_runtime")
@@ -2009,3 +2014,188 @@ class TestTheKeptServerIsNeverLogged(GuidedCase):
         self.assertNotIn("SECRET-LAB-KEY", everything)
         self.assertNotIn("the-token", everything)
         self.assertEqual(client.token, "SECRET-LAB-KEY")
+
+
+class TestInstallAndStartNeverRaceTheToolPanels(GuidedCase):
+    """The tool panels' automatic start waits while this panel works on the local
+    server; the marker covers install, start, update and stop, and always ends."""
+
+    def setUp(self):
+        GuidedCase.setUp(self)
+        from ServerToolsCoreLib import gate
+        self.gate = gate
+        self.assertFalse(gate.local_work_active())
+        self.addCleanup(lambda: [gate.end_local_work(t) for t in list(gate._work_tokens)])
+
+    def test_an_install_in_flight_marks_the_work_and_ending_clears_it(self):
+        SyncJob.defer = True
+        widget = self.show(fixtures.native_uninstalled())
+        SyncJob.pending.pop(0).finish()
+        widget.onInstall()
+        self.assertTrue(self.gate.local_work_active())
+        SyncJob.pending.pop(0).finish()
+        self.assertFalse(self.gate.local_work_active())
+
+    def test_a_failed_job_clears_it_too(self):
+        class Failing(serving(fixtures.native_uninstalled(), backends.NATIVE)):
+            def require_native_support(self, progress_cb=None):
+                raise SlicerCloud.DeploymentError("nope")
+
+        SlicerCloud.LocalServerDeployment = Failing
+        widget = self.panel()
+        widget.onInstall()
+        self.assertFalse(self.gate.local_work_active())
+
+    def test_cancelling_clears_it(self):
+        SyncJob.defer = True
+        widget = self.show(fixtures.native_uninstalled())
+        SyncJob.pending.pop(0).finish()
+        widget.onInstall()
+        widget.onCancel()
+        self.assertFalse(self.gate.local_work_active())
+
+    def test_an_update_and_a_stop_mark_it(self):
+        for press in ("onUpdate", "onStop"):
+            SyncJob.defer = True
+            SyncJob.pending = []
+            widget = self.show(fixtures.native(), client=LOCAL_URL,
+                               require_native_support=lambda self, progress_cb=None: None,
+                               clone_tools=lambda self, progress_cb=None: None,
+                               install_tools=lambda self, progress_cb=None: None)
+            SyncJob.pending.pop(0).finish()
+            getattr(widget, press)()
+            self.assertTrue(self.gate.local_work_active(), press)
+            SyncJob.pending.pop(0).finish()
+            self.assertFalse(self.gate.local_work_active(), press)
+
+    def test_a_status_check_is_not_work(self):
+        SyncJob.defer = True
+        self.show(fixtures.native())
+        self.assertFalse(self.gate.local_work_active())
+
+
+class PortCase(GuidedCase):
+    STOPPED = None
+
+    def failing(self, error, status=None, **facts):
+        status = status or fixtures.native(container={"running": False}, server={"healthy": False})
+
+        def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+            raise error
+
+        widget = self.show(status, up=up, **{})
+        return widget
+
+
+class TestAPortErrorIsAStateWithASolution(PortCase):
+    def owner_error(self):
+        return SlicerCloud.DeploymentError(
+            "Something is already listening on port 8000 of this machine, and it is not this "
+            "deployment's native server. Pick another with --port, or stop whatever holds it.",
+            code="port_in_use", port=8000, owner="Python (pid 4242)")
+
+    def start_it(self, widget):
+        widget.onInstall()
+
+    def test_the_panel_becomes_port_taken_and_names_the_program(self):
+        widget = self.failing(self.owner_error())
+        # The probe sees nothing on the port in this test: the server's word counts.
+        self.start_it(widget)
+        self.assertEqual(widget._serverState().kind, serverState.State.PORT_TAKEN)
+        self.assertIn("Python (pid 4242)", widget.hintLabel.text)
+        self.assertIn("8000", widget.hintLabel.text)
+        self.assertIn("portButton", visible(widget))
+        self.assertIn("showLogsButton", visible(widget))
+
+    def test_the_dialog_is_a_sentence_with_the_way_out_not_the_raw_error(self):
+        widget = self.failing(self.owner_error())
+        self.start_it(widget)
+        (text,) = DIALOGS["error"]
+        self.assertIn("Python (pid 4242)", text)
+        self.assertIn("Try another port", text)
+        self.assertNotIn("--port", text)
+        self.assertNotIn("Something is already listening", text)
+
+    def test_an_older_server_is_recognised_by_its_sentence(self):
+        error = SlicerCloud.DeploymentError(
+            "Something is already listening on port 8123 of this machine, and it is not this "
+            "deployment's native server. Pick another with --port, or stop whatever holds it.")
+        widget = self.failing(error)
+        self.start_it(widget)
+        self.assertEqual(widget._serverState().kind, serverState.State.PORT_TAKEN)
+        self.assertIn("8123", widget.hintLabel.text)
+        self.assertIn("portButton", visible(widget))
+        self.assertNotIn("--port", DIALOGS["error"][0])
+
+    def test_try_another_port_then_works_and_clears_the_conflict(self):
+        widget = self.failing(self.owner_error())
+        self.start_it(widget)
+        ports = []
+
+        def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+            ports.append(port)
+            return {"url": LOCAL_URL, "token": "t", "healthy": True}
+
+        SlicerCloud.LocalServerDeployment = serving(
+            fixtures.native(container={"running": False}, server={"healthy": False}),
+            backends.NATIVE, up=up)
+        widget._deployment = None
+        widget.onTryAnotherPort()
+        self.assertEqual(ports, [8001])
+        self.assertIsNone(widget._portError)
+
+    def test_when_the_owner_is_our_own_server_it_offers_to_use_it_instead(self):
+        """The server was running (or starting) all along: nothing to move, nothing
+        to fix. The panel says so and offers to connect the tools to it."""
+        error = self.owner_error()
+        status = fixtures.native(server={"healthy": False})   # process running, /health not yet
+
+        def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+            raise error
+
+        widget = self.show(status, up=up, client=REMOTE_URL)
+        widget._lastStatus = None
+        widget._portError = None
+        # a job that failed with the port error while the status says it is ours
+        widget._onJobError("Starting the server", error)
+        self.assertEqual(widget._serverState().kind, serverState.State.STARTING)
+        self.assertIn("useButton", visible(widget))
+        self.assertNotIn("portButton", visible(widget))
+        self.assertEqual(DIALOGS["error"], [])
+        (info,) = DIALOGS["info"]
+        self.assertIn("VISOR Local itself", info)
+        self.assertNotIn("--port", info)
+
+    def test_any_other_start_failure_names_the_cause_and_the_actions(self):
+        widget = self.failing(SlicerCloud.DeploymentError("The tools could not be built: disk full."))
+        self.start_it(widget)
+        (text,) = DIALOGS["error"]
+        self.assertIn("disk full", text)
+        self.assertIn("The Log below", text)
+        self.assertIn("Refresh", text)
+        self.assertTrue(widget._logBox.isVisible())
+
+
+class TestThePrimaryButtonNeverLaunchesARunningServer(GuidedCase):
+    def test_install_while_the_server_starts_only_connects_the_tools(self):
+        status = fixtures.docker(server={"healthy": False, "public_url": PUBLIC_URL})
+        widget = self.show(status, backends.DOCKER, client=REMOTE_URL)
+        self.assertEqual(widget._serverState().kind, serverState.State.STARTING)
+        widget.onInstall()
+        self.assertNotIn(("up", None, None), [c for c in widget.deployment().calls if isinstance(c, tuple)])
+        self.assertEqual([c for c in widget.deployment().calls if isinstance(c, tuple) and c[0] == "up"], [])
+        self.assertEqual(SlicerCloud.get_client().server_url, PUBLIC_URL)
+
+    def test_install_while_the_server_runs_only_connects_the_tools(self):
+        widget = self.show(fixtures.docker(server={"public_url": PUBLIC_URL}), backends.DOCKER,
+                           client=REMOTE_URL)
+        widget.onInstall()
+        self.assertEqual([c for c in widget.deployment().calls if isinstance(c, tuple) and c[0] == "up"], [])
+        self.assertEqual(SlicerCloud.get_client().server_url, PUBLIC_URL)
+
+    def test_a_deliberate_port_change_still_launches(self):
+        """'Try another port' is the one case that must reach `up` on a stopped server."""
+        status = fixtures.native(container={"running": False}, server={"healthy": False})
+        widget = self.show(status, backends.NATIVE)
+        widget.onInstall(port=8001)
+        self.assertIn(("up", 8001, "127.0.0.1"), widget.deployment().calls)

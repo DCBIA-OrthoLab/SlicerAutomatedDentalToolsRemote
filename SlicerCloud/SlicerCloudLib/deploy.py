@@ -35,12 +35,14 @@ import platform
 import shutil
 import subprocess
 import sys
+import re
 import threading
+import time
 import urllib.error
 
 from ServerToolsCoreLib import tls
 
-from . import backends, local_cert
+from . import backends, local_cert, state
 from .backends import (  # noqa: F401 - re-exported: this is where callers have always looked
     BIND_EVERYWHERE,
     BIND_LOCALHOST,
@@ -335,6 +337,28 @@ def port_in_use(port, host="127.0.0.1", timeout=0.5):
         return False
 
 
+_PORT_SENTENCE = re.compile(r"already listening on port (\d+)")
+
+
+def port_conflict(error):
+    """{"port", "owner"} when `error` says the port is held by another program, else None.
+
+    Recognised by the server's `error_code` when it has one, and by the sentence
+    older servers print ("Something is already listening on port N ..."). `owner`
+    is the program that holds the port when the server knew it, else None.
+    """
+    if not isinstance(error, DeploymentError):
+        return None
+    message = str(error)
+    if error.code != "port_in_use" and "Something is already listening" not in message:
+        return None
+    port = error.port
+    if port is None:
+        match = _PORT_SENTENCE.search(message)
+        port = int(match.group(1)) if match else None
+    return {"port": port, "owner": error.owner or None}
+
+
 def find_free_port(start=8001, stop=8100, host="127.0.0.1"):
     """The first port in `start..stop` that nothing is listening on, or None."""
     for port in range(start, stop):
@@ -569,7 +593,8 @@ class LocalServerDeployment:
         except ValueError:
             raise DeploymentError(self._failure_message(args, returncode, "produced no usable result"))
         if "error" in result:
-            raise DeploymentError(result["error"])
+            raise DeploymentError(result["error"], code=result.get("error_code"),
+                                  port=result.get("port"), owner=result.get("port_owner"))
         if returncode != 0:
             raise DeploymentError(self._failure_message(args, returncode, "failed"))
         return result
@@ -817,6 +842,36 @@ class LocalServerDeployment:
         if force_recreate:
             args.append("--force-recreate")
         return self.run_ctl(args, progress_cb)
+
+    def ensure_up(self, progress_cb=None, port=None, bind=None, timeout: float = 180.0,
+                  sleep=time.sleep) -> dict:
+        """Make sure the server runs, without ever launching one that already does.
+
+        Running: reported as such, nothing touched. Starting (a process, /health
+        not answering yet): WAITED for, up to `timeout` seconds, never launched a
+        second time (the second launch is what found "port already in use").
+        Otherwise: `up`. The result has the shape of `up`'s (token, url, healthy).
+        """
+        deadline = time.monotonic() + timeout
+        announced = False
+        while True:
+            status = self.status(progress_cb=progress_cb)
+            kind = state.classify(status, self.backend).kind
+            if kind == state.State.RUNNING:
+                result = dict(status)
+                result.update({"token": self.token(progress_cb=progress_cb), "already_running": True,
+                               "restarted": False, "healthy": True})
+                return result
+            if kind != state.State.STARTING:
+                return self.up(progress_cb=progress_cb, port=port, bind=bind)
+            if not announced:
+                _emit(progress_cb, "VISOR Local is starting...")
+                announced = True
+            if time.monotonic() >= deadline:
+                raise DeploymentError(
+                    f"The server is still starting after {int(timeout)} seconds. Press Refresh in a "
+                    "moment, or open the log to see what it is doing.")
+            sleep(2)
 
     def update(self, progress_cb=None, force: bool = False, bind=None) -> dict:
         """Fetch, fast-forward, relaunch — and put the clone on `self.branch`.

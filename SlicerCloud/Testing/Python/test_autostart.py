@@ -11,6 +11,7 @@ changes which server the modules use.
 
 import os
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -20,6 +21,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "ServerToolsCore"))
 sys.path.insert(0, _HERE)
 
 import fixtures  # noqa: E402
+from ServerToolsCoreLib import gate  # noqa: E402
 from SlicerCloudLib import autostart, backends  # noqa: E402
 
 
@@ -35,8 +37,8 @@ class FakeDeployment:
         self.calls.append("status")
         return self._status
 
-    def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
-        self.calls.append(("up", port, bind, force_recreate))
+    def ensure_up(self, progress_cb=None, port=None, bind=None, timeout=180.0, sleep=None):
+        self.calls.append(("up", port, bind, False))
         if self._up_error:
             raise self._up_error
         return self._up
@@ -113,6 +115,32 @@ class TestStart(unittest.TestCase):
         deployment = FakeDeployment(fixtures.native())
         autostart.LocalServer(deployment).start()
         self.assertEqual([c for c in deployment.calls if isinstance(c, tuple)], [("up", None, None, False)])
+
+
+class TestStartNeverRacesTheSlicerCloudPanel(unittest.TestCase):
+    def test_it_waits_for_an_install_or_a_start_running_in_the_panel(self):
+        deployment = FakeDeployment(fixtures.native())
+        token = gate.begin_local_work()
+        self.addCleanup(gate.end_local_work, token)
+        done = threading.Event()
+        thread = threading.Thread(target=lambda: (autostart.LocalServer(deployment).start(), done.set()))
+        with mock.patch.object(backends, "local_client_url", lambda status: status.get("url")):
+            thread.start()
+            self.assertFalse(done.wait(0.2), "it must not start while the panel is working")
+            self.assertEqual([c for c in deployment.calls if isinstance(c, tuple)], [])
+            gate.end_local_work(token)
+            self.assertTrue(done.wait(2))
+        thread.join()
+        self.assertEqual([c for c in deployment.calls if isinstance(c, tuple)], [("up", None, None, False)])
+
+    def test_it_gives_up_with_a_readable_message_when_the_panel_never_finishes(self):
+        deployment = FakeDeployment(fixtures.native())
+        token = gate.begin_local_work()
+        self.addCleanup(gate.end_local_work, token)
+        with self.assertRaises(backends.DeploymentError) as caught:
+            autostart.LocalServer(deployment, wait_seconds=0.05).start()
+        self.assertIn("being set up", str(caught.exception))
+        self.assertEqual([c for c in deployment.calls if isinstance(c, tuple)], [])
 
 
 class TestProvider(unittest.TestCase):

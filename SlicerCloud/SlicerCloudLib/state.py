@@ -211,6 +211,9 @@ def actions(state: ServerState, gpu_fixable: bool = False, can_switch_back: bool
         shown |= {INSTALL, REFRESH, LOGS, UPDATE}
     elif kind == State.STARTING:
         shown |= {STOP, REFRESH, LOGS}
+        if flags.client != CLIENT_HERE:
+            primary = USE_HERE
+            shown.add(USE_HERE)
     elif kind == State.RUNNING:
         shown |= {STOP, REFRESH, LOGS, UPDATE}
         if flags.client != CLIENT_HERE:
