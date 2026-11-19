@@ -82,6 +82,16 @@ NO_PUBLIC_URL_MESSAGE = (
 DEFAULT_INSTALL_DIR = os.path.join(os.path.expanduser("~"), "SlicerCloudServer")
 
 
+NATIVE_SCRIPT = os.path.join("scripts", "server_ctl_native.py")
+# Where the branch asked for is fetched to be looked at, so the clone's own
+# branches, its working tree and its remote are never touched by a check.
+_PROBE_REF = "refs/slicercloud/probe"
+
+
+class BranchSwitch(collections.namedtuple("BranchSwitch", "what path current wanted dirty")):
+    """A managed clone that is on another branch than the form asks for."""
+
+
 class DeploymentError(Exception):
     """Something the user can act on, with a message written for them."""
 
@@ -566,6 +576,10 @@ class LocalServerDeployment:
         command = [self.python, self.script_path, "--json"] + list(args)
         returncode, out = self._spawn(command, progress_cb, cwd=self.install_dir)
 
+        if returncode != 0 and self.native and self._looks_like_missing_native():
+            raise DeploymentError(self._no_native_message() + "\n\nTechnical detail:\n    "
+                                  + "\n    ".join(self._last_stderr))
+
         try:
             result = json.loads(out) if out.strip() else {}
         except ValueError:
@@ -575,6 +589,21 @@ class LocalServerDeployment:
         if returncode != 0:
             raise DeploymentError(self._failure_message(args, returncode, "failed"))
         return result
+
+    def _looks_like_missing_native(self) -> bool:
+        """server_ctl.py was an argparse error about the native options: the
+        clone is on a branch that predates them."""
+        said = "\n".join(self._last_stderr)
+        return ("invalid choice: 'install-tools'" in said
+                or ("unrecognized arguments" in said and "--native" in said))
+
+    def _no_native_message(self) -> str:
+        return (
+            f"Branch '{self.branch}' of {self.repo_url} has no native support ({NATIVE_SCRIPT} is "
+            f"missing), so the server cannot run on this Mac from it. Open Advanced and set "
+            f"'Branch' (and 'Repository URL' if the branch lives in a fork) to a branch that has "
+            f"it, then press the button again."
+        )
 
     def _failure_message(self, args, returncode: int, what: str) -> str:
         """The error the user actually sees, with the tail of what the command said.
@@ -622,6 +651,70 @@ class LocalServerDeployment:
         except local_cert.CertificateError as exc:
             raise DeploymentError(str(exc)) from None
         return ["--tls-cert", pair["cert"], "--tls-key", pair["key"]]
+
+    def _git(self, path, args, timeout=120):
+        """Run git in `path`; (returncode, stdout). Never raises for a failing git."""
+        try:
+            done = subprocess.run(
+                ["git", "-C", path] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=timeout, check=False, **_subprocess_kwargs())
+        except (OSError, subprocess.SubprocessError):
+            return 1, ""
+        return done.returncode, done.stdout.strip()
+
+    def require_native_support(self, progress_cb=None) -> None:
+        """Refuse, before anything is modified, a branch of the server repository
+        that has no native backend (scripts/server_ctl_native.py).
+
+        Native mode only; Docker is not looked at. A clone that does not exist
+        yet is checked by `clone()` once it is made. For an existing clone that
+        is on another branch the requested one is fetched into a private ref
+        and read there: the clone's branches, tree and remote stay as they were.
+        A check that cannot be made (offline, no `origin`) does not block: the
+        explanation of an old server's argparse error then covers it.
+        """
+        if not self.native or not self.is_cloned:
+            return
+        code, current = self._git(self.install_dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+        if code == 0 and current == self.branch:
+            if os.path.isfile(os.path.join(self.install_dir, NATIVE_SCRIPT)):
+                return
+            raise DeploymentError(self._no_native_message() + " Nothing was changed.")
+        _emit(progress_cb, f"Checking that branch '{self.branch}' has native support...")
+        code, _out = self._git(self.install_dir, [
+            "fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/{self.branch}:{_PROBE_REF}"])
+        if code != 0:
+            _emit(progress_cb, f"Could not check branch '{self.branch}' for native support "
+                               f"(fetch failed); continuing without that check.")
+            return
+        code, _out = self._git(self.install_dir, ["cat-file", "-e", f"{_PROBE_REF}:{NATIVE_SCRIPT}"])
+        if code != 0:
+            raise DeploymentError(self._no_native_message() + " Nothing was changed.")
+
+    def pending_branch_switches(self) -> list:
+        """The managed clones (server, and tools in native mode) that sit on
+        another branch than the one asked for, with whether their tree is dirty.
+
+        Read-only. The panel asks before it lets anything switch them, and
+        refuses outright on a dirty tree. Untracked files do not count: they do
+        not stand in a checkout's way.
+        """
+        found = []
+        targets = [("server repository", self.install_dir, self.branch, self.is_cloned)]
+        if self.native:
+            targets.append(("tools repository", self.tools_dir, self.tools_branch, self.tools_cloned))
+        for what, path, wanted, present in targets:
+            if not present:
+                continue
+            code, current = self._git(path, ["rev-parse", "--abbrev-ref", "HEAD"])
+            if code != 0 or current == wanted:
+                continue
+            _code, dirty = self._git(path, ["status", "--porcelain", "--untracked-files=no"])
+            found.append(BranchSwitch(what, path, current, wanted, bool(dirty)))
+        return found
+
+    def current_branch(self, path) -> str:
+        return self._git(path, ["rev-parse", "--abbrev-ref", "HEAD"])[1]
 
     def clone_tools(self, progress_cb=None) -> None:
         """Clone the tools' repository (SADT-VISOR) for the native backend.
@@ -703,6 +796,8 @@ class LocalServerDeployment:
                 f"Cloning {self.repo_url} failed. If the repository is private, set up a git "
                 f"credential helper or an SSH key first — see the log for git's own message."
             )
+        if self.native and not os.path.isfile(os.path.join(self.install_dir, NATIVE_SCRIPT)):
+            raise DeploymentError(self._no_native_message())
 
     def can_install_docker(self) -> bool:
         """Whether a root helper can be run from here, without a terminal.

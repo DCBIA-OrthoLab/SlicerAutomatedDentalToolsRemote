@@ -13,6 +13,7 @@ against a mocked `Popen`.
 
 import io
 import os
+import subprocess
 import shutil
 import stat
 import time
@@ -907,3 +908,164 @@ class TestNativeClientUrl(NativeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _git(cwd, *args):
+    done = subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+    return done.stdout.strip()
+
+
+def _commit_file(repo, relpath, text="x\n"):
+    full = os.path.join(repo, relpath)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    _git(repo, "add", relpath)
+    _git(repo, "commit", "-q", "-m", "c " + relpath)
+
+
+class GitCase(NativeCase):
+    """A real origin with an old `main` (no native code) and a `mac` branch with it,
+    and a clone of it as the panel would have made."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.install_dir)
+        self.origin = os.path.join(self.tmp, "origin")
+        os.makedirs(self.origin)
+        _git(self.origin, "init", "-q", "-b", "main")
+        _commit_file(self.origin, "scripts/server_ctl.py", "print('{}')\n")
+        _git(self.origin, "checkout", "-q", "-b", "mac")
+        _commit_file(self.origin, "scripts/server_ctl_native.py")
+        _git(self.origin, "checkout", "-q", "main")
+        _git(self.tmp, "clone", "-q", "--branch", "main", self.origin, self.install_dir)
+
+    def head(self):
+        return _git(self.install_dir, "rev-parse", "--abbrev-ref", "HEAD"), _git(self.install_dir, "rev-parse", "HEAD")
+
+
+class TestNativeSupportCheck(GitCase):
+    def test_a_branch_with_native_support_passes_without_touching_the_clone(self):
+        d = self.native(branch="mac", repo_url=self.origin)
+        before = self.head()
+        d.require_native_support()
+        self.assertEqual(self.head(), before)
+        self.assertEqual(_git(self.install_dir, "status", "--porcelain"), "")
+        self.assertFalse(os.path.exists(os.path.join(self.install_dir, "scripts", "server_ctl_native.py")))
+
+    def test_a_branch_without_it_is_refused_before_anything_changes(self):
+        _git(self.origin, "branch", "old", "main")
+        d = self.native(branch="old", repo_url=self.origin)
+        before = self.head()
+        with self.assertRaises(DeploymentError) as caught:
+            d.require_native_support()
+        message = str(caught.exception)
+        self.assertIn("'old'", message)
+        self.assertIn("no native", message)
+        self.assertIn("Branch", message)
+        self.assertIn("Repository URL", message)
+        self.assertEqual(self.head(), before)
+        self.assertEqual(_git(self.install_dir, "remote", "get-url", "origin"), self.origin)
+
+    def test_a_clone_already_on_the_branch_is_read_in_place(self):
+        d = self.native(branch="main", repo_url=self.origin)
+        with mock.patch.object(deploy.subprocess, "run", wraps=deploy.subprocess.run) as run:
+            with self.assertRaises(DeploymentError):
+                d.require_native_support()
+        self.assertFalse(any("fetch" in call.args[0] for call in run.call_args_list))
+        _git(self.install_dir, "merge", "-q", "origin/main")
+        _git(self.install_dir, "fetch", "-q", "origin", "mac")
+        _git(self.install_dir, "merge", "-q", "FETCH_HEAD")
+        self.native(branch="main", repo_url=self.origin).require_native_support()
+
+    def test_docker_never_looks(self):
+        d = self.deployment(native=False, branch="old")
+        with mock.patch.object(deploy.subprocess, "run") as run:
+            d.require_native_support()
+        run.assert_not_called()
+
+    def test_an_unreachable_origin_does_not_block(self):
+        _git(self.install_dir, "remote", "set-url", "origin", os.path.join(self.tmp, "gone"))
+        messages = []
+        d = self.native(branch="mac")
+        d.require_native_support(progress_cb=messages.append)
+        self.assertTrue(any("could not check" in m.lower() for m in messages))
+
+    def test_nothing_to_check_before_the_first_clone(self):
+        shutil.rmtree(self.install_dir)
+        self.native(branch="old").require_native_support()
+
+    def test_a_fresh_clone_of_a_branch_without_it_is_refused(self):
+        shutil.rmtree(self.install_dir)
+        d = self.native(branch="main", repo_url=self.origin)
+        with self.assertRaises(DeploymentError) as caught:
+            d.clone()
+        self.assertIn("no native", str(caught.exception))
+
+
+class TestRawArgparseIsExplained(NativeCase):
+    def failing(self, stderr_text):
+        _write_fake_ctl(self.install_dir, f"sys.stderr.write({stderr_text!r} + '\\n')\nsys.exit(2)\n")
+        return self.native(branch="main")
+
+    def test_invalid_choice_install_tools(self):
+        d = self.failing("server_ctl.py: error: argument command: invalid choice: 'install-tools' "
+                         "(choose from 'up', 'down')")
+        with self.assertRaises(DeploymentError) as caught:
+            d.install_tools()
+        message = str(caught.exception)
+        self.assertIn("no native", message)
+        self.assertIn("'main'", message)
+        self.assertIn("invalid choice: 'install-tools'", message)
+
+    def test_unrecognized_native_arguments(self):
+        d = self.failing("server_ctl.py: error: unrecognized arguments: --native --tools-dir /x")
+        with self.assertRaises(DeploymentError) as caught:
+            d.up()
+        self.assertIn("no native", str(caught.exception))
+        self.assertIn("unrecognized arguments", str(caught.exception))
+
+    def test_docker_keeps_the_raw_message(self):
+        _write_fake_ctl(self.install_dir, "sys.stderr.write('error: unrecognized arguments: --native\\n')\nsys.exit(2)\n")
+        d = self.deployment(native=False)
+        with self.assertRaises(DeploymentError) as caught:
+            d.run_ctl(["up"])
+        self.assertNotIn("no native", str(caught.exception))
+        self.assertIn("unrecognized arguments", str(caught.exception))
+
+
+class TestBranchSwitches(GitCase):
+    def test_a_clone_on_the_requested_branch_has_nothing_to_switch(self):
+        self.assertEqual(self.native(branch="main").pending_branch_switches(), [])
+
+    def test_the_server_clone_on_another_branch_is_named(self):
+        (switch,) = self.native(branch="mac").pending_branch_switches()
+        self.assertEqual((switch.current, switch.wanted, switch.dirty), ("main", "mac", False))
+        self.assertEqual(switch.path, self.install_dir)
+        self.assertIn("server", switch.what)
+
+    def test_a_dirty_tree_is_flagged(self):
+        with open(os.path.join(self.install_dir, "scripts", "server_ctl.py"), "a") as handle:
+            handle.write("# local edit\n")
+        (switch,) = self.native(branch="mac").pending_branch_switches()
+        self.assertTrue(switch.dirty)
+
+    def test_untracked_files_do_not_count_as_dirty(self):
+        open(os.path.join(self.install_dir, "scratch.txt"), "w").close()
+        (switch,) = self.native(branch="mac").pending_branch_switches()
+        self.assertFalse(switch.dirty)
+
+    def test_the_tools_clone_counts_in_native_mode_only(self):
+        shutil.copytree(self.origin, self.tools)
+        _git(self.tools, "checkout", "-q", "mac")
+        os.makedirs(os.path.join(self.tools, "tools"))
+        switches = self.native(branch="main", tools_branch="main").pending_branch_switches()
+        self.assertEqual([(s.current, s.wanted) for s in switches], [("mac", "main")])
+        self.assertIn("tools", switches[0].what)
+        self.assertEqual(self.deployment(native=False, branch="main", tools_branch="main",
+                                         ).pending_branch_switches(), [])
+
+    def test_a_missing_clone_has_nothing_to_switch(self):
+        shutil.rmtree(self.install_dir)
+        self.assertEqual(self.native(branch="mac").pending_branch_switches(), [])
