@@ -19,3 +19,9 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_panel
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+add_test(
+  NAME SlicerCloud_test_docker_golden
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_docker_golden
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
