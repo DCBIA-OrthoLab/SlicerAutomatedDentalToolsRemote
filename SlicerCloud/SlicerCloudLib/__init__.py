@@ -1,6 +1,6 @@
 """Support package for the Slicer Cloud module.
 
-Only `deploy` lives here, and it imports neither `slicer` nor `qt` — see
+`deploy` and `local_cert` live here, and neither imports `slicer` nor `qt`, see
 ARCHITECTURE.md's dependency rule and `Testing/Python/test_deploy.py`, which
 runs it under plain `python3 -m unittest`.
 """

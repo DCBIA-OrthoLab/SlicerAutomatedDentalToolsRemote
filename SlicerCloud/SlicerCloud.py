@@ -31,6 +31,8 @@ from SlicerCloudLib.deploy import (
     DEFAULT_INSTALL_DIR,
     DEFAULT_REPO_URL,
     DEFAULT_SERVER_URL,
+    DEFAULT_TOOLS_BRANCH,
+    DEFAULT_TOOLS_REPO_URL,
     DeploymentError,
     LocalServerDeployment,
 )
@@ -41,6 +43,8 @@ _SETTINGS_GROUP = "SlicerCloud"
 _KEY_INSTALL_DIR = f"{_SETTINGS_GROUP}/InstallDir"
 _KEY_REPO_URL = f"{_SETTINGS_GROUP}/RepoUrl"
 _KEY_BRANCH = f"{_SETTINGS_GROUP}/Branch"
+_KEY_TOOLS_BRANCH = f"{_SETTINGS_GROUP}/ToolsBranch"
+_KEY_TOOLS_REPO_URL = f"{_SETTINGS_GROUP}/ToolsRepoUrl"
 _KEY_SELECTED_TOOLS = f"{_SETTINGS_GROUP}/SelectedTools"
 _KEY_PORT = f"{_SETTINGS_GROUP}/Port"
 _KEY_BIND = f"{_SETTINGS_GROUP}/BindAddress"
@@ -345,6 +349,14 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         advancedForm.addRow(design.section_title(_("Repository URL")), self.repoUrlEdit)
         self.branchEdit = qt.QLineEdit()
         advancedForm.addRow(design.section_title(_("Branch")), self.branchEdit)
+        # Only meaningful for the native server (macOS, Apple silicon), which
+        # builds the tools from their own repository; Docker ignores it.
+        self.toolsRepoUrlEdit = qt.QLineEdit()
+        self.toolsRepoUrlEdit.setToolTip(_("Native server only: the tools repository to clone."))
+        advancedForm.addRow(design.section_title(_("Tools repository URL")), self.toolsRepoUrlEdit)
+        self.toolsBranchEdit = qt.QLineEdit()
+        self.toolsBranchEdit.setToolTip(_("Native server only: the branch of the tools repository to use."))
+        advancedForm.addRow(design.section_title(_("Tools branch")), self.toolsBranchEdit)
         self.portSpin = qt.QSpinBox()
         self.portSpin.setRange(1024, 65535)
         self.portSpin.setValue(_DEFAULT_PORT)
@@ -370,12 +382,15 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.bindCombo.setToolTip(_(
             "Which machines can reach this server. 'This computer only' is the default and "
             "keeps it off the network entirely.\n\n"
-            "This server speaks HTTPS with a self-signed certificate only this computer "
-            "can verify, and this client never connects to a server it cannot verify. "
-            "To share it, give it a public address with a publicly-signed certificate: "
-            "`tailscale serve`, or a reverse proxy or the server itself with a Let's "
-            "Encrypt or institutional certificate."
+            "This client only talks https, and only to a certificate it can verify: a "
+            "publicly-signed one, or, for a server on this very Mac, the certificate "
+            "this panel made for it. To share a Docker server, give it a public address "
+            "with a publicly-signed certificate: `tailscale serve`, or a reverse proxy "
+            "or the server itself with a Let's Encrypt or institutional certificate. "
+            "The native server on a Mac is for this computer only, so this choice is fixed."
         ))
+        if deploy.prefer_native():
+            self.bindCombo.setEnabled(False)
         advancedForm.addRow(design.section_title(_("Network access")), self.bindCombo)
         self.bindCombo.currentIndexChanged.connect(self._onBindChanged)
         layout.addWidget(advanced)
@@ -554,6 +569,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.installDirEdit.currentPath = str(settings.value(_KEY_INSTALL_DIR) or DEFAULT_INSTALL_DIR)
         self.repoUrlEdit.text = str(settings.value(_KEY_REPO_URL) or DEFAULT_REPO_URL)
         self.branchEdit.text = str(settings.value(_KEY_BRANCH) or DEFAULT_BRANCH)
+        self.toolsBranchEdit.text = str(settings.value(_KEY_TOOLS_BRANCH) or DEFAULT_TOOLS_BRANCH)
+        self.toolsRepoUrlEdit.text = str(settings.value(_KEY_TOOLS_REPO_URL) or DEFAULT_TOOLS_REPO_URL)
         self.portSpin.value = int(settings.value(_KEY_PORT) or _DEFAULT_PORT)
         # `is None` rather than a falsy test: BIND_EVERYWHERE is the empty
         # string, so a saved "publish on every interface" must not read as
@@ -573,6 +590,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         settings.setValue(_KEY_INSTALL_DIR, self.installDirEdit.currentPath)
         settings.setValue(_KEY_REPO_URL, self.repoUrlEdit.text.strip())
         settings.setValue(_KEY_BRANCH, self.branchEdit.text.strip())
+        settings.setValue(_KEY_TOOLS_BRANCH, self.toolsBranchEdit.text.strip())
+        settings.setValue(_KEY_TOOLS_REPO_URL, self.toolsRepoUrlEdit.text.strip())
         settings.setValue(_KEY_PORT, self.portSpin.value)
         settings.setValue(_KEY_BIND, self.selectedBind())
         settings.setValue(_KEY_STOP_ON_EXIT, self.stopOnExitCheck.checked)
@@ -589,16 +608,30 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         install_dir = self.installDirEdit.currentPath or DEFAULT_INSTALL_DIR
         repo_url = self.repoUrlEdit.text.strip() or DEFAULT_REPO_URL
         branch = self.branchEdit.text.strip() or DEFAULT_BRANCH
+        tools_branch = self.toolsBranchEdit.text.strip() or DEFAULT_TOOLS_BRANCH
+        tools_repo_url = self.toolsRepoUrlEdit.text.strip() or DEFAULT_TOOLS_REPO_URL
         if (self._deployment is None
                 or self._deployment.install_dir != install_dir
                 or self._deployment.repo_url != repo_url
-                or self._deployment.branch != branch):
-            self._deployment = LocalServerDeployment(install_dir, repo_url, branch)
+                or self._deployment.branch != branch
+                or getattr(self._deployment, "tools_branch", tools_branch) != tools_branch
+                or getattr(self._deployment, "tools_repo_url", tools_repo_url) != tools_repo_url):
+            self._deployment = LocalServerDeployment(install_dir, repo_url, branch,
+                                                     tools_branch=tools_branch,
+                                                     tools_repo_url=tools_repo_url)
         return self._deployment
+
+    def _isNative(self) -> bool:
+        """The deployment runs the server as a plain process (Apple-silicon Mac)
+        instead of in Docker. Read off the deployment, so a stand-in without the
+        attribute is simply Docker."""
+        return bool(getattr(self.deployment(), "native", False))
 
     def selectedBind(self) -> str:
         """The address the server should publish on. Never None — the combo
         always has loopback selected at worst."""
+        if deploy.prefer_native():
+            return deploy.BIND_LOCALHOST     # the native server is local only
         data = self.bindCombo.itemData(self.bindCombo.currentIndex)
         return deploy.BIND_LOCALHOST if data is None else str(data)
 
@@ -635,19 +668,19 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             slicer.util.infoDisplay(plain_text(_(
                 "The server will be reachable at {0} — from the machines on that private "
                 "network only.\n\n"
-                "Its certificate is self-signed for this computer only, so the other "
-                "machines need a publicly-signed certificate in front of it, e.g. "
-                "`tailscale serve`, or a reverse proxy with a Let's Encrypt certificate."
+                "This client only talks https to a publicly-signed certificate, so the "
+                "other machines need one in front of the server, e.g. `tailscale serve` "
+                "set up by hand, or a reverse proxy with a Let's Encrypt certificate."
             ).format(address)))
         else:
             shown = address or _("every address on this machine")
             slicer.util.warningDisplay(plain_text(_(
                 "The server will be reachable at {0}.\n\n"
-                "Its certificate is self-signed for this computer only: another machine "
-                "cannot verify it, and this client refuses a server it cannot verify.\n\n"
-                "Give it a publicly-signed certificate first -- `tailscale serve`, or a "
-                "reverse proxy with a Let's Encrypt or institutional certificate (PUBLIC_URL) "
-                "— see SECURITY.md in the server repository."
+                "This client only talks https to a publicly-signed certificate, and the "
+                "server's own listener has none.\n\n"
+                "Put a publicly-signed address in front of it first -- `tailscale serve` set "
+                "up by hand, or a reverse proxy with a Let's Encrypt or institutional "
+                "certificate (PUBLIC_URL) -- see SECURITY.md in the server repository."
             ).format(shown)))
 
     def _onInstallDirChanged(self, _path=None) -> None:
@@ -779,6 +812,53 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if catalog is not None:
             self._renderCatalog(catalog)
 
+    def confirmBranchSwitch(self, text: str) -> bool:
+        """Yes/no question for a branch switch. Its own method so a test (or a
+        different front end) can answer it without a dialog."""
+        return bool(slicer.util.confirmYesNoDisplay(text, _("Switch branch?")))
+
+    def _allowBranchSwitches(self, deployment) -> list:
+        """Decide, before any job starts, whether the managed clones may change branch.
+
+        Returns the switches that will happen, or None when the action must not
+        run: a clone with uncommitted changes is refused outright, and the
+        answer "no" leaves everything as it was. The panel used to put an
+        existing clone on the form's branch without a word.
+        """
+        switches = deployment.pending_branch_switches()
+        if not switches:
+            return []
+        for switch in switches:
+            if switch.dirty:
+                message = _(
+                    "The {0} in {1} is on branch '{2}' and has uncommitted changes, so it cannot "
+                    "be moved to '{3}'. Commit or discard them, or set the matching branch field "
+                    "under Advanced to '{2}'. Nothing was changed."
+                ).format(switch.what, switch.path, switch.current, switch.wanted)
+                self._log(message)
+                slicer.util.errorDisplay(plain_text(message))
+                return None
+        lines = "\n".join(
+            _("  - {0} in {1}: '{2}' to '{3}'").format(s.what, s.path, s.current, s.wanted)
+            for s in switches)
+        question = _(
+            "The form asks for a different branch than the one these clones are on:\n\n{0}\n\n"
+            "Continuing will switch them. Switch?").format(lines)
+        if not self.confirmBranchSwitch(plain_text(question)):
+            self._log(_("Branch switch declined: nothing was changed."))
+            return None
+        return switches
+
+    def _reportBranchSwitches(self, deployment, switches) -> None:
+        for switch in switches:
+            now = deployment.current_branch(switch.path)
+            if now == switch.wanted:
+                self._log(_("The {0} passed from '{1}' to '{2}'.").format(
+                    switch.what, switch.current, switch.wanted))
+            else:
+                self._log(_("The {0} is on '{1}' (the form asks for '{2}').").format(
+                    switch.what, now or switch.current, switch.wanted))
+
     def onInstall(self) -> None:
         deployment = self.deployment()
         configure = self.useServerCheck.checked
@@ -790,12 +870,27 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         # a decision and a password prompt, and neither can be asked for from a
         # worker thread.
         docker = (self._lastStatus or {}).get("docker", {})
-        if self._lastStatus is not None and not docker.get("daemon"):
+        native = self._isNative()
+        if self._lastStatus is not None and not native and not docker.get("daemon"):
             self._offerDockerInstall(docker)
+            return
+        switches = self._allowBranchSwitches(deployment)
+        if switches is None:
             return
 
         def task(progress_cb):
+            if native:
+                deployment.require_native_support(progress_cb=progress_cb)
             deployment.clone(progress_cb=progress_cb)
+            if native:
+                # No Docker on a Mac with Apple silicon (it cannot reach the
+                # GPU): the server and the tools are cloned, the tools' Python
+                # environments built (slow once, instant after), then the
+                # server starts on https://127.0.0.1 with the certificate made
+                # for it. Each step is idempotent, so a second press resumes.
+                deployment.clone_tools(progress_cb=progress_cb)
+                deployment.install_tools(progress_cb=progress_cb)
+                return deployment.up(progress_cb=progress_cb, port=port, bind=bind)
             status = deployment.status(progress_cb=progress_cb)
             if not status.get("docker", {}).get("daemon"):
                 raise DeploymentError(_(
@@ -807,20 +902,27 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             return deployment.up(progress_cb=progress_cb, port=port, bind=bind)
 
         def done(result):
+            self._reportBranchSwitches(deployment, switches)
+            if result.get("already_running") and not result.get("restarted"):
+                self._log(_("Server already running, address and token registered."))
+                slicer.util.showStatusMessage(
+                    _("Server already running, address and token registered."), 5000)
             if configure and result.get("token"):
                 url = deploy.client_url(result)
                 if url:
                     self._applyServerSettings(url, result["token"])
                 else:
-                    # No public address: nothing is saved rather than localhost,
-                    # whose self-signed certificate the client refuses.
-                    self._log(_(deploy.NO_PUBLIC_URL_MESSAGE))
-                    slicer.util.warningDisplay(_(deploy.NO_PUBLIC_URL_MESSAGE))
+                    # Nothing is saved rather than an address the client would
+                    # refuse: a Docker server needs a public address, a native
+                    # one needs to report the pinned certificate it serves.
+                    message = deploy.NO_LOCAL_TLS_MESSAGE if native else deploy.NO_PUBLIC_URL_MESSAGE
+                    self._log(_(message))
+                    slicer.util.warningDisplay(_(message))
             if result.get("healthy"):
                 slicer.util.showStatusMessage(_("The tool server is running."), 5000)
             else:
                 slicer.util.warningDisplay(plain_text(_(
-                    "The container was started but {0}/health did not answer in time. It may "
+                    "The server was started but {0}/health did not answer in time. It may "
                     "still be installing its dependencies — check the Log, or press Refresh in "
                     "a few minutes."
                 ).format(result.get("url") or DEFAULT_SERVER_URL)))
@@ -961,10 +1063,19 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         # server published on a VPN address quietly took it off the network.
         bind = self.selectedBind()
 
+        native = self._isNative()
+        switches = self._allowBranchSwitches(deployment)
+        if switches is None:
+            return
+
         def task(progress_cb):
+            if native:
+                deployment.require_native_support(progress_cb=progress_cb)
+                deployment.clone_tools(progress_cb=progress_cb)
             return deployment.update(progress_cb=progress_cb, bind=bind)
 
         def done(result):
+            self._reportBranchSwitches(deployment, switches)
             clone = result.get("clone") or {}
             if result.get("pulled"):
                 summary = _("Updated to {0} and relaunched.").format(clone.get("commit") or _("the latest commit"))
@@ -974,7 +1085,11 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 summary = _("Already up to date and running — nothing to do.")
             self._log(summary)
             slicer.util.showStatusMessage(summary, 5000)
-            if result.get("recreated") and not result.get("healthy"):
+            if native and result.get("restarted") and not result.get("healthy"):
+                slicer.util.warningDisplay(_(
+                    "The server was relaunched but did not answer in time. Check the Log."
+                ))
+            elif result.get("recreated") and not result.get("healthy"):
                 slicer.util.warningDisplay(_(
                     "The server was relaunched but did not answer in time. Check the Log."
                 ))
@@ -1039,9 +1154,11 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         """Make this deployment the one every other module talks to.
 
         Certificate verification is not among the things saved here, and
-        cannot be: it is always on, against the public authorities (tls.py).
-        `url` is the deployment's public https:// address (deploy.client_url);
-        an http:// URL is refused rather than saved, loopback included.
+        cannot be: it is always on (tls.py), against the public authorities or,
+        for https://127.0.0.1 only, the certificate pinned on this machine.
+        `url` is the deployment's public https:// address, or a native server's
+        pinned local one (deploy.client_url); an http:// URL is refused rather
+        than saved, loopback included.
         """
         try:
             url = checked_server_url(url)
@@ -1073,8 +1190,13 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         git = status.get("git", {})
         paint("git", git.get("available"), git.get("version") or _("not installed"))
 
+        native = self._isNative()
         docker = status.get("docker", {})
-        if docker.get("daemon"):
+        if native:
+            # The server is a plain process here: Docker would not reach the
+            # Apple GPU, and nothing below asks for it.
+            paint("docker", True, _("not needed: the server runs directly on this Mac"))
+        elif docker.get("daemon"):
             paint("docker", True, docker.get("version") or _("running"))
         elif docker.get("needs_group"):
             # Deliberately short: this is a cell in a status grid, and the full
@@ -1086,13 +1208,18 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             paint("docker", False, _("not installed"))
 
         compose = status.get("compose", {})
-        paint("compose", compose.get("available"), compose.get("version") or _("not installed"))
+        if native:
+            paint("compose", True, _("not needed"))
+        else:
+            paint("compose", compose.get("available"), compose.get("version") or _("not installed"))
 
         gpu = status.get("gpu", {})
         # `gpu_access` names WHICH mechanism answered — an nvidia runtime, or a
         # CDI device. Absent when the clone predates it, which is why the text
         # falls back to the runtime wording rather than to "unknown".
-        if gpu.get("nvidia_runtime"):
+        if native:
+            paint("gpu", True, _("Apple GPU (Metal), used by the server directly"))
+        elif gpu.get("nvidia_runtime"):
             paint("gpu", True, _("reachable through CDI — the GPU service will be used")
                   if gpu.get("gpu_access") == "cdi"
                   else _("nvidia runtime available — the GPU service will be used"))
@@ -1103,7 +1230,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         # Offered whenever there is a card docker cannot reach. Whether it can
         # actually be done from here is _offerGpuSetup's business: it either does
         # it or prints the terminal command, exactly as _offerDockerInstall does.
-        self.gpuButton.setVisible(bool(gpu.get("nvidia_smi")) and not gpu.get("nvidia_runtime"))
+        self.gpuButton.setVisible(
+            not native and bool(gpu.get("nvidia_smi")) and not gpu.get("nvidia_runtime"))
 
         clone = status.get("clone", {})
         if not status.get("cloned"):
@@ -1144,6 +1272,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
     def _nextStep(self, status: dict) -> str:
         """One sentence naming the single next thing to do. A grid of red rows
         says what is wrong; it does not say what to press."""
+        if self._isNative():
+            return self._nextNativeStep(status)
         docker = status.get("docker", {})
         if not docker.get("available"):
             return _("Docker is missing. Press 'Install and start' — it will tell you the exact "
@@ -1175,6 +1305,25 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             return _("The server is up, but on the CPU: this machine has a GPU that Docker "
                      "cannot reach. Press 'Enable GPU support' to set that up.")
         return _("The server is up. Pick the tools you need under 'Tool data'.")
+
+    def _nextNativeStep(self, status: dict) -> str:
+        """`_nextStep` for the server that runs directly on this Mac."""
+        if not status.get("cloned") or not (status.get("tools") or {}).get("present", False):
+            return _("Nothing installed yet. Press 'Install and start' to download the server and "
+                     "the tools and start it. The first time takes a while and several GB of disk.")
+        missing = [name for name, built in ((status.get("tools") or {}).get("venvs") or {}).items()
+                   if not built]
+        if missing:
+            return _("Some tools are not installed yet ({0}). Press 'Start server': it builds "
+                     "them first.").format(", ".join(sorted(missing)))
+        if (status.get("clone") or {}).get("behind"):
+            return _("A newer version of the server is available. Press 'Update server'.")
+        if not (status.get("container") or {}).get("running"):
+            return _("The server is installed but not running. Press 'Start server'.")
+        if not status.get("server", {}).get("healthy"):
+            return _("The server is starting; the first start can take a few minutes. Check the Log.")
+        return _("The server is up on this Mac, over https on this computer only. Pick the tools "
+                 "you need under 'Tool data'.")
 
     def _renderCatalog(self, catalog: dict) -> None:
         self._catalog = catalog

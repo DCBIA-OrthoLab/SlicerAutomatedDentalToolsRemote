@@ -4,8 +4,13 @@ Same dependency rule as `client.py` (see ARCHITECTURE.md): **this module
 imports neither `slicer` nor `qt`**, so it runs — and is unit-tested — in plain
 CI with no Slicer interpreter. Everything it does is `subprocess` plus the
 standard library, and `ServerToolsCoreLib.tls` (standard library too) for the
-one request it makes, so the HTTPS-only rule and the loopback certificate pin
-are the client's own rather than a copy.
+one request it makes, so the HTTPS-only rule and the out-of-band loopback pin
+(tls.py, rule 3) are the client's own rather than a copy.
+
+Two backends. Docker is the default everywhere. On an Apple-silicon Mac Docker
+cannot reach the GPU, so the server runs as a plain process (`--native`, see
+`prefer_native()`), serving HTTPS on 127.0.0.1 with a certificate this module
+makes locally (local_cert.py) and the client pins.
 
 It is deliberately thin. The real logic lives in the server repository's
 `scripts/server_ctl.py`, which this class clones and then calls: the panel and
@@ -23,6 +28,7 @@ return a parsed result from the same call.
 import collections
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -32,23 +38,38 @@ from urllib.parse import urlsplit
 
 from ServerToolsCoreLib import tls
 
+from . import local_cert
+
 # How much of a failed command's output travels with its error message.
 _ERROR_TAIL_LINES = 12
 
 DEFAULT_REPO_URL = "https://github.com/DCBIA-OrthoLab/VISOR-serve.git"
 DEFAULT_BRANCH = "main"
 # Where the container listens on this machine, for DISPLAY only. The client
-# never uses it: the certificate the server presents there is self-signed, and
-# the client accepts only a publicly-signed one (ServerToolsCoreLib/tls.py).
-# What the client is given is the deployment's public URL -- see client_url().
+# never uses it for a Docker deployment: the certificate the container presents
+# there is self-signed and nothing pins it, and the client accepts only a
+# publicly-signed one (ServerToolsCoreLib/tls.py). What the client is given is
+# the deployment's public URL, or for a native server the pinned local address
+# -- see client_url().
 DEFAULT_SERVER_URL = "https://localhost:8000"
+
+# The native backend also needs the tools' own checkout (SADT-VISOR), which
+# server_ctl.py builds one virtualenv per tool from.
+DEFAULT_TOOLS_REPO_URL = "https://github.com/DCBIA-OrthoLab/SADT-VISOR.git"
+DEFAULT_TOOLS_BRANCH = "main"
+
+NO_LOCAL_TLS_MESSAGE = (
+    "The server on this Mac is running, but it did not report that it serves HTTPS with the "
+    "certificate SlicerCloud made for it, so nothing was saved: the extension only talks https. "
+    "Press 'Update server' to bring the server scripts up to date, then Refresh."
+)
 
 NO_PUBLIC_URL_MESSAGE = (
     "This server has no public address yet. The extension only talks to a server "
     "through an https:// address whose certificate a public authority signed -- "
     "for a server on this computer too. Give it one, then press Refresh:\n\n"
-    "  - run scripts/setup-tailscale.sh in the server's folder (tailscale serve "
-    "publishes it as https://<name>.<tailnet>.ts.net), or\n"
+    "  - set `tailscale serve` up by hand on the server's machine, with the tailscale "
+    "command (it publishes the server as https://<name>.<tailnet>.ts.net), or\n"
     "  - set PUBLIC_URL in the server's .env to its https:// address behind a "
     "reverse proxy with a Let's Encrypt or institutional certificate, or served "
     "directly with its own public certificate."
@@ -59,6 +80,16 @@ NO_PUBLIC_URL_MESSAGE = (
 # of model weights, and it must survive an extension update or a Slicer
 # reinstall.
 DEFAULT_INSTALL_DIR = os.path.join(os.path.expanduser("~"), "SlicerCloudServer")
+
+
+NATIVE_SCRIPT = os.path.join("scripts", "server_ctl_native.py")
+# Where the branch asked for is fetched to be looked at, so the clone's own
+# branches, its working tree and its remote are never touched by a check.
+_PROBE_REF = "refs/slicercloud/probe"
+
+
+class BranchSwitch(collections.namedtuple("BranchSwitch", "what path current wanted dirty")):
+    """A managed clone that is on another branch than the form asks for."""
 
 
 class DeploymentError(Exception):
@@ -156,9 +187,9 @@ def find_python() -> str:
     )
 
 
-#: What `bind` means when nothing has been chosen. Loopback, because this
-#: deployment's certificate is self-signed and only this computer can verify
-#: it (by reading it over loopback), and it carries medical images.
+#: What `bind` means when nothing has been chosen. Loopback, because the
+#: Docker listener's certificate is self-signed (no other machine can verify
+#: it) and the server carries medical images. A native server is loopback only.
 BIND_LOCALHOST = "127.0.0.1"
 #: The empty string is not "unset" here — it is how the compose file is told to
 #: publish on every interface, IPv4 and IPv6 both. See its own comment.
@@ -234,7 +265,34 @@ def _has_nvidia_cdi_device(raw) -> bool:
     )
 
 
-def probe_host() -> dict:
+def is_apple_silicon(system=None, machine=None, sysctl=None) -> bool:
+    """Whether this is a Mac with an Apple-silicon CPU, even from an x86_64
+    process: the stable Slicer for macOS runs under Rosetta, where
+    `platform.machine()` says x86_64 and `sysctl hw.optional.arm64` still says 1.
+    The three arguments exist so a test can stand in for the machine."""
+    if (system or sys.platform) != "darwin":
+        return False
+    if (machine or platform.machine()).lower() in ("arm64", "aarch64"):
+        return True
+    if sysctl is None:
+        try:
+            done = subprocess.run(["sysctl", "-n", "hw.optional.arm64"], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, timeout=10, check=False,
+                                  **_subprocess_kwargs())
+            sysctl = done.stdout.strip() if done.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            sysctl = ""
+    return str(sysctl).strip() == "1"
+
+
+def prefer_native() -> bool:
+    """The native backend is the right one here: a Mac with Apple silicon,
+    where Docker cannot give a container the GPU. Everywhere else Docker stays
+    the default; an Intel Mac is not served by the native backend either."""
+    return is_apple_silicon()
+
+
+def probe_host(native: bool = False) -> dict:
     """The prerequisites, answered without a clone.
 
     Only ever used before `scripts/server_ctl.py` exists locally; once it does,
@@ -254,7 +312,8 @@ def probe_host() -> dict:
         return completed.stdout.strip(), None
 
     git_version, _ = version(["git", "--version"]) if shutil.which("git") else (None, None)
-    docker_version, _ = version(["docker", "--version"]) if shutil.which("docker") else (None, None)
+    docker_version, _ = (None, None) if native else (
+        version(["docker", "--version"]) if shutil.which("docker") else (None, None))
     daemon, daemon_error = (None, "docker is not installed")
     if docker_version:
         daemon, daemon_error = version(["docker", "info", "--format", "{{.ServerVersion}}"])
@@ -278,6 +337,7 @@ def probe_host() -> dict:
         cdi = _has_nvidia_cdi_device(devices)
 
     return {
+        "native": bool(native),
         "git": {"available": bool(git_version), "version": git_version},
         "docker": {
             "available": bool(docker_version),
@@ -300,16 +360,56 @@ def probe_host() -> dict:
     }
 
 
+def local_client_url(result):
+    """`https://127.0.0.1:<port>` for a native server serving the pinned
+    certificate, or None.
+
+    Handed over only when ALL of these hold, so that no result a server (or a
+    stale clone) produces can send the client to an address it cannot verify:
+
+    - the result reports `tls.enabled`, which is the server saying it was
+      started with the certificate this client made (contract in
+      ARCHITECTURE.md, "Native server on a Mac");
+    - the server's own URL is on this machine (127.0.0.1 or ::1) and
+      carries a port; only that port is used, host and scheme are ours;
+    - the pinned certificate exists and passes `tls.pinned_certificate`, i.e.
+      the client WILL verify against it rather than fall back to the public
+      authorities, which a self-signed certificate cannot satisfy;
+    - if the result names the certificate it serves, it is that same file.
+    """
+    result = result or {}
+    server = result.get("server") or {}
+    info = result.get("tls") or server.get("tls") or {}
+    if not (isinstance(info, dict) and info.get("enabled")):
+        return None
+    pin = tls.pinned_certificate("127.0.0.1")
+    if not pin:
+        return None
+    reported = info.get("cert")
+    if reported and os.path.realpath(str(reported)) != os.path.realpath(pin):
+        return None
+    for candidate in (result.get("url"), server.get("url")):
+        try:
+            parts = urlsplit(str(candidate or ""))
+            host, port = parts.hostname, parts.port
+        except ValueError:
+            continue
+        if port and (host or "").lower() in tls.LOCAL_PIN_HOSTS:
+            return f"https://127.0.0.1:{port}"
+    return None
+
+
 def client_url(result):
     """The URL the CLIENT may use for this deployment, or None.
 
     server_ctl.py reports it as `public_url` (top level from `up`, under
     `server` from `status`): PUBLIC_URL from the deployment's .env when set,
     otherwise the address `tailscale serve` publishes, otherwise "". Either is
-    an https:// address with a publicly-signed certificate. `url` -- the local
-    listener and its self-signed certificate, which the client refuses -- is
-    never handed over, and neither is a loopback address. There is no fallback:
-    without a public address there is no URL to give the client.
+    an https:// address with a publicly-signed certificate. The Docker
+    listener's `url` -- self-signed, which the client refuses -- is never handed
+    over, and neither is a loopback `public_url`. The one local address that
+    is handed over is a NATIVE server's, and only through `local_client_url`
+    (pinned certificate). With neither there is no URL to give the client.
     """
     result = result or {}
     server = result.get("server") or {}
@@ -322,7 +422,7 @@ def client_url(result):
             continue
         if not tls.is_loopback(urlsplit(url).hostname):
             return url
-    return None
+    return local_client_url(result)
 
 
 def tool_names(payload):
@@ -344,11 +444,18 @@ class LocalServerDeployment:
     """One local clone of the server repository, and the docker deployment in it."""
 
     def __init__(self, install_dir=None, repo_url=DEFAULT_REPO_URL, branch=DEFAULT_BRANCH,
-                 python_executable=None):
+                 python_executable=None, native=None, tools_repo_url=DEFAULT_TOOLS_REPO_URL,
+                 tools_branch=DEFAULT_TOOLS_BRANCH, tools_dir=None):
         self.install_dir = install_dir or DEFAULT_INSTALL_DIR
         self.repo_url = repo_url
         self.branch = branch
         self._python = python_executable
+        # None means "decide from this machine" (prefer_native); True or False
+        # is an explicit choice, which is what the tests and a terminal user use.
+        self.native = prefer_native() if native is None else bool(native)
+        self.tools_repo_url = tools_repo_url
+        self.tools_branch = tools_branch
+        self._tools_dir = tools_dir
         # The subprocess currently running, so cancel() can reach it. A tool
         # download is hours long; a Cancel button that only stops *listening*
         # would leave 12 GB still coming down the wire.
@@ -365,6 +472,18 @@ class LocalServerDeployment:
     @property
     def install_docker_script(self) -> str:
         return os.path.join(self.install_dir, "scripts", "install-docker.sh")
+
+    @property
+    def tools_dir(self) -> str:
+        """The SADT-VISOR checkout the native backend builds its tool
+        environments from: the folder beside the install folder, which is also
+        where server_ctl.py looks when it is not told."""
+        return self._tools_dir or os.path.join(
+            os.path.dirname(os.path.abspath(self.install_dir)), "SADT-VISOR")
+
+    @property
+    def tools_cloned(self) -> bool:
+        return os.path.isdir(os.path.join(self.tools_dir, "tools"))
 
     @property
     def data_dir(self) -> str:
@@ -457,6 +576,10 @@ class LocalServerDeployment:
         command = [self.python, self.script_path, "--json"] + list(args)
         returncode, out = self._spawn(command, progress_cb, cwd=self.install_dir)
 
+        if returncode != 0 and self.native and self._looks_like_missing_native():
+            raise DeploymentError(self._no_native_message() + "\n\nTechnical detail:\n    "
+                                  + "\n    ".join(self._last_stderr))
+
         try:
             result = json.loads(out) if out.strip() else {}
         except ValueError:
@@ -466,6 +589,21 @@ class LocalServerDeployment:
         if returncode != 0:
             raise DeploymentError(self._failure_message(args, returncode, "failed"))
         return result
+
+    def _looks_like_missing_native(self) -> bool:
+        """server_ctl.py was an argparse error about the native options: the
+        clone is on a branch that predates them."""
+        said = "\n".join(self._last_stderr)
+        return ("invalid choice: 'install-tools'" in said
+                or ("unrecognized arguments" in said and "--native" in said))
+
+    def _no_native_message(self) -> str:
+        return (
+            f"Branch '{self.branch}' of {self.repo_url} has no native support ({NATIVE_SCRIPT} is "
+            f"missing), so the server cannot run on this Mac from it. Open Advanced and set "
+            f"'Branch' (and 'Repository URL' if the branch lives in a fork) to a branch that has "
+            f"it, then press the button again."
+        )
 
     def _failure_message(self, args, returncode: int, what: str) -> str:
         """The error the user actually sees, with the tail of what the command said.
@@ -480,6 +618,138 @@ class LocalServerDeployment:
         else:
             message += " It printed nothing at all."
         return message
+
+    # -- native backend ------------------------------------------------
+
+    def _native_args(self, bind=None) -> list:
+        """The flags that make server_ctl.py use its native backend; empty for
+        Docker. A native server listens on this computer only, so a wider
+        `bind` is refused here, before anything starts, rather than producing a
+        server whose self-signed certificate nobody else can verify."""
+        if not self.native:
+            return []
+        if bind not in (None, BIND_LOCALHOST):
+            raise DeploymentError(
+                "The server on this Mac listens on this computer only. To share it, run it "
+                "behind a reverse proxy or tailscale serve with a publicly-signed certificate."
+            )
+        return ["--native", "--tools-dir", self.tools_dir]
+
+    def _tls_args(self, progress_cb=None) -> list:
+        """`--tls-cert`/`--tls-key` for a native `up` or `update`.
+
+        Makes the certificate first when there is none, or when the one there
+        expires soon (local_cert.ensure_local_certificate). This is the only
+        place the key's path is given to anything: the server reads it, the
+        client never does. The contract with server_ctl.py is in ARCHITECTURE.md.
+        """
+        if not self.native:
+            return []
+        try:
+            pair = local_cert.ensure_local_certificate(
+                subprocess_kwargs=_subprocess_kwargs(), progress_cb=lambda m: _emit(progress_cb, m))
+        except local_cert.CertificateError as exc:
+            raise DeploymentError(str(exc)) from None
+        return ["--tls-cert", pair["cert"], "--tls-key", pair["key"]]
+
+    def _git(self, path, args, timeout=120):
+        """Run git in `path`; (returncode, stdout). Never raises for a failing git."""
+        try:
+            done = subprocess.run(
+                ["git", "-C", path] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=timeout, check=False, **_subprocess_kwargs())
+        except (OSError, subprocess.SubprocessError):
+            return 1, ""
+        return done.returncode, done.stdout.strip()
+
+    def require_native_support(self, progress_cb=None) -> None:
+        """Refuse, before anything is modified, a branch of the server repository
+        that has no native backend (scripts/server_ctl_native.py).
+
+        Native mode only; Docker is not looked at. A clone that does not exist
+        yet is checked by `clone()` once it is made. For an existing clone that
+        is on another branch the requested one is fetched into a private ref
+        and read there: the clone's branches, tree and remote stay as they were.
+        A check that cannot be made (offline, no `origin`) does not block: the
+        explanation of an old server's argparse error then covers it.
+        """
+        if not self.native or not self.is_cloned:
+            return
+        code, current = self._git(self.install_dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+        if code == 0 and current == self.branch:
+            if os.path.isfile(os.path.join(self.install_dir, NATIVE_SCRIPT)):
+                return
+            raise DeploymentError(self._no_native_message() + " Nothing was changed.")
+        _emit(progress_cb, f"Checking that branch '{self.branch}' has native support...")
+        code, _out = self._git(self.install_dir, [
+            "fetch", "--quiet", "--no-tags", "origin", f"+refs/heads/{self.branch}:{_PROBE_REF}"])
+        if code != 0:
+            _emit(progress_cb, f"Could not check branch '{self.branch}' for native support "
+                               f"(fetch failed); continuing without that check.")
+            return
+        code, _out = self._git(self.install_dir, ["cat-file", "-e", f"{_PROBE_REF}:{NATIVE_SCRIPT}"])
+        if code != 0:
+            raise DeploymentError(self._no_native_message() + " Nothing was changed.")
+
+    def pending_branch_switches(self) -> list:
+        """The managed clones (server, and tools in native mode) that sit on
+        another branch than the one asked for, with whether their tree is dirty.
+
+        Read-only. The panel asks before it lets anything switch them, and
+        refuses outright on a dirty tree. Untracked files do not count: they do
+        not stand in a checkout's way.
+        """
+        found = []
+        targets = [("server repository", self.install_dir, self.branch, self.is_cloned)]
+        if self.native:
+            targets.append(("tools repository", self.tools_dir, self.tools_branch, self.tools_cloned))
+        for what, path, wanted, present in targets:
+            if not present:
+                continue
+            code, current = self._git(path, ["rev-parse", "--abbrev-ref", "HEAD"])
+            if code != 0 or current == wanted:
+                continue
+            _code, dirty = self._git(path, ["status", "--porcelain", "--untracked-files=no"])
+            found.append(BranchSwitch(what, path, current, wanted, bool(dirty)))
+        return found
+
+    def current_branch(self, path) -> str:
+        return self._git(path, ["rev-parse", "--abbrev-ref", "HEAD"])[1]
+
+    def clone_tools(self, progress_cb=None) -> None:
+        """Clone the tools' repository (SADT-VISOR) for the native backend.
+
+        Beside the server's clone, never inside it: a nested checkout would
+        leave the server's working tree dirty and `update` refuses to pull over
+        that. An existing checkout is reused as it is.
+        """
+        if not self.native or self.tools_cloned:
+            return
+        if not shutil.which("git"):
+            raise DeploymentError("git is not installed. On macOS: xcode-select --install")
+        if os.path.exists(self.tools_dir) and os.listdir(self.tools_dir):
+            raise DeploymentError(
+                f"{self.tools_dir} already exists and has no tools/ folder in it. Move it aside "
+                f"or point the tools folder somewhere else.")
+        _emit(progress_cb, f"Cloning {self.tools_repo_url} ({self.tools_branch}) into {self.tools_dir}...")
+        returncode, _out = self._spawn(
+            ["git", "clone", "--branch", self.tools_branch, self.tools_repo_url, self.tools_dir],
+            progress_cb,
+        )
+        if returncode != 0 or not self.tools_cloned:
+            raise DeploymentError(f"Cloning {self.tools_repo_url} failed. See the log for git's message.")
+
+    def install_tools(self, progress_cb=None, tools=None, force: bool = False) -> dict:
+        """Build the tools' Python environments (`server_ctl.py install-tools
+        --native`). Slow the first time (several GB), a no-op afterwards."""
+        if not self.native:
+            raise DeploymentError("install-tools belongs to the native backend.")
+        args = ["install-tools"] + self._native_args()
+        for tool in tools or []:
+            args += ["--tool", tool]
+        if force:
+            args.append("--force")
+        return self.run_ctl(args, progress_cb)
 
     # -- operations ----------------------------------------------------
 
@@ -526,6 +796,8 @@ class LocalServerDeployment:
                 f"Cloning {self.repo_url} failed. If the repository is private, set up a git "
                 f"credential helper or an SSH key first — see the log for git's own message."
             )
+        if self.native and not os.path.isfile(os.path.join(self.install_dir, NATIVE_SCRIPT)):
+            raise DeploymentError(self._no_native_message())
 
     def can_install_docker(self) -> bool:
         """Whether a root helper can be run from here, without a terminal.
@@ -614,7 +886,7 @@ class LocalServerDeployment:
     def status(self, check_remote: bool = False, progress_cb=None) -> dict:
         """Everything the panel shows, in one shape whether or not it is cloned."""
         if not self.is_cloned:
-            probed = probe_host()
+            probed = probe_host(native=self.native)
             # `gpu` is deliberately NOT overridden here: probe_host() answers it
             # for real. It used to be pinned to nvidia_runtime=False right on
             # this line, so the pre-install screen — the only one a new user
@@ -630,7 +902,7 @@ class LocalServerDeployment:
             })
             return probed
 
-        args = ["status", "--branch", self.branch]
+        args = ["status"] + self._native_args() + ["--branch", self.branch]
         if check_remote:
             args.append("--check-remote")
         result = self.run_ctl(args, progress_cb)
@@ -649,7 +921,7 @@ class LocalServerDeployment:
         BIND_EVERYWHERE — the empty string — is a real value, not "unset", so
         this tests it with `is not None`.
         """
-        args = ["up"]
+        args = ["up"] + self._native_args(bind) + self._tls_args(progress_cb)
         if port:
             args += ["--port", str(port)]
         if bind is not None:
@@ -667,15 +939,86 @@ class LocalServerDeployment:
         silence. This is what makes the Branch field mean something after the
         first install.
         """
-        args = ["update", "--branch", self.branch]
+        args = ["update"] + self._native_args(bind) + self._tls_args(progress_cb) + [
+            "--branch", self.branch]
+        tools_args = self._tools_branch_args(progress_cb)
+        args += tools_args
         if bind is not None:
             args += ["--bind", bind]
         if force:
             args.append("--force")
-        return self.run_ctl(args, progress_cb)
+        try:
+            return self.run_ctl(args, progress_cb)
+        except DeploymentError as exc:
+            if self.native:
+                raise DeploymentError(self._explain_native_update_error(str(exc), bool(tools_args))) from None
+            raise
+
+    def _tools_branch_args(self, progress_cb=None) -> list:
+        """`--tools-branch B [--tools-url U]` for a native `update`; empty for Docker.
+
+        `update --native` puts the tools checkout on the branch asked for, so
+        the Tools branch field means something after the first clone, the way
+        the Branch field does. The URL is only sent when it is not the default
+        one: the server then fetches from `origin` and never has to compare.
+
+        A server installed before those options existed would die on an
+        argparse error. So this asks it (`update --help`) first. Only a
+        non-default choice is an error there: sending nothing leaves the tools
+        where they are, which is all an older server could ever do, but
+        dropping a branch the user typed would be a silent lie.
+        """
+        if not self.native:
+            return []
+        wanted = ["--tools-branch", self.tools_branch]
+        if self.tools_repo_url != DEFAULT_TOOLS_REPO_URL:
+            wanted += ["--tools-url", self.tools_repo_url]
+        if self._ctl_publishes("--tools-branch"):
+            return wanted
+        if self.tools_branch == DEFAULT_TOOLS_BRANCH and self.tools_repo_url == DEFAULT_TOOLS_REPO_URL:
+            _emit(progress_cb, "This server cannot switch the tools branch (it is older than that option); "
+                               "leaving the tools checkout as it is.")
+            return []
+        raise DeploymentError(
+            f"This server is too old to switch the tools to branch '{self.tools_branch}'"
+            f"{'' if self.tools_repo_url == DEFAULT_TOOLS_REPO_URL else ' of ' + self.tools_repo_url}: "
+            f"its server_ctl.py has no --tools-branch option. The tools were not switched and the running "
+            f"server was not touched. Update the server code first (Branch field, then Update server "
+            f"with the Tools branch set back to '{DEFAULT_TOOLS_BRANCH}'), then ask for that branch again.")
+
+    def _ctl_publishes(self, option: str) -> bool:
+        """Whether `server_ctl.py update --help` lists `option`. False when it cannot be asked."""
+        if not self.is_cloned:
+            return False
+        try:
+            done = subprocess.run(
+                [self.python, self.script_path, "update", "--help"], cwd=self.install_dir,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+                **_subprocess_kwargs())
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return done.returncode == 0 and option in done.stdout
+
+    @staticmethod
+    def _explain_native_update_error(message: str, asked_tools_branch: bool) -> str:
+        """Say what state the server is in, which the bare message of server_ctl.py does not.
+
+        The server refuses a tools-branch switch (dirty tree, diverged branch,
+        unknown branch...) before it stops anything, so a refusal means the old
+        server is still serving. The one error that says the opposite is its
+        failed relaunch. Any other message is passed on untouched: its timing
+        is not known.
+        """
+        if "old native server was stopped" in message:
+            return (message + "\n\nThe previous server was stopped and the new one is not running: "
+                              "nothing is serving now.")
+        refused = message.startswith(("Tools checkout ", "--tools-branch ", "--tools-url "))
+        if asked_tools_branch and refused:
+            return message + "\n\nNothing was changed and the server that was running is still running."
+        return message
 
     def down(self, progress_cb=None) -> dict:
-        return self.run_ctl(["down"], progress_cb)
+        return self.run_ctl(["down"] + self._native_args(), progress_cb)
 
     def stop_detached(self) -> bool:
         """Ask docker to stop the container and return IMMEDIATELY.
@@ -697,7 +1040,7 @@ class LocalServerDeployment:
         if not self.is_cloned:
             return False
         try:
-            command = [self.python, self.script_path, "down"]
+            command = [self.python, self.script_path, "down"] + self._native_args()
         except DeploymentError:
             return False
 
@@ -721,7 +1064,7 @@ class LocalServerDeployment:
         return True
 
     def logs(self, lines: int = 200, progress_cb=None) -> dict:
-        return self.run_ctl(["logs", "-n", str(lines)], progress_cb)
+        return self.run_ctl(["logs"] + self._native_args() + ["-n", str(lines)], progress_cb)
 
     def token(self, progress_cb=None) -> str:
         return self.run_ctl(["token"], progress_cb)["token"]
