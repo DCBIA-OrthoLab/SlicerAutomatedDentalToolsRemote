@@ -1851,6 +1851,39 @@ same deployment object the panel uses: `start()` never passes a port or a bind
 (the install remembers both, which keeps a port chosen with "Try another port"),
 and it never changes which server the modules use unless the caller asks.
 
+### One launch at a time, and a taken port is a state with a way out
+
+On a Mac the user saw "port 8000 is in use, the server cannot start" while the only
+program on the port was VISOR Local itself. The cause was two launches racing
+(the install's `up` waiting for `/health` while a tool panel's automatic start
+saw the saved local address silent and launched another), and the server's raw
+error shown as it was. Three rules now:
+
+- **One launch at a time.** `gate.begin_local_work()` / `end_local_work()` mark an
+  install, a start, an update or a stop running in the SlicerCloud panel (every
+  exit, including a failure and Cancel, ends the mark), and the automatic start
+  waits for it (`gate.wait_for_idle`), then goes through
+  `LocalServerDeployment.ensure_up()`: a running server is reported, never
+  relaunched; one that is starting (a process, `/health` silent) is **waited for**
+  with a "VISOR Local is starting..." message, up to a timeout, never launched a
+  second time; only otherwise is `up` run. The native install's last step uses
+  `ensure_up` too (Docker's plan, and so its argv, is unchanged). When the state is
+  `RUNNING` or `STARTING` the primary button is not an install: `onInstall()`
+  connects the tools (`onUseHere`) and returns, and `STARTING` offers "Use VISOR
+  Local". "Try another port" is the one call that still reaches `up`.
+- **A taken port is `PORT_TAKEN`.** `DeploymentError` carries `code`, `port` and
+  `owner` when the server's JSON error has `error_code: "port_in_use"`, `port` and
+  `port_owner` (`deploy.port_conflict` also recognises the sentence "Something is
+  already listening on port N" of an older server, with no owner). The panel stores
+  the conflict, refreshes, and then says what it means: if the status shows our own
+  server running or starting, "Port N is used by VISOR Local itself" with the
+  button that connects the tools; otherwise `PORT_TAKEN` with a sentence that
+  names the program when it is known and the "Try another port" button. The
+  raw `--port` text is never shown.
+- **No failure without its cause and its way out.** Any other failed install or
+  start shows its cause, then "The Log below has the details. Press Refresh to
+  check the state again."; the log pane is revealed, as for every failed job.
+
 ### Replacing a server the modules already use
 
 If the modules point at a remote server, starting or using the local one asks
