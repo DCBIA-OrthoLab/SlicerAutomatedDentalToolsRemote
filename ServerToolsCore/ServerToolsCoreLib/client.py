@@ -1092,6 +1092,13 @@ class ToolServerClient:
         return destination
 
     def _fetch_tools(self) -> dict:
+        # The placeholder host never resolves (see health()): asking would cost
+        # a DNS lookup per module and end in a raw network error instead of the
+        # one thing worth saying, that no server has been chosen yet.
+        if _never_resolves(self._server_url):
+            raise ServerToolError(
+                "No server is set. Choose one in Server Tools Settings, or set one up on this "
+                "computer with Slicer Cloud.")
         try:
             response = self._session.get(
                 f"{self._server_url}/tools", timeout=_TOOLS_FETCH_TIMEOUT, verify=tls.ca_bundle()

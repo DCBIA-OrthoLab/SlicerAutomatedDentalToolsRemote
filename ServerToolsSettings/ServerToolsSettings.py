@@ -67,7 +67,10 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
 
         self.urlEdit = qt.QLineEdit()
         self.urlEdit.setToolTip(_("https:// only, with a publicly-signed certificate, e.g. "
-                                  "https://name.tailnet.ts.net or https://tools.example.org"))
+                                  "https://name.tailnet.ts.net or https://tools.example.org. "
+                                  "The one exception is the server Slicer Cloud runs on this "
+                                  "computer (https://127.0.0.1:<port>), which is checked against "
+                                  "the certificate Slicer Cloud made for it."))
         formLayout.addRow(design.required_label(_("Server URL")), self.urlEdit)
 
         self.tokenEdit = qt.QLineEdit()

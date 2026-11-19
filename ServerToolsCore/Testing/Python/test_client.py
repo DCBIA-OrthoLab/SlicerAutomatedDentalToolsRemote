@@ -187,6 +187,18 @@ class ToolServerClientTest(unittest.TestCase):
         with self.assertRaises(ServerToolError):
             self.client.list_tools()
 
+    @mock.patch("requests.Session.get")
+    def test_no_server_set_means_no_request_at_all(self, mock_get):
+        """The placeholder host (`.invalid`) never resolves: asking for the
+        tools there used to start a DNS lookup per module and show the raw
+        network error. It is now refused before any request, in words."""
+        client = ToolServerClient("https://set-your-server.invalid", "")
+        for call in (client.list_tools, lambda: client.get_tool_schema("example_tool")):
+            with self.assertRaises(ServerToolError) as caught:
+                call()
+            self.assertIn("No server is set", str(caught.exception))
+        mock_get.assert_not_called()
+
     # -- list_tool_data (server-side models/testfiles) -----------------
 
     @mock.patch("requests.Session.get")
