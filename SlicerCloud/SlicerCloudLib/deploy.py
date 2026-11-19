@@ -61,7 +61,7 @@ DEFAULT_TOOLS_BRANCH = "main"
 NO_LOCAL_TLS_MESSAGE = (
     "The server on this Mac is running, but it did not report that it serves HTTPS with the "
     "certificate SlicerCloud made for it, so nothing was saved: the extension only talks https. "
-    "Press 'Update server' to bring the server scripts up to date, then Refresh."
+    "Update the server code (the Update server button), then press Refresh."
 )
 
 NO_PUBLIC_URL_MESSAGE = (
@@ -292,6 +292,21 @@ def prefer_native() -> bool:
     return is_apple_silicon()
 
 
+def find_uv():
+    """Where `uv` is, or None. Same places as `find_uv()` in the server's
+    native_tools.py, which is what will look for it once the server starts: the
+    answer has to be the same before the clone exists as after. A GUI
+    application does not inherit the shell's PATH, and uv's own installer puts
+    it in ~/.local/bin."""
+    found = os.environ.get("UV") or shutil.which("uv")
+    if found:
+        return found
+    for candidate in (os.path.expanduser("~/.local/bin/uv"), "/opt/homebrew/bin/uv", "/usr/local/bin/uv"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def probe_host(native: bool = False) -> dict:
     """The prerequisites, answered without a clone.
 
@@ -336,7 +351,7 @@ def probe_host(native: bool = False) -> dict:
         devices, _err = version(["docker", "info", "--format", "{{json .DiscoveredDevices}}"])
         cdi = _has_nvidia_cdi_device(devices)
 
-    return {
+    probed = {
         "native": bool(native),
         "git": {"available": bool(git_version), "version": git_version},
         "docker": {
@@ -358,6 +373,12 @@ def probe_host(native: bool = False) -> dict:
             "gpu_access": "runtime" if runtime else ("cdi" if cdi else None),
         },
     }
+    if native:
+        # The one prerequisite of the native backend that the server only
+        # reports once it is cloned, and it used to be found missing after two
+        # clones: the server's own check (`uv is not installed`) ran last.
+        probed["uv"] = find_uv()
+    return probed
 
 
 def local_client_url(result):
@@ -423,6 +444,45 @@ def client_url(result):
         if not tls.is_loopback(urlsplit(url).hostname):
             return url
     return local_client_url(result)
+
+
+def describe_update(result) -> str:
+    """One sentence saying what an `update` did, for either backend's result.
+
+    The two answer differently: Docker reports `pulled`/`recreated`, the native
+    server `pulled`, `tools_pulled`, `venvs` (one entry per tool environment,
+    `action` "built" when it was rebuilt) and `restarted`. Reading only the
+    Docker keys made a native update that had pulled the tools and relaunched
+    the server say "nothing to do".
+    """
+    result = result or {}
+    clone = result.get("clone") or {}
+    rebuilt = sum(1 for entry in (result.get("venvs") or [])
+                  if isinstance(entry, dict) and entry.get("action") == "built")
+    relaunched = bool(result.get("restarted") or result.get("recreated"))
+    # A Docker update always relaunches after a pull and has no `restarted` key.
+    if result.get("pulled") and "restarted" not in result:
+        relaunched = True
+    changes = []
+    if result.get("pulled"):
+        changes.append(f"Updated to {clone.get('commit') or 'the latest commit'}")
+        if result.get("tools_pulled"):
+            changes[0] += " and the tools"
+    elif result.get("tools_pulled"):
+        changes.append("Tools updated")
+    if rebuilt:
+        changes.append(f"{rebuilt} tool environment(s) rebuilt")
+    if not changes:
+        if not relaunched:
+            return "Already up to date and running, nothing to do."
+        what = "the container" if result.get("recreated") else "the server"
+        return f"Already up to date; {what} was relaunched."
+    sentence = "; ".join(changes)
+    if not relaunched:
+        return sentence + "."
+    if result.get("pulled") and not result.get("tools_pulled") and not rebuilt:
+        return sentence + " and relaunched."
+    return sentence + "; the server was relaunched."
 
 
 def tool_names(payload):
@@ -517,7 +577,20 @@ class LocalServerDeployment:
             except OSError:
                 pass
 
-    def _spawn(self, command, progress_cb=None, cwd=None):
+    def _ctl_env(self) -> dict:
+        """The environment for every `server_ctl.py` this deployment starts: the
+        one Slicer must hand to subprocesses, plus the backend NAMED.
+
+        server_ctl.py chooses the native backend by itself on any macOS when it
+        is not told, while this client keeps an Intel Mac on Docker; left
+        implicit the two disagree. $VISOR_BACKEND is read by the script already,
+        so saying it changes no contract and makes the client's choice final.
+        """
+        env = dict(_SUBPROCESS_ENV if _SUBPROCESS_ENV is not None else os.environ)
+        env["VISOR_BACKEND"] = "native" if self.native else "docker"
+        return env
+
+    def _spawn(self, command, progress_cb=None, cwd=None, env=None):
         """Run `command`, streaming stderr to `progress_cb`, returning (rc, stdout).
 
         stderr is drained by its own thread while this one reads stdout. Both
@@ -527,10 +600,13 @@ class LocalServerDeployment:
         """
         self._cancelled = False
         _emit(progress_cb, "$ " + " ".join(command))
+        kwargs = dict(_subprocess_kwargs())
+        if env is not None:
+            kwargs["env"] = env
         try:
             process = subprocess.Popen(
                 command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1, **_subprocess_kwargs()
+                text=True, bufsize=1, **kwargs
             )
         except OSError as exc:
             raise DeploymentError(f"Could not run {command[0]}: {exc}") from None
@@ -574,7 +650,7 @@ class LocalServerDeployment:
                 f"Use 'Install and start' first."
             )
         command = [self.python, self.script_path, "--json"] + list(args)
-        returncode, out = self._spawn(command, progress_cb, cwd=self.install_dir)
+        returncode, out = self._spawn(command, progress_cb, cwd=self.install_dir, env=self._ctl_env())
 
         if returncode != 0 and self.native and self._looks_like_missing_native():
             raise DeploymentError(self._no_native_message() + "\n\nTechnical detail:\n    "
@@ -990,11 +1066,13 @@ class LocalServerDeployment:
         """Whether `server_ctl.py update --help` lists `option`. False when it cannot be asked."""
         if not self.is_cloned:
             return False
+        kwargs = dict(_subprocess_kwargs())
+        kwargs["env"] = self._ctl_env()
         try:
             done = subprocess.run(
                 [self.python, self.script_path, "update", "--help"], cwd=self.install_dir,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
-                **_subprocess_kwargs())
+                **kwargs)
         except (OSError, subprocess.SubprocessError):
             return False
         return done.returncode == 0 and option in done.stdout
@@ -1045,6 +1123,7 @@ class LocalServerDeployment:
             return False
 
         kwargs = dict(_subprocess_kwargs())
+        kwargs["env"] = self._ctl_env()
         if os.name == "nt":
             # DETACHED_PROCESS: survives the parent, no console window.
             kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x00000008

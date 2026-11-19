@@ -960,6 +960,113 @@ class TestGpuSetup(PanelTestCase):
         self.assertIn("Install and start", widget.hintLabel.text)
 
 
+class MismatchFake(FakeDeployment):
+    """A clone that is cloned, healthy and running, but on another branch
+    than the form asks for: the case of every developer testing a branch."""
+
+    def status(self, check_remote=False, progress_cb=None):
+        status = FakeDeployment.status(self)
+        status.update({
+            "cloned": True, "service": "inference-cpu",
+            "clone": {"is_git_repo": True, "branch": "feat/x", "configured_branch": "main",
+                      "branch_mismatch": True, "behind": 0, "commit": "abc1234"},
+            "container": {"running": True, "state": "running"},
+            "server": {"url": "https://localhost:8000", "healthy": True},
+        })
+        return status
+
+
+class TestBranchMismatchStillPaintsEverything(PanelTestCase):
+    """`_renderStatus` used to return right after the clone row when the
+    branch differed, leaving the badge, the Stop button and the hint as they
+    were: precisely the state of anyone testing a non-default branch."""
+
+    def test_the_badge_the_rows_the_hint_and_stop_are_all_current(self):
+        SlicerCloud.LocalServerDeployment = MismatchFake
+        widget = self.panel()
+        self.assertEqual(widget._statusBadge.text, "Server: online")
+        self.assertIn("running", widget._statusRows["container"].text)
+        self.assertIn("answering", widget._statusRows["health"].text)
+        self.assertNotEqual(widget.hintLabel.text, "")
+        self.assertTrue(widget.stopButton.isEnabled())
+        self.assertIn("feat/x", widget._statusRows["clone"].text)
+
+    def test_the_hint_names_the_switch(self):
+        SlicerCloud.LocalServerDeployment = MismatchFake
+        widget = self.panel()
+        self.assertIn("feat/x", widget.hintLabel.text)
+
+
+class TestUpdateSummary(PanelTestCase):
+    """What an update says it did, for the result each backend returns."""
+
+    def update(self, result):
+        class Upd(FakeDeployment):
+            def update(self, progress_cb=None, force=False, bind=None):
+                return dict(result)
+        SlicerCloud.LocalServerDeployment = Upd
+        widget = self.panel()
+        widget.onUpdate()
+        return "\n".join(widget.logView.lines)
+
+    def test_a_native_update_that_only_pulled_the_tools_is_not_nothing(self):
+        logged = self.update({"pulled": False, "tools_pulled": True, "venvs": [],
+                              "restarted": True, "healthy": True, "clone": {}})
+        self.assertNotIn("nothing to do", logged)
+        self.assertIn("tools", logged.lower())
+        self.assertIn("relaunched", logged)
+
+    def test_rebuilt_environments_are_counted(self):
+        logged = self.update({"pulled": False, "tools_pulled": False, "healthy": True,
+                              "venvs": [{"tool": "ALI", "action": "built"},
+                                        {"tool": "AREG", "action": "built"},
+                                        {"tool": "CNE", "action": "unchanged"}],
+                              "restarted": True, "clone": {}})
+        self.assertNotIn("nothing to do", logged)
+        self.assertIn("2 tool environment(s)", logged)
+
+    def test_a_native_update_with_nothing_new_says_so(self):
+        logged = self.update({"pulled": False, "tools_pulled": False, "venvs": [],
+                              "restarted": False, "healthy": True, "clone": {}})
+        self.assertIn("nothing to do", logged)
+
+    def test_the_docker_summaries_are_unchanged(self):
+        self.assertIn("Updated to abc and relaunched",
+                      self.update({"pulled": True, "recreated": True, "clone": {"commit": "abc"}}))
+        self.assertIn("the container was relaunched",
+                      self.update({"pulled": False, "recreated": True, "clone": {}}))
+        self.assertIn("nothing to do", self.update({"pulled": False, "recreated": False, "clone": {}}))
+
+
+class UvMissingFake(NativeFake):
+    """A Mac with Apple silicon that has no uv: the probe before the clone says so."""
+
+    def status(self, check_remote=False, progress_cb=None):
+        status = NativeFake.status(self)
+        status["uv"] = None
+        return status
+
+
+class TestUvIsCheckedBeforeAnythingIsCloned(PanelTestCase):
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        mock.patch.object(SlicerCloud.deploy, "is_apple_silicon", return_value=True).start()
+        self.addCleanup(mock.patch.stopall)
+        SlicerCloud.LocalServerDeployment = UvMissingFake
+
+    def test_install_stops_with_the_remedy_and_runs_no_job(self):
+        widget = self.panel()
+        widget.onInstall()
+        self.assertEqual(widget.deployment().calls, [])
+        self.assertEqual(len(DIALOGS["error"]), 1)
+        self.assertIn("uv", DIALOGS["error"][0])
+        self.assertIn("astral.sh/uv", DIALOGS["error"][0])
+
+    def test_the_hint_says_it_before_the_press(self):
+        widget = self.panel()
+        self.assertIn("uv", widget.hintLabel.text)
+
+
 if __name__ == "__main__":
     unittest.main()
 

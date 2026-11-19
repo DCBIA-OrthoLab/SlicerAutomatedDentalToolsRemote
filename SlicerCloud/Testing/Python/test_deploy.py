@@ -1069,3 +1069,92 @@ class TestBranchSwitches(GitCase):
     def test_a_missing_clone_has_nothing_to_switch(self):
         shutil.rmtree(self.install_dir)
         self.assertEqual(self.native(branch="mac").pending_branch_switches(), [])
+
+
+class TestTheBackendIsNamedToTheServer(TempInstallDir):
+    """server_ctl.py picks the native backend by itself on every darwin, while
+    this client keeps an Intel Mac on Docker. The client's choice is therefore
+    stated in the environment of every server_ctl.py it starts
+    ($VISOR_BACKEND, which the script already reads), so both always agree."""
+
+    def tearDown(self):
+        deploy.set_subprocess_env(None)
+        super().tearDown()
+
+    def backend_seen_by_ctl(self, **kwargs):
+        _write_fake_ctl(self.install_dir, (
+            "import os\n"
+            "print(json.dumps({'backend': os.environ.get('VISOR_BACKEND')}))\n"))
+        return self.deployment(**kwargs).run_ctl(["status"])["backend"]
+
+    def test_a_docker_deployment_says_docker(self):
+        self.assertEqual(self.backend_seen_by_ctl(native=False), "docker")
+
+    def test_a_native_deployment_says_native(self):
+        self.assertEqual(self.backend_seen_by_ctl(native=True), "native")
+
+    def test_it_overrides_whatever_the_environment_already_had(self):
+        deploy.set_subprocess_env({"PATH": os.environ.get("PATH", ""), "VISOR_BACKEND": "native"})
+        self.assertEqual(self.backend_seen_by_ctl(native=False), "docker")
+
+    def test_an_intel_mac_is_docker_all_the_way_to_the_server(self):
+        with mock.patch.object(deploy.sys, "platform", "darwin"), \
+                mock.patch.object(deploy.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(deploy, "is_apple_silicon", return_value=False):
+            self.assertEqual(self.backend_seen_by_ctl(), "docker")
+
+    def test_the_configured_environment_is_kept(self):
+        _write_fake_ctl(self.install_dir, (
+            "import os\n"
+            "print(json.dumps({'marker': os.environ.get('SLICERCLOUD_TEST_MARKER')}))\n"))
+        deploy.set_subprocess_env({"PATH": os.environ.get("PATH", ""),
+                                   "SLICERCLOUD_TEST_MARKER": "kept"})
+        self.assertEqual(self.deployment(native=False).run_ctl(["status"])["marker"], "kept")
+
+    def test_the_stop_on_exit_command_carries_it_too(self):
+        _write_fake_ctl(self.install_dir, "print('{}')\n")
+        with mock.patch.object(deploy.subprocess, "Popen") as popen:
+            self.deployment(native=False).stop_detached()
+        self.assertEqual(popen.call_args[1]["env"]["VISOR_BACKEND"], "docker")
+
+
+class TestNativePrerequisitesBeforeTheClone(NativeCase):
+    def probe(self, uv):
+        shutil.rmtree(os.path.join(self.install_dir, "scripts"), ignore_errors=True)
+        with mock.patch.object(deploy.subprocess, "run", return_value=deploy.subprocess.CompletedProcess(
+                [], 0, "git version 2.50\n", "")), \
+                mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/x"), \
+                mock.patch.object(deploy, "find_uv", return_value=uv):
+            return self.native().status()
+
+    def test_uv_is_reported_before_anything_is_cloned(self):
+        self.assertIsNone(self.probe(None)["uv"])
+        self.assertEqual(self.probe("/opt/homebrew/bin/uv")["uv"], "/opt/homebrew/bin/uv")
+
+    def test_find_uv_looks_where_a_gui_application_does_not_have_on_its_path(self):
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(home, ".local", "bin"))
+        uv = os.path.join(home, ".local", "bin", "uv")
+        with open(uv, "w") as handle:
+            handle.write("#!/bin/sh\n")
+        os.chmod(uv, 0o755)
+        with mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}, clear=False), \
+                mock.patch.object(deploy.shutil, "which", return_value=None), \
+                mock.patch.dict(os.environ, {"UV": ""}):
+            self.assertEqual(deploy.find_uv(), uv)
+
+
+class TestDescribeUpdate(unittest.TestCase):
+    def test_what_each_backend_did(self):
+        d = deploy.describe_update
+        self.assertEqual(d({"pulled": True, "clone": {"commit": "abc"}}), "Updated to abc and relaunched.")
+        self.assertEqual(d({"recreated": True}), "Already up to date; the container was relaunched.")
+        self.assertEqual(d({}), "Already up to date and running, nothing to do.")
+        self.assertEqual(d({"tools_pulled": True, "restarted": True}),
+                         "Tools updated; the server was relaunched.")
+        self.assertEqual(d({"pulled": True, "tools_pulled": True, "restarted": True,
+                            "clone": {"commit": "abc"}}),
+                         "Updated to abc and the tools; the server was relaunched.")
+        self.assertEqual(d({"restarted": True}), "Already up to date; the server was relaunched.")
+        self.assertEqual(d({"venvs": [{"action": "built"}], "restarted": True}),
+                         "1 tool environment(s) rebuilt; the server was relaunched.")

@@ -874,6 +874,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if self._lastStatus is not None and not native and not docker.get("daemon"):
             self._offerDockerInstall(docker)
             return
+        if native and self._uvMissing(self._lastStatus):
+            slicer.util.errorDisplay(plain_text(self._uvMessage()))
+            return
         switches = self._allowBranchSwitches(deployment)
         if switches is None:
             return
@@ -929,6 +932,22 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
             self.onRefresh()
 
         self._startJob(_("Installing and starting the server"), task, done)
+
+    @staticmethod
+    def _uvMissing(status) -> bool:
+        """The native backend builds its Python environments with uv. Only an
+        explicit `uv: null` in the status counts: a server that predates the
+        key must not be reported as missing it."""
+        return bool(status) and "uv" in status and not status["uv"]
+
+    @staticmethod
+    def _uvMessage() -> str:
+        return _(
+            "uv is not installed. It builds the server's and the tools' Python environments, "
+            "and nothing has been downloaded yet.\n\n"
+            "Install it from https://docs.astral.sh/uv/ (in a terminal: "
+            "curl -LsSf https://astral.sh/uv/install.sh | sh), then press the button again."
+        )
 
     def _offerDockerInstall(self, docker: dict) -> None:
         """Docker is missing or unusable. Offer to fix it, or say exactly how.
@@ -1076,13 +1095,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         def done(result):
             self._reportBranchSwitches(deployment, switches)
-            clone = result.get("clone") or {}
-            if result.get("pulled"):
-                summary = _("Updated to {0} and relaunched.").format(clone.get("commit") or _("the latest commit"))
-            elif result.get("recreated"):
-                summary = _("Already up to date; the container was relaunched.")
-            else:
-                summary = _("Already up to date and running — nothing to do.")
+            summary = _(deploy.describe_update(result))
             self._log(summary)
             slicer.util.showStatusMessage(summary, 5000)
             if native and result.get("restarted") and not result.get("healthy"):
@@ -1244,15 +1257,15 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                     "on '{0}', but this deployment asks for '{1}' — press 'Update server' "
                     "to switch it"
                 ).format(clone.get("branch"), clone.get("configured_branch")))
-                return
-            behind = clone.get("behind") or 0
-            text = _("{0} at {1} — ").format(clone.get("branch"), clone.get("commit"))
-            text += _("{0} commit(s) behind, press Update").format(behind) if behind else _("up to date")
-            if not clone.get("checked_remote"):
-                text += _(" (as of the last fetch)")
-            if clone.get("dirty"):
-                text += _(" [local changes]")
-            paint("clone", not behind, text)
+            else:
+                behind = clone.get("behind") or 0
+                text = _("{0} at {1}, ").format(clone.get("branch"), clone.get("commit"))
+                text += _("{0} commit(s) behind, press Update").format(behind) if behind else _("up to date")
+                if not clone.get("checked_remote"):
+                    text += _(" (as of the last fetch)")
+                if clone.get("dirty"):
+                    text += _(" [local changes]")
+                paint("clone", not behind, text)
 
         container = status.get("container", {})
         paint("container", container.get("running"),
@@ -1308,6 +1321,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def _nextNativeStep(self, status: dict) -> str:
         """`_nextStep` for the server that runs directly on this Mac."""
+        if self._uvMissing(status):
+            return _("uv is missing: it builds the tools' Python environments. Install it from "
+                     "https://docs.astral.sh/uv/ first, then press 'Install and start'.")
         if not status.get("cloned") or not (status.get("tools") or {}).get("present", False):
             return _("Nothing installed yet. Press 'Install and start' to download the server and "
                      "the tools and start it. The first time takes a while and several GB of disk.")
